@@ -1,6 +1,6 @@
 # Kimi Code
 
-Verified on 2026-09-17 with Kimi Code CLI 2.0.0; workspace trust re-verified on 2026-09-19 against the same version.
+Verified on 2026-09-17 with Kimi Code CLI 2.0.0; workspace trust re-verified on 2026-09-19 against 2.0.1 with the single-record helper.
 
 ## Operating facts
 

@@ -510,7 +510,7 @@ The composer-classification record below observes the same gate from the other s
 
 ## Kimi workspace trust
 
-Verified 2026-09-19 on Kimi Code CLI 2.0.0, Linux x86_64, tmux 3.7c.
+Verified 2026-09-19 on Kimi Code CLI 2.0.1, Linux x86_64, tmux 3.7c.
 Kimi gates every folder it has not trusted behind a `Trust this folder?` dialog before it creates a session, and no launch flag suppresses it.
 
 ```sh
@@ -519,7 +519,7 @@ kimi --help | grep -ci trust
 ```
 
 ```
-2.0.0
+2.0.1
 0
 ```
 
@@ -552,12 +552,12 @@ FM_KIMI_TRUST_LIVE=1 tests/fm-kimi-trust-live-e2e.test.sh
 ```
 
 ```
-ok - control arm: kimi 2.0.0 parks an unregistered fresh worktree on the folder-trust dialog
+ok - control arm: kimi 2.0.1 parks an unregistered fresh worktree on the folder-trust dialog
 ok - control arm: declining the dialog exits kimi and records nothing
-ok - treatment arm: the helper registered /home/bemsas/.kimi-code/workspace-trust/wd_treatment_7d4692b273d0
-ok - treatment arm: kimi 2.0.0 launched the pre-registered worktree straight to a ready composer
+ok - treatment arm: the helper registered /home/bemsas/.kimi-code/workspace-trust/wd_treatment_d30df9eeebe6
+ok - treatment arm: kimi 2.0.1 launched the pre-registered worktree straight to a ready composer
 ok - treatment arm: the brief pointer was delivered (after 1 re-submitted Enter)
-ok - treatment arm: kimi 2.0.0 reached its brief and ran it in the pre-registered worktree with no key pressed on its behalf
+ok - treatment arm: kimi 2.0.1 reached its brief and ran it in the pre-registered worktree with no key pressed on its behalf
 ok - treatment arm: /exit stopped the kimi process
 ok - cleanup: the lab record was removed from /home/bemsas/.kimi-code/workspace-trust and verified absent
 ```
@@ -568,6 +568,7 @@ The one re-submitted Enter is Kimi swallowing a keypress inside its startup wind
 Three limitations belong beside that result.
 The guard writes into the operator's real store, because Kimi's credentials live in the same home and staging a throwaway `KIMI_CODE_HOME` would only reach a login prompt; it touches `workspace-trust/` alone, refuses to start when a record for either lab worktree already exists, removes only the record it created, and verifies it is gone, while Kimi's own session artifacts for the treatment run stay where Kimi puts them.
 `bin/fm-spawn.sh` does not forward `KIMI_CODE_HOME` onto the launch the way it forwards `CLAUDE_CONFIG_DIR`, so a pane whose shell carries a different value reads a different store and meets the dialog; the spawn's live answer remains the backstop for that case, and its diagnostic now names both trust causes, the unhonoured record and the different store, instead of asserting one.
+Kimi 2.0.1 launched with `KIMI_CODE_HOME` exported empty does not fall back to the default home but exits at startup with `error: failed to start shell: ENOENT: no such file or directory, mkdir ''` before any dialog, so the guard must run with the variable unset, and the unit suites that set it empty never launch a real kimi.
 No kimi secondmate home is registered, because `bin/fm-kimi-trust.sh` has only the worktree shape; a kimi secondmate therefore still meets the dialog and still depends on the spawn's live backstop, and closing that gap needs a `--secondmate-home` mode like the claude helper's rather than a widening of the worktree scope test.
 
 ## Codex hook trust
