@@ -825,11 +825,15 @@ test_kimi_stuck_trust_dialog_fails_before_delivery() {
   [ ! -s "$CASE_DIR/pointer.log" ] || fail "Kimi pointer was sent through a stuck trust dialog"
   assert_grep 'failed: kimi trust dialog did not clear' "$HOME_DIR/state/$id.status" \
     "stuck Kimi trust dialog did not leave a supervisor-visible failure"
-  # The worktree was pre-registered before launch, so a dialog on screen means
-  # Kimi ignored its own record; the diagnostic must say that rather than let
-  # the next reader conclude delivery dropped.
+  # The worktree was pre-registered before launch, so a dialog on screen is a
+  # trust failure; the diagnostic must say so, and must name both causes rather
+  # than let the next reader conclude delivery dropped or chase the wrong one.
   assert_contains "$out" "pre-registered in Kimi's trust store" \
-    "a trust dialog on a pre-registered worktree was not reported as Kimi ignoring its record"
+    "a trust dialog on a pre-registered worktree was not reported as a trust failure"
+  assert_contains "$out" "did not honour that record" \
+    "the trust diagnostic did not offer the unhonoured-record cause"
+  assert_contains "$out" "read a different store" \
+    "the trust diagnostic did not offer the different-store cause"
   pass "fm-spawn: a Kimi trust dialog must visibly clear before brief delivery"
 }
 

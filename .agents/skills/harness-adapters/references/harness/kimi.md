@@ -14,7 +14,7 @@ Verified on 2026-09-17 with Kimi Code CLI 2.0.0; workspace trust re-verified on 
 | Interrupt | Single Escape, which prints `Interrupted by user`. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; Firstmate skills are discovered. |
 | Autonomy | `--auto` is the `Never Ask` tier; `-y` and `--yolo` now select the distinct, weaker `Ask When Needed` tier and are not used. |
-| Trust dialog | A fresh worktree shows `Trust this folder?` with `Trust this folder` pre-selected, whether or not the folder has any project MCP configuration, because Kimi trusts each exact root separately and never inherits trust from a parent; `../../../bin/fm-spawn.sh` pre-registers every crewmate or scout worktree in Kimi's own per-root store `~/.kimi-code/workspace-trust/` through `../../../bin/fm-kimi-trust.sh` before launch and refuses the spawn when that fails, so the dialog does not render; the live answer described under Readiness-gated start remains the backstop for a dialog that renders anyway, and its diagnostic then says the record was not honoured rather than that delivery dropped. |
+| Trust dialog | A fresh worktree shows `Trust this folder?` with `Trust this folder` pre-selected, whether or not the folder has any project MCP configuration, because Kimi trusts each exact root separately and never inherits trust from a parent; `../../../bin/fm-spawn.sh` pre-registers every crewmate or scout worktree in Kimi's own per-root store `~/.kimi-code/workspace-trust/` through `../../../bin/fm-kimi-trust.sh` before launch and refuses the spawn when that fails, so the dialog does not render; the live answer described under Readiness-gated start remains the backstop for a dialog that renders anyway, and its diagnostic then names the two trust causes - the record was not honoured, or the pane read a different store - rather than reporting a delivery drop. |
 | Slash submission | One Enter submits, with no popup swallow or settle hazard. |
 | Environment marker | None; identity comes from process ancestry command name `kimi`, which `../../../bin/fm-harness.sh` keeps a retained foreign marker from overriding. |
 | Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
@@ -45,10 +45,11 @@ The delivery-only spinner match covers the full moon-phase glyph set but remains
 ## Workspace trust
 
 Kimi trusts each exact working directory separately: the lookup hashes the pane's physical working directory and never walks ancestors, so the captain's already trusted home did nothing for the worktrees beneath it and every task worktree needs its own record.
-The store is `${KIMI_CODE_HOME:-$HOME/.kimi-code}/workspace-trust/`, one `wd_<slug>_<hash>` file per trusted root, and `../../../bin/fm-kimi-trust.sh`'s header is the one owner of the name derivation, the record body, the modes, the refusal set, and why it has no secondmate-home mode.
+The store is `${KIMI_CODE_HOME:-$HOME/.kimi-code}/workspace-trust/`, one `wd_<slug>_<hash>` file per trusted root, and `../../../bin/fm-kimi-trust.sh`'s header is the one owner of the name derivation, the record body, the modes, and the refusal set.
 `../../../bin/fm-spawn.sh` calls it for every crewmate or scout kimi launch at the same point it pre-registers claude trust, and a failed registration refuses the spawn rather than launching a worker that would wedge.
 No launch flag suppresses the dialog: `kimi --help` lists none, and `--auto` is a permission tier.
 The spawn does not forward `KIMI_CODE_HOME` onto the launch, so a pane whose shell carries a different value reads a different store and meets the dialog; the live backstop then answers it.
+A kimi secondmate is not pre-registered: the helper has only the worktree shape, so such a pane still meets the dialog and still depends on that live backstop, and closing the gap needs a `--secondmate-home` mode like the claude helper's.
 `../../../tests/fm-kimi-trust-live-e2e.test.sh` (`FM_KIMI_TRUST_LIVE=1`) is the guard that refreshes this fact against the installed Kimi: an unregistered fresh worktree must park on the dialog and a pre-registered one must reach its brief.
 
 ## Crew turn-end hook and primary limit

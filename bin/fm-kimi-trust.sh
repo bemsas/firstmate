@@ -50,10 +50,10 @@
 # working directory; it never walks ancestors. /home/bemsas being trusted did
 # nothing for a worktree beneath it, which is why every worktree needs its own
 # record. The root Kimi hashes is the TUI's process.cwd(), which on Linux and
-# macOS is the pane's physical path, so the resolved worktree path is what
-# matters; the logical path is registered too when it differs, the same
-# defense in depth bin/fm-agy-trust.sh applies, because a second record for a
-# path nothing looks up costs nothing and a missed one costs the spawn.
+# macOS is the pane's physical path, so the resolved worktree path is the only
+# root registered here: exactly one record per spawn, for the one key Kimi
+# looks up. A worktree reached through a symlink is resolved first and gets
+# that same single record.
 #
 # PRESERVATION IS STRUCTURAL. The store is one file per root, so this never
 # reads, re-serialises, or renames over any record but the worktree's own:
@@ -75,15 +75,16 @@
 # never a silent skip. Only the launching user's own store is written and its
 # directory must be one this uid owns.
 #
-# SECONDMATE HOMES ARE DELIBERATELY OUT OF SCOPE. bin/fm-claude-trust.sh has a
-# --secondmate-home mode because claude runs secondmates. Kimi does not, in
-# practice: docs/supervision-protocols/ carries no kimi wake protocol, the
-# harness reference records Kimi as outside the primary turn-end guard scope,
-# and bin/fm-spawn.sh skips even Kimi's turn-end hook for a secondmate kind.
-# A home mode here would be one nobody can launch into, so this script has only
-# the worktree shape and the spawn wires it for crewmates and scouts. If a kimi
-# secondmate is ever verified as a primary, its home needs a seed-evidence mode
-# like claude's, not a widening of this scope test.
+# SECONDMATE HOMES ARE OUT OF SCOPE, AND THAT IS A GAP, NOT A PROOF. This
+# helper covers crewmate and scout launches only: it has the worktree shape and
+# nothing else, and bin/fm-spawn.sh calls it for those two kinds. A kimi
+# SECONDMATE is a supported launch and its home is NOT pre-registered, so such a
+# pane still meets the folder-trust dialog and still depends entirely on the
+# live Enter in kimi_wait_for_ready - the backstop three consecutive dispatches
+# showed firstmate cannot rely on. Closing that gap means a --secondmate-home
+# mode like bin/fm-claude-trust.sh's, whose seed evidence proves the home is the
+# one the spawn is about to launch into; it is not a widening of this scope
+# test.
 #
 # KIMI_CODE_HOME. This honours it because Kimi does, but unlike CLAUDE_CONFIG_DIR
 # bin/fm-spawn.sh does not forward it onto the launch: the pane's own shell
@@ -120,7 +121,6 @@ PROJ_ARG=$2
 refuse() { echo "error: refusing to pre-register Kimi trust: $1" >&2; exit 1; }
 
 real_dir() { (cd -P -- "$1" 2>/dev/null && pwd -P); }
-logical_dir() { (cd -- "$1" 2>/dev/null && pwd -L); }
 
 # The resolved common dir of a git worktree, or empty. --git-common-dir can be
 # relative, so it is resolved from inside the worktree rather than joined here.
@@ -132,8 +132,6 @@ common_dir_of() {
 
 WT_REAL=$(real_dir "$WT_ARG") || true
 [ -n "$WT_REAL" ] || refuse "task worktree '$WT_ARG' is not an accessible directory"
-WT_LOGICAL=$(logical_dir "$WT_ARG") || true
-[ -n "$WT_LOGICAL" ] || WT_LOGICAL=$WT_REAL
 PROJ_REAL=$(real_dir "$PROJ_ARG") || true
 [ -n "$PROJ_REAL" ] || refuse "project '$PROJ_ARG' is not an accessible directory"
 
@@ -209,11 +207,11 @@ STORE_DIR_REAL=$(real_dir "$STORE_DIR") || true
 # stripped, lowercased only for Windows-shaped paths), slugifyWorkDirName and
 # encodeWorkDirKey. It must not be "simplified" into shell: the slug lowercases
 # and matches with JavaScript semantics over the same string Kimi sees.
-if ! node - "$STORE_DIR_REAL" "$WT_REAL" "$WT_LOGICAL" <<'NODE'
+if ! node - "$STORE_DIR_REAL" "$WT_REAL" <<'NODE'
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const [storeDir, ...wanted] = process.argv.slice(2);
+const [storeDir, wanted] = process.argv.slice(2);
 const MAX_WORKDIR_SLUG_LENGTH = 40;
 const WORKDIR_KEY_PREFIX = "wd_";
 const HASH_LENGTH = 12;
@@ -248,25 +246,26 @@ const decodes = (file) => {
   }
 };
 const uid = process.getuid();
-const roots = [...new Set(wanted.map(canonicalWorkspaceRoot))];
+const root = canonicalWorkspaceRoot(wanted);
 try {
-  for (const root of roots) {
-    const file = path.join(storeDir, encodeWorkDirKey(root));
-    let existing = null;
-    try {
-      existing = fs.lstatSync(file);
-    } catch (err) {
-      if (err.code !== "ENOENT") throw err;
-    }
-    if (existing !== null) {
-      if (existing.isSymbolicLink()) throw new Error(`${file} is a symlink; a Kimi trust record is a regular file`);
-      if (!existing.isFile()) throw new Error(`${file} is not a regular file`);
-      if (existing.uid !== uid) throw new Error(`${file} is not owned by this user`);
-      // A record that decodes is trust already, however old: leave it and its
-      // trustedAt alone. One that does not decode is what Kimi treats as
-      // untrusted and overwrites on an answered dialog, so it is replaced.
-      if (decodes(file)) continue;
-    }
+  const file = path.join(storeDir, encodeWorkDirKey(root));
+  let existing = null;
+  try {
+    existing = fs.lstatSync(file);
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
+  let write = true;
+  if (existing !== null) {
+    if (existing.isSymbolicLink()) throw new Error(`${file} is a symlink; a Kimi trust record is a regular file`);
+    if (!existing.isFile()) throw new Error(`${file} is not a regular file`);
+    if (existing.uid !== uid) throw new Error(`${file} is not owned by this user`);
+    // A record that decodes is trust already, however old: leave it and its
+    // trustedAt alone. One that does not decode is what Kimi treats as
+    // untrusted and overwrites on an answered dialog, so it is replaced.
+    write = !decodes(file);
+  }
+  if (write) {
     // Exclusive create under an unpredictable name, mode 0600 forced after the
     // open so the umask cannot widen it, then an atomic rename over the record.
     const unique = `${process.pid}.${crypto.randomBytes(8).toString("hex")}`;
@@ -291,8 +290,4 @@ then
   refuse "could not record trust for '$WT_REAL' in '$STORE_DIR_REAL'"
 fi
 
-if [ "$WT_LOGICAL" != "$WT_REAL" ]; then
-  echo "trusted: $WT_LOGICAL ($WT_REAL)"
-else
-  echo "trusted: $WT_REAL"
-fi
+echo "trusted: $WT_REAL"

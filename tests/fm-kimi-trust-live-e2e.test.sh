@@ -75,6 +75,7 @@ esac
 STORE="$KIMI_HOME/workspace-trust"
 
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-kimi-trust.XXXXXX") || fail "could not create the isolated lab"
+LAB=$(cd -P -- "$LAB" && pwd -P) || fail "could not resolve the isolated lab"
 trap cleanup EXIT
 PROJ="$LAB/project"
 mkdir -p "$PROJ"

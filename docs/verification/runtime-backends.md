@@ -567,8 +567,8 @@ The one re-submitted Enter is Kimi swallowing a keypress inside its startup wind
 
 Three limitations belong beside that result.
 The guard writes into the operator's real store, because Kimi's credentials live in the same home and staging a throwaway `KIMI_CODE_HOME` would only reach a login prompt; it touches `workspace-trust/` alone, refuses to start when a record for either lab worktree already exists, removes only the record it created, and verifies it is gone, while Kimi's own session artifacts for the treatment run stay where Kimi puts them.
-`bin/fm-spawn.sh` does not forward `KIMI_CODE_HOME` onto the launch the way it forwards `CLAUDE_CONFIG_DIR`, so a pane whose shell carries a different value reads a different store and meets the dialog; the spawn's live answer remains the backstop for that case, and its diagnostic now says the record was not honoured.
-No kimi secondmate home is registered, because no primary supervision protocol exists for Kimi and the helper deliberately has no home mode; `bin/fm-kimi-trust.sh`'s header owns that decision.
+`bin/fm-spawn.sh` does not forward `KIMI_CODE_HOME` onto the launch the way it forwards `CLAUDE_CONFIG_DIR`, so a pane whose shell carries a different value reads a different store and meets the dialog; the spawn's live answer remains the backstop for that case, and its diagnostic now names both trust causes, the unhonoured record and the different store, instead of asserting one.
+No kimi secondmate home is registered, because `bin/fm-kimi-trust.sh` has only the worktree shape; a kimi secondmate therefore still meets the dialog and still depends on the spawn's live backstop, and closing that gap needs a `--secondmate-home` mode like the claude helper's rather than a widening of the worktree scope test.
 
 ## Codex hook trust
 

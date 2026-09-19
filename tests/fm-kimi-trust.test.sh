@@ -242,10 +242,10 @@ test_symlinked_record_is_refused() {
   pass "fm-kimi-trust.sh: a symlink in the record's place is refused"
 }
 
-# Kimi hashes the pane's physical working directory, and bin/fm-agy-trust.sh's
-# reason applies here too: registering the logical path as well costs one
-# record nothing looks up, and missing one costs the spawn.
-test_symlinked_worktree_path_registers_both_forms() {
+# Kimi hashes the pane's physical working directory, so a worktree reached
+# through a symlink is resolved first and gets exactly one record - the one
+# Kimi looks up - and no second record under the unresolved path.
+test_symlinked_worktree_path_registers_the_resolved_root_only() {
   local rec out wt_real link
   rec=$(make_case symlinked-path)
   read_case "$rec"
@@ -254,10 +254,13 @@ test_symlinked_worktree_path_registers_both_forms() {
   ln -s "$WT" "$link"
   out=$(run_trust "$HOME_DIR" "$link" "$PROJ")
   expect_code 0 $? "a worktree reached through a symlink must be trusted: $out"
-  [ "$out" = "trusted: $link ($wt_real)" ] || fail "registration did not report both path forms: $out"
-  assert_record "$(record_for "$HOME_DIR" link "$link")" "$link" "the logical path was not recorded"
+  [ "$out" = "trusted: $wt_real" ] || fail "registration did not report the resolved path: $out"
   assert_record "$(record_for "$HOME_DIR" wt "$wt_real")" "$wt_real" "the resolved path was not recorded"
-  pass "fm-kimi-trust.sh: a symlinked worktree path is recorded in both its logical and resolved forms"
+  [ ! -e "$(record_for "$HOME_DIR" link "$link")" ] \
+    || fail "a second record was written for the unresolved path, which Kimi never looks up"
+  [ "$(find "$(store_of "$HOME_DIR")" -type f | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the store holds more than the one record this registration needs"
+  pass "fm-kimi-trust.sh: a symlinked worktree path records only the resolved root"
 }
 
 test_kimi_code_home_is_honoured_when_absolute() {
@@ -454,7 +457,7 @@ test_registration_is_idempotent
 test_unrelated_records_are_preserved
 test_corrupt_record_for_the_worktree_is_replaced
 test_symlinked_record_is_refused
-test_symlinked_worktree_path_registers_both_forms
+test_symlinked_worktree_path_registers_the_resolved_root_only
 test_kimi_code_home_is_honoured_when_absolute
 test_relative_kimi_code_home_is_refused
 test_primary_checkout_is_refused

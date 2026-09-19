@@ -306,8 +306,9 @@
 # the ordinary readiness gates can pass. A blank viewport read proves nothing
 # either way: it costs the poll and restarts that count. A viewport read that
 # fails outright fails readiness at once, and a dialog seen on a pre-registered
-# worktree is reported as Kimi not honouring its own record, never as a
-# delivery drop.
+# worktree is reported as a trust failure naming both of its causes - an
+# unhonoured record or a store the pane did not read - never as a delivery
+# drop.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
@@ -3395,13 +3396,14 @@ kimi_ready_signal_is_present() { # <plain-pane-capture>
 }
 
 # What the trust-dialog diagnostics append when the worktree was pre-registered
-# before launch (bin/fm-kimi-trust.sh). A dialog that renders anyway means Kimi
-# did not honour the record, which points at the store format rather than at
-# delivery, and the diagnostic has to say so: three consecutive dispatches were
-# once read as pointer drops because nothing named the dialog underneath.
+# before launch (bin/fm-kimi-trust.sh). A dialog that renders anyway is a trust
+# problem, not a delivery one - three consecutive dispatches were once read as
+# pointer drops because nothing named the dialog underneath - but it has two
+# causes and the diagnostic names both rather than sending the operator down
+# one: the record was not honoured, or the pane read a different store.
 kimi_trust_preregistered_note() {
   [ "$KIMI_TRUST_PREREGISTERED" -eq 1 ] || return 0
-  printf '%s' "; the worktree was pre-registered in Kimi's trust store before launch, so Kimi did not honour that record (check bin/fm-kimi-trust.sh against the installed Kimi's store format)"
+  printf '%s' "; the worktree was pre-registered in Kimi's trust store before launch, so either Kimi did not honour that record (check bin/fm-kimi-trust.sh against the installed Kimi's store format) or the pane read a different store because KIMI_CODE_HOME is not forwarded onto the launch"
 }
 
 kimi_wait_for_ready() {
@@ -3790,8 +3792,9 @@ fi
 # firstmate can rely on: the pane wedged on the dialog every time and every
 # failure read as a delivery drop. So a failed registration is fatal here, the
 # claude contract, and the post-launch gate (kimi_wait_for_ready) stays only
-# as the backstop. A secondmate kind gets no registration: kimi runs crewmates
-# and scouts only in practice, with no primary supervision protocol.
+# as the backstop. A secondmate kind gets no registration and so still depends
+# on that backstop: the helper has no secondmate-home mode yet, which its
+# header records as a gap rather than a decided scope.
 AGY_TRUST_PREREGISTERED=0
 KIMI_TRUST_PREREGISTERED=0
 case "$HARNESS" in
