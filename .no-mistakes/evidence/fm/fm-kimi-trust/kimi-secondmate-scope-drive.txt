@@ -1,0 +1,5 @@
+SECONDMATE_RC=1
+SECONDMATE_OUT<<<warning: secondmate drive-kimi-mate-1 sync skipped before launch: primary default-branch commit cannot be resolved
+error: kimi did not show a verified ready signal before brief delivery; inspect window firstmate:fm-drive-kimi-mate-1>>>
+TRUST STORE: absent (no record written for the secondmate home)
+ok - fm-spawn: a kimi secondmate spawn writes no trust record and its readiness failure is not mislabelled as a trust failure

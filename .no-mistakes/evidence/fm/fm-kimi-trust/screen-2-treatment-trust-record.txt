@@ -1,0 +1,3 @@
+record path: /home/bemsas/.kimi-code/workspace-trust/wd_treatment_4101a599444f
+record mode: 600
+record bytes: {"root":"/tmp/fm-kimi-shot.N2Y1PV/treatment","trustedAt":1789827937334}

@@ -1,0 +1,38 @@
+env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '/home/bemsas/.kimi-code/bin/kimi' --auto
+
+control control ❯ env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '/home/bemsas/.kimi-code/bin/kimi' --auto
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Trust this folder?
+  ↑↓ navigate · Enter select · Esc exit
+
+  /tmp/fm-kimi-shot.N2Y1PV/control
+
+  Project-level MCP servers are disabled until you explicitly choose Trust. Trust starts the listed project MCP
+  targets and remembers this folder.
+
+   ❯ Trust this folder
+     Enable project MCP servers. Remembered for this folder.
+
+     Don't trust
+     Exit Kimi Code. Asked again next launch.
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

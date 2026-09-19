@@ -1,0 +1,8 @@
+ok - control arm: kimi 2.0.1 parks an unregistered fresh worktree on the folder-trust dialog
+ok - control arm: declining the dialog exits kimi and records nothing
+ok - treatment arm: the helper registered /home/bemsas/.kimi-code/workspace-trust/wd_treatment_d18d929264f1
+ok - treatment arm: kimi 2.0.1 launched the pre-registered worktree straight to a ready composer
+ok - treatment arm: the brief pointer was delivered (after 1 re-submitted Enter)
+ok - treatment arm: kimi 2.0.1 reached its brief and ran it in the pre-registered worktree with no key pressed on its behalf
+ok - treatment arm: /exit stopped the kimi process
+ok - cleanup: the lab record was removed from /home/bemsas/.kimi-code/workspace-trust and verified absent

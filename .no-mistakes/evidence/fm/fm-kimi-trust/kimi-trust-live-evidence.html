@@ -1,0 +1,110 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Kimi folder-trust pre-registration — live evidence</title>
+<style>
+ *{box-sizing:border-box}
+ body{margin:0;padding:32px;background:#0f0e13;color:#d6d6dd;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+ h1{font-size:22px;margin:0 0 4px}
+ .lede{color:#9a99a6;font-size:14px;margin:0 0 28px;max-width:960px;line-height:1.5}
+ .panel{margin:0 0 28px;border:1px solid #2a2933;border-radius:10px;overflow:hidden;background:#15141b;min-width:0}
+ .panel h2{font-size:15px;margin:0;padding:12px 16px 4px}
+ .panel .sub{margin:0;padding:0 16px 12px;color:#9a99a6;font-size:13px;line-height:1.45}
+ .panel.bad h2{color:#ff8b92} .panel.good h2{color:#b8e986}
+ .term{margin:0;padding:14px 16px;background:#1c1b22;border-top:1px solid #2a2933;
+   font-family:ui-monospace,"JetBrains Mono",Menlo,monospace;font-size:11.5px;line-height:1.35;
+   white-space:pre;overflow-x:auto;min-width:0}
+ .rec{border:1px solid #2a2933;border-radius:10px;background:#15141b;padding:14px 16px;margin-bottom:28px}
+ .rec h2{font-size:15px;margin:0 0 8px;color:#ffcb6b}
+ .rec pre{margin:0;font-family:ui-monospace,monospace;font-size:12px;color:#a6e9ff;white-space:pre-wrap;word-break:break-all}
+</style></head><body>
+<h1>Kimi folder-trust pre-registration — live evidence</h1>
+<p class="lede">Installed Kimi Code 2.0.1, real tmux panes, two sibling linked worktrees of the same throwaway project. The only difference between panel 1 and panels 2-3 is that <code>bin/fm-kimi-trust.sh</code> wrote one trust record before launch.</p>
+<section class="panel bad">
+  <h2>1 · Control — worktree NOT pre-registered</h2>
+  <p class="sub">Kimi 2.0.1 parks on the folder-trust dialog. The brief pointer a spawn types next lands in front of this, never in a composer.</p>
+  <pre class="term">env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI &#x27;/home/bemsas/.kimi-code/bin/kimi&#x27; --auto
+&nbsp;
+control control ❯ env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI &#x27;/home/bemsas/.kimi-code/bin/kimi&#x27; --auto
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Trust this folder?
+  ↑↓ navigate · Enter select · Esc exit
+&nbsp;
+  /tmp/fm-kimi-shot.N2Y1PV/control
+&nbsp;
+  Project-level MCP servers are disabled until you explicitly choose Trust. Trust starts the listed project MCP
+  targets and remembers this folder.
+&nbsp;
+   ❯ Trust this folder
+     Enable project MCP servers. Remembered for this folder.
+&nbsp;
+     Don&#x27;t trust
+     Exit Kimi Code. Asked again next launch.
+&nbsp;
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</pre>
+</section>
+<div class="rec"><h2>The one record the helper wrote</h2><pre>record path: /home/bemsas/.kimi-code/workspace-trust/wd_treatment_4101a599444f
+record mode: 600
+record bytes: {&quot;root&quot;:&quot;/tmp/fm-kimi-shot.N2Y1PV/treatment&quot;,&quot;trustedAt&quot;:1789827937334}</pre></div>
+<section class="panel good">
+  <h2>2 · Treatment — bin/fm-kimi-trust.sh ran first</h2>
+  <p class="sub">Same Kimi, sibling worktree, one record written before launch: straight to a ready composer, no dialog.</p>
+  <pre class="term">treatment treatment ❯ env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI &#x27;/home/bemsas/.kimi-code/bin/kimi&#x27; --auto
+&nbsp;
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │                                                                                                                    │
+ │  ▐█▛█▛█▌  Welcome to Kimi Code!                                                                                    │
+ │  ▐█████▌  Send /help for help information.                                                                         │
+ │                                                                                                                    │
+ │  Directory: /tmp/fm-kimi-shot.N2Y1PV/treatment                                                                     │
+ │  Session:                                                                                                          │
+ │  Model:     K3                                                                                                     │
+ │  Version:   2.0.1                                                                                                  │
+ │                                                                                                                    │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+&nbsp;
+ ✦ Kimi Code Desktop is here — Everything you love about Kimi Code, now on desktop
+   Run /desktop or visit https://www.kimi.com/code to install
+&nbsp;
+   No session yet — one will be created on your first message.
+&nbsp;
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ &gt;                                                                                                                  │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ Never Ask  K3 thinking: high  /tmp/fm-kimi-shot.N2Y1PV/treatment  treatment
+                                                                                                     context: 0% (0/1M)</pre>
+</section>
+<section class="panel good">
+  <h2>3 · Treatment — brief delivered and executed</h2>
+  <p class="sub">The pointer reaches the composer, Kimi reads the brief and answers it. No key was pressed on its behalf.</p>
+  <pre class="term">treatment treatment ❯ env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI &#x27;/home/bemsas/.kimi-code/bin/kimi&#x27; --auto
+&nbsp;
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │                                                                                                                    │
+ │  ▐█▛█▛█▌  Welcome to Kimi Code!                                                                                    │
+ │  ▐█████▌  Send /help for help information.                                                                         │
+ │                                                                                                                    │
+ │  Directory: /tmp/fm-kimi-shot.N2Y1PV/treatment                                                                     │
+ │  Session:   session_2ed3dd64-2f57-4169-bb0a-10f9a09f088e                                                           │
+ │  Model:     K3                                                                                                     │
+ │  Version:   2.0.1                                                                                                  │
+ │                                                                                                                    │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+&nbsp;
+ ✦ Kimi Code Desktop is here — Everything you love about Kimi Code, now on desktop
+   Run /desktop or visit https://www.kimi.com/code to install
+&nbsp;
+   No session yet — one will be created on your first message.
+&nbsp;
+ ✨ Read the brief at /tmp/fm-kimi-shot.N2Y1PV/brief.md and follow it exactly.
+&nbsp;
+ ● Read the brief.
+&nbsp;
+ ● Used Read (/tmp/fm-kimi-shot.N2Y1PV/brief.md) · 1 line
+&nbsp;
+ ⠹ thinking…
+   12345 + 67890 = 80235.
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ &gt;                                                                                                                  │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ Never Ask  K3 thinking: high  /tmp/fm-kimi-shot.N2Y1PV/treatment  treatment  ctrl+o expand | /init: generate AGENTS.md
+                                                                                                 context: 2% (19.8k/1M)</pre>
+</section>
+</body></html>

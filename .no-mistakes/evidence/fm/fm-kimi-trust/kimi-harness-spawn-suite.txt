@@ -1,0 +1,31 @@
+ok - Kimi hook install is idempotent and removal restores every foreign config byte
+ok - Kimi hook removal preserves owned newline boundaries and pristine bytes
+ok - Kimi hook install refuses missing, malformed, and surprising config without writing
+ok - Kimi hook install refuses without jq before any config write
+ok - fm-spawn: kimi pre-trusts its worktree, launches, delivers its brief, and registers a guarded turn-end token
+ok - Kimi hook stays silent and inert without a Firstmate registry token
+ok - fm-spawn: unsafe Kimi global config refuses before pane creation
+ok - fm-teardown: Kimi task pointer and registry token are removed
+ok - fm-spawn: Kimi fallback expands the active HOME
+ok - fm-spawn: missing Kimi executable refuses before pane creation
+ok - fm-spawn: kimi treats a silent pointer drop as a failed spawn
+ok - fm-spawn: kimi never sends the brief pointer before an observable ready signal
+ok - fm-spawn: a fresh Kimi worktree answers the exact trust dialog once and verifies advancement
+ok - fm-spawn: a swallowed Kimi trust keypress is re-sent until the dialog clears
+ok - fm-spawn: a Kimi banner captured before the trust dialog paints does not read as ready
+ok - fm-spawn: an answered Kimi trust dialog left in scrollback neither re-answers nor fails the spawn
+ok - fm-spawn: a blank Kimi viewport frame costs its poll and nothing else
+ok - fm-spawn: Kimi refuses a backend that cannot read the viewport, before launching
+ok - fm-spawn: a Kimi trust dialog with its hint wrapped across rows is answered normally
+ok - fm-spawn: a blank Kimi frame between banners restarts the two-capture ready count
+ok - fm-spawn: a failed Kimi viewport read fails readiness with the backend named
+ok - fm-spawn: Kimi refuses the ready verdict while trust dialog markers remain
+ok - fm-spawn: a Kimi trust dialog must visibly clear before brief delivery
+ok - fm-spawn: a Kimi spawn refuses, before any launch or task state, when its worktree trust cannot be registered
+ok - fm-spawn: Kimi trust detection requires every observed dialog signal
+ok - fm-harness: markerless kimi keeps its ancestry identity under an inherited marker
+lock acquired: harness pid 1927604
+ok - fm-lock recognizes Kimi ancestry and live lock holders
+ok - busy detection: real Kimi moon-plus-middot captures require its harness while idle labels stay idle
+ok - fm-watch classifies Kimi as unknown rather than from its spinner, and Grok's fallback stays isolated
+ok - composer classifier: kimi's existing bordered > shape is already safe without an override

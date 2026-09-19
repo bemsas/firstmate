@@ -1,0 +1,64 @@
+
+[1m$ bin/fm-kimi-trust.sh $H/wt $H/project        # the shape a crewmate spawn registers[0m
+trusted: /tmp/fm-kimi-cli.G0gsw1/wt
+exit=0
+store: /tmp/fm-kimi-cli.G0gsw1/home/.kimi-code/workspace-trust/wd_wt_f8d1e459e785
+mode:  600  dir-mode: 700
+bytes: {"root":"/tmp/fm-kimi-cli.G0gsw1/wt","trustedAt":1789828007607}
+
+[1m$ bin/fm-kimi-trust.sh $H/wt $H/project        # again: idempotent, trustedAt preserved[0m
+trusted: /tmp/fm-kimi-cli.G0gsw1/wt
+exit=0
+record byte-identical, trustedAt untouched: {"root":"/tmp/fm-kimi-cli.G0gsw1/wt","trustedAt":1789828007607}
+unrelated record preserved: {"root":"/somewhere/else","trustedAt":1}
+
+[1m$ # --- scope refusals: every one of these must exit non-zero ---[0m
+
+[1m$ bin/fm-kimi-trust.sh '/tmp/fm-kimi-cli.G0gsw1/project' $H/project   # primary checkout[0m
+error: refusing to pre-register Kimi trust: '/tmp/fm-kimi-cli.G0gsw1/project' is a primary checkout, not an isolated worktree
+exit=1
+
+[1m$ bin/fm-kimi-trust.sh '/tmp/fm-kimi-cli.G0gsw1/home' $H/project   # home directory[0m
+error: refusing to pre-register Kimi trust: '/tmp/fm-kimi-cli.G0gsw1/home' is the home directory, not a task worktree
+exit=1
+
+[1m$ bin/fm-kimi-trust.sh '/tmp/fm-kimi-cli.G0gsw1/plain' $H/project   # plain directory[0m
+error: refusing to pre-register Kimi trust: '/tmp/fm-kimi-cli.G0gsw1/plain' is not inside a git repository
+exit=1
+
+[1m$ bin/fm-kimi-trust.sh '/tmp/fm-kimi-cli.G0gsw1/other-wt' $H/project   # worktree of another project[0m
+error: refusing to pre-register Kimi trust: '/tmp/fm-kimi-cli.G0gsw1/other-wt' is not a worktree of project '/tmp/fm-kimi-cli.G0gsw1/project'
+exit=1
+
+[1m$ bin/fm-kimi-trust.sh '/tmp/fm-kimi-cli.G0gsw1/wt/sub' $H/project   # subdirectory of a worktree[0m
+error: refusing to pre-register Kimi trust: '/tmp/fm-kimi-cli.G0gsw1/wt/sub' is not a worktree root (its root is '/tmp/fm-kimi-cli.G0gsw1/wt')
+exit=1
+
+[1m$ bin/fm-kimi-trust.sh '/' $H/project   # filesystem root[0m
+error: refusing to pre-register Kimi trust: '/' is the filesystem root, not a task worktree
+exit=1
+
+[1m$ bin/fm-kimi-trust.sh '/tmp/fm-kimi-cli.G0gsw1/missing' $H/project   # missing directory[0m
+error: refusing to pre-register Kimi trust: task worktree '/tmp/fm-kimi-cli.G0gsw1/missing' is not an accessible directory
+exit=1
+
+[1m$ bin/fm-kimi-trust.sh $H/wt $H/project   # with a RELATIVE KIMI_CODE_HOME[0m
+error: refusing to pre-register Kimi trust: KIMI_CODE_HOME 'relative-store' is a relative path, so the store the worker reads cannot be guaranteed to be the one written here; set it to an absolute path
+exit=1
+
+[1m$ # --- store selection: an ambient KIMI_CODE_HOME vs the cleared value the suites pass ---[0m
+
+[1m$ KIMI_CODE_HOME=$SENT bin/fm-kimi-trust.sh $H/wt2 $H/project[0m
+trusted: /tmp/fm-kimi-cli.G0gsw1/wt2
+exit=0
+ambient store now holds: wd_wt2_b0209affd99a
+
+[1m$ KIMI_CODE_HOME='' bin/fm-kimi-trust.sh $H/wt3 $H/project   # what the test suites pass[0m
+trusted: /tmp/fm-kimi-cli.G0gsw1/wt3
+exit=0
+ambient store still holds only: wd_wt2_b0209affd99a
+throwaway HOME store holds:     wd_unrelated_deadbeef1234 wd_wt3_fae69f95ce59 wd_wt_f8d1e459e785 
+
+[1m$ bin/fm-kimi-trust.sh $H/wt   # wrong argument count[0m
+usage: fm-kimi-trust.sh <worktree> <project>
+exit=2

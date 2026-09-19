@@ -1,0 +1,22 @@
+ok - fm-kimi-trust.sh: a fresh task worktree is trusted with exactly Kimi's record
+ok - fm-kimi-trust.sh: record names follow Kimi's slug and hash derivation
+ok - fm-kimi-trust.sh: registering an already trusted worktree is a success that leaves the record alone
+ok - fm-kimi-trust.sh: every unrelated record in the store is preserved byte for byte
+ok - fm-kimi-trust.sh: a record Kimi could not decode is replaced
+ok - fm-kimi-trust.sh: a symlink in the record's place is refused
+ok - fm-kimi-trust.sh: a symlinked worktree path records only the resolved root
+ok - fm-kimi-trust.sh: an absolute KIMI_CODE_HOME selects the store Kimi itself would read
+ok - fm-kimi-trust.sh: a relative KIMI_CODE_HOME is refused rather than guessed at
+ok - fm-kimi-trust.sh: refuses the primary checkout
+ok - fm-kimi-trust.sh: an exported CDPATH cannot defeat the scope refusal
+ok - fm-kimi-trust.sh: inherited git environment overrides cannot defeat the scope refusal
+ok - fm-kimi-trust.sh: refuses the home directory
+ok - fm-kimi-trust.sh: refuses the Kimi home directory
+ok - fm-kimi-trust.sh: refuses a directory that is not a git worktree
+ok - fm-kimi-trust.sh: refuses a missing directory
+ok - fm-kimi-trust.sh: refuses a worktree that belongs to a different project
+ok - fm-kimi-trust.sh: refuses a subdirectory of a worktree
+ok - fm-kimi-trust.sh: refuses a store that cannot be written
+ok - fm-kimi-trust.sh: a missing node is refused rather than degraded
+ok - fm-kimi-trust.sh: a scope refusal stays fail-closed without node
+ok - fm-kimi-trust.sh: refuses anything but exactly two arguments

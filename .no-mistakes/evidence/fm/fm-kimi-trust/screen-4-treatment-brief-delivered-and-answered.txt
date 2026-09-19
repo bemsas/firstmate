@@ -1,0 +1,38 @@
+
+treatment treatment ❯ env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '/home/bemsas/.kimi-code/bin/kimi' --auto
+
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │                                                                                                                    │
+ │  ▐█▛█▛█▌  Welcome to Kimi Code!                                                                                    │
+ │  ▐█████▌  Send /help for help information.                                                                         │
+ │                                                                                                                    │
+ │  Directory: /tmp/fm-kimi-shot.N2Y1PV/treatment                                                                     │
+ │  Session:   session_2ed3dd64-2f57-4169-bb0a-10f9a09f088e                                                           │
+ │  Model:     K3                                                                                                     │
+ │  Version:   2.0.1                                                                                                  │
+ │                                                                                                                    │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ✦ Kimi Code Desktop is here — Everything you love about Kimi Code, now on desktop
+   Run /desktop or visit https://www.kimi.com/code to install
+
+   No session yet — one will be created on your first message.
+
+ ✨ Read the brief at /tmp/fm-kimi-shot.N2Y1PV/brief.md and follow it exactly.
+
+ ● Read the brief.
+
+ ● Used Read (/tmp/fm-kimi-shot.N2Y1PV/brief.md) · 1 line
+
+ ⠹ thinking…
+   12345 + 67890 = 80235.
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ >                                                                                                                  │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ Never Ask  K3 thinking: high  /tmp/fm-kimi-shot.N2Y1PV/treatment  treatment  ctrl+o expand | /init: generate AGENTS.md
+                                                                                                 context: 2% (19.8k/1M)
+
+
+
+
+

@@ -1,0 +1,14 @@
+=== operator-visible failure, dialog on a PRE-REGISTERED worktree (rc=1) ===
+warning: /tmp/fm-kimi-harness.Zumts3/drive-stuck/home/data/drive-stuck-2071154/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+error: kimi trust dialog did not clear after selecting 'Trust this folder' on 2 poll(s); saw 'Trust this folder?', the navigation hint, selected 'Trust this folder', and the negative Don't trust option; the worktree was pre-registered in Kimi's trust store before launch, so either Kimi did not honour that record (check bin/fm-kimi-trust.sh against the installed Kimi's store format) or the pane read a different store because KIMI_CODE_HOME is not forwarded onto the launch; inspect window firstmate:fm-drive-stuck-2071154
+
+=== supervisor status file ===
+failed: kimi trust dialog did not clear after selecting 'Trust this folder' on 2 poll(s); saw 'Trust this folder?', the navigation hint, selected 'Trust this folder', and the negative Don't trust option; the worktree was pre-registered in Kimi's trust store before launch, so either Kimi did not honour that record (check bin/fm-kimi-trust.sh against the installed Kimi's store format) or the pane read a different store because KIMI_CODE_HOME is not forwarded onto the launch
+ok - drive
+=== spawn refusal when trust cannot be registered (rc=1) ===
+error: refusing to pre-register Kimi trust: '/tmp/fm-kimi-harness.ww887x/drive-refuse/home/.kimi-code/workspace-trust' is not a directory, so Kimi's trust store cannot be written
+error: could not pre-register Kimi workspace trust for /tmp/fm-kimi-harness.ww887x/drive-refuse/wt; refusing to launch a kimi worker that would wedge on the folder-trust dialog; inspect window firstmate:fm-drive-refuse-2072061
+launch.log bytes:  0
+pointer.log bytes: 0
+task record drive-refuse-2072061.meta present: no
+ok - drive
