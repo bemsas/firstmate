@@ -674,9 +674,9 @@ The status row is furniture only directly under a left-bar floor the classifier 
 One idle set owns the `Ask anything…` hint and is end-anchored apart from OpenCode's rotating quoted suggestion, whose optional group spans exactly one quoted run, so a human line that merely opens with those words - including a draft carrying quotes of its own - stays `pending` wherever it sits in the run.
 `tests/fm-control.test.sh` pins that pending text still refuses and that a composer which is not proven empty refuses rather than typing the exit command.
 
-A note for whoever reads this entry next, earned over five review rounds on this change: the code does the right thing; what keeps being wrong is what the code and its documents CLAIM about it.
-Three of the defects found here were a comment or a recorded transcript describing behaviour the tree did not have - an end-anchoring guarantee the fleet-wide rule overrode, an exemption scoped to a floor the selector never required, and a `pass` line no version of the guard could emit.
-This guard is the refresh command after an OpenCode or Herdr upgrade:
+A note for whoever reads this entry next: the code does the right thing; what keeps being wrong is what the code and its documents CLAIM about it.
+Re-read the classifier's own comments and this entry against `bin/fm-composer-lib.sh` before trusting either, because the recurring defect here is prose the tree does not implement - an end-anchoring guarantee the fleet-wide rule overrides, an exemption scoped to a floor the selector never requires, or a quoted `pass` line the guard cannot emit.
+This guard is the refresh command after an OpenCode or Herdr upgrade, and the only thing that settles such a claim:
 
 ```sh
 tests/fm-control-opencode-herdr-live-e2e.test.sh
