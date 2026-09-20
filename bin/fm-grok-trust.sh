@@ -378,8 +378,4 @@ then
   refuse "could not record trust for '$TRUST_ROOT_REAL' in '$STORE'"
 fi
 
-if [ "$TRUST_ROOT_REAL" != "$WT_REAL" ]; then
-  echo "trusted: $TRUST_ROOT_REAL (covers worktree $WT_REAL)"
-else
-  echo "trusted: $TRUST_ROOT_REAL"
-fi
+echo "trusted: $TRUST_ROOT_REAL (covers worktree $WT_REAL)"

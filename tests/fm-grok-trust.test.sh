@@ -14,6 +14,15 @@
 # the main root is trusted AND that the worktree path was not registered in its
 # place. docs/verification/grok-folder-trust.md holds the live evidence for that
 # rule; this suite pins the logic portably, with no grok binary.
+#
+# WHAT THIS SUITE CAN AND CANNOT SETTLE. It PINS the chosen contract - the key
+# is the parent of the worktree's git common directory, derived here from git
+# rather than read off the fixture variable that already knows the answer - so a
+# helper that started writing some other key fails here. It cannot decide
+# whether that contract still matches Grok: no assertion over a TOML file can
+# observe the dialog. Only tests/fm-grok-trust-live-e2e.test.sh, which launches
+# the real binary against a seeded store, can detect grok changing its keying
+# model in a future release.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -94,23 +103,39 @@ print(entry.get("decided_at", ""))
 PY
 }
 
+# The contract, restated from git alone: the folder Grok looks up is the
+# repository's main worktree, which is the directory holding the common git
+# directory the launch worktree points at. Derived here rather than taken from
+# the fixture's own <project> variable, so the assertion is a statement about
+# the rule and not a restatement of how the fixture was built.
+expected_key_for() { # <worktree>
+  local common
+  common=$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) ||
+    return 1
+  (cd -P -- "$common/.." && pwd -P)
+}
+
 # --- the key that is written ------------------------------------------------
 
 # The whole fix turns on this: the pane starts in the worktree, but the folder
 # Grok looks up is the repository's main root, so that is what must be trusted.
 test_worktree_registers_the_repository_main_root() {
-  local case_dir out store
+  local case_dir out store expected
   case_dir=$(make_case main-root)
   read_case "$case_dir"
   store=$(store_of "$GROK_HOME_DIR")
+  expected=$(expected_key_for "$WT") ||
+    fail "the expected trust key could not be derived from the worktree's git common dir"
   out=$(run_trust "$GROK_HOME_DIR" "$WT" "$PROJ")
   expect_code 0 $? "a fresh task worktree must be registered: $out"
-  assert_trusted "$store" "$PROJ" \
+  assert_trusted "$store" "$expected" \
     "the repository main root was not trusted, so grok would still show the dialog"
   assert_not_trusted "$store" "$WT" \
     "the worktree path was registered instead of the main root: grok never reads that key"
+  assert_equals 1 "$(trusted_paths "$store" | wc -l | tr -d ' ')" \
+    "exactly one folder must be granted, so no extra key is written alongside the main root"
   case $out in
-    *"$PROJ"*) ;;
+    *"$expected"*) ;;
     *) fail "the success line must name the folder that was trusted: $out" ;;
   esac
   pass "fm-grok-trust.sh: a task worktree registers its repository's main root"
