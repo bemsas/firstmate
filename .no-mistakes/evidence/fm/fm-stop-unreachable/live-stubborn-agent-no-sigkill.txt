@@ -1,0 +1,12 @@
+date            : 2026-09-20T19:45:18Z
+code under test : 9ad3b56
+stubborn agent  : pid=3674812 comm=opencode (ignores SIGTERM)
+worktree before : ?? dirty.txt|
+
+$ fm-control.sh t1 stop   -> rc=1
+  | error: stop-delivered t1 pid=3674812 comm=opencode signal=TERM agent-state=alive stop=unconfirmed; the agent did not stop within 4s. No further signal was sent, because SIGKILL would deny the harness its chance to flush uncommitted work
+
+  PASS the agent is still running - no SIGKILL was sent after the unacknowledged TERM
+  PASS the result says the stop is unconfirmed, not that the agent stopped
+  PASS no stop was claimed
+worktree after  : ?? dirty.txt|

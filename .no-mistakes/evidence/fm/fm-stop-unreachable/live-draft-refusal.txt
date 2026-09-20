@@ -1,0 +1,40 @@
+date            : 2026-09-20T19:45:33Z
+code under test : 9ad3b56
+lab session     : fm-lab-fmstopdraft-3677968-16946
+
+--- the worker's pane, with a real unsent draft in its composer ---
+  | 14:                                                                          ▄
+  | 15:                                         █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█
+  | 16:                                         █  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀
+  | 17:                                         ▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀
+  | 20:                       ┃
+  | 21:                       ┃  a draft the human has not sent yet
+  | 22:                       ┃
+  | 23:                       ┃  Build · Kimi K3 Kimi For Coding (kimi.ai)
+  | 24:                       ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  | 25:                                                                       tab agents  ctrl+p commands
+  | 39:  /tmp/fm-stop-draft.6BHuH0/wt:draft-live                                                                      1.18.31
+
+  composer state      : pending
+  no-content-observed : no
+  resolved agent pid  : 3678358
+
+$ fm-control.sh dt1 stop   -> rc=1
+  | error: task dt1's composer was not established to be free of content, so stopping it could discard text the agent is holding; refusing to signal. Read the pane and clear or submit what is there, then use 'stop' or 'exit'
+
+  PASS the agent was never signalled
+--- the same pane after the refusal ---
+  | 14:                                                                          ▄
+  | 15:                                         █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█
+  | 16:                                         █  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀
+  | 17:                                         ▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀
+  | 20:                       ┃
+  | 21:                       ┃  a draft the human has not sent yet
+  | 22:                       ┃
+  | 23:                       ┃  Build · Kimi K3 Kimi For Coding (kimi.ai)
+  | 24:                       ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  | 25:                                                                       tab agents  ctrl+p commands
+  | 39:  /tmp/fm-stop-draft.6BHuH0/wt:draft-live                                                                      1.18.31
+
+=== teardown ===
+  lab torn down, live default session verified unchanged

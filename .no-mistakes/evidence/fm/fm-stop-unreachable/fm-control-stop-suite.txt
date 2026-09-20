@@ -1,0 +1,22 @@
+$ bash tests/fm-control-stop.test.sh   # real processes on a real private tmux server, at 9ad3b56
+
+ok - fm-control stop: the resolved pid is the pane's foreground agent, not its shell
+ok - fm-control stop: an agent outside the recorded worktree refuses and is left running
+ok - fm-control stop: the agent stops while its endpoint, shell, and uncommitted work survive
+ok - fm-control stop: an already-stopped task is idempotent and never signals the shell
+ok - fm-control stop: an agent that exited on its own stops pinging busy, not just reports already-stopped
+ok - fm-control stop: an observed draft refuses, and neither the draft nor the agent is touched
+ok - fm-control stop: a worktree that loses its single dirty file is reported CHANGED, never preserved
+ok - fm-control stop: a window that WAS the agent reports its fate unestablished, never preserved or proven gone
+ok - fm-control stop: a worktree whose uncommitted contents were traded is CHANGED, though its entry count is not
+ok - fm-control stop: a file the harness flushed on its way out is not a destroyed worktree
+ok - fm-control stop: a file lost inside an untracked directory is CHANGED, not a collapsed summary
+ok - fm-control stop: an entry whose status changed is CHANGED, though the path is still there
+ok - fm-control stop: a preserved entry set is reported as exactly that, not as intact contents
+ok - fm-control stop: a clean worktree that only gained a flushed file keeps its entry set
+ok - fm-control stop: a worktree recorded through a symlink is still the agent's own worktree
+ok - fm-control stop: a worktree that could not be read is reported unverified, never preserved
+ok - fm-control stop: a backend that cannot identify the agent process refuses rather than guessing
+ok - fm-control stop: real-process identity, signal, postconditions, and refusals
+
+exit=0

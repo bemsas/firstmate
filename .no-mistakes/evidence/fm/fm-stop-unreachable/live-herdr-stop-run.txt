@@ -1,0 +1,116 @@
+date        : 2026-09-20T19:44:13Z
+code under test: 9ad3b56
+lab session : fm-lab-fmstoplive-3657968-21335
+worktree    : /tmp/fm-stop-live.gVTYQW/wt
+
+############################################################
+# S1/S2/S3: A WORKER WEDGED AT AUTHENTICATION
+# grok launched against a fresh, unauthenticated home parks on
+# its sign-in screen: alive, holding no composer, and unable to
+# read anything that is typed at it. This is the incident.
+############################################################
+
+--- what the firstmate sees in the worker's pane ---
+  | 
+  | 
+  | 
+  |                                                      ⠀⠀⠀⠀⠀⠀⣀⣀⡀⠀⠀⠀⢀⠄
+  |                                                      ⠀⠀⠀⣠⣾⠿⠛⠛⠛⠛⢀⡴⠁⠀
+  |                                                      ⠀⠀⣼⡟⠁⠀⠀⠀⢀⡴⠻⣿⡀⠀
+  |                                                      ⠀⠀⣿⡇⠀⠀⠀⠔⠁⠀⠀⣿⡇⠀
+  |                                                      ⠀⠀⢹⣷⠀⠀⠀⠀⠀⢀⣴⡿⠀⠀
+  |                                                      ⠀⢀⠞⠁⠠⢶⣶⣶⣶⠿⠋⠀⠀⠀
+  |                                                      ⠐⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+  | 
+  | 
+  |                                       Approve in your browser to finish signing in.
+  | 
+  |                                                         CJDC-VPDK
+  | 
+  |                                          Make sure your browser shows this code.
+  | 
+  |                                          If it doesn't open, click here to copy.
+  | 
+  | 
+  | 
+  |                                     Copying not working? Click here to show full URL.
+  | 
+  |                                                  Waiting for approval...
+  | 
+  | 
+  | 
+  | 
+  | 
+  | 
+  |                                                       ctrl+q  quit
+  agent state         : alive
+  composer state      : unknown
+  no-content-observed : yes
+  resolved agent pid  : 3658745 (grok)
+
+--- S1: 'exit' cannot serve this worker, and says where to go ---
+  $ fm-control.sh lt1 exit   -> rc=1
+  | error: task lt1's composer state is 'unknown', not proven empty; refusing to type the /exit exit command because it could concatenate onto existing text. Clear the composer, then retry 'exit' - or use 'stop', which signals the agent process and never types, for a worker whose screen cannot be read at all
+  PASS the refusal names the non-typing verb
+  PASS exit typed nothing and left the agent running
+
+--- S2 (adversarial): the SAME live agent, recorded against a different worktree ---
+  $ fm-control.sh lt2 stop   -> rc=1
+  | error: task lt2's agent pid 3658745 is working in '/tmp/fm-stop-live.gVTYQW/wt', not the task's recorded worktree '/tmp/fm-stop-live.gVTYQW/proj'; refusing to signal a process this task cannot claim
+  PASS the identity proof refused and the agent is untouched
+
+--- S3: 'stop' shuts the wedged worker down without typing ---
+  worktree before :  M README.md|?? uncommitted-draft.md|
+  $ fm-control.sh lt1 stop   -> rc=0
+  | stopped pid=3658745 comm=grok signal=TERM endpoint-state=preserved worktree-state=entries-preserved lt1 harness=grok backend=herdr endpoint=fm-lab-fmstoplive-3657968-21335:w1:p1 worktree=/tmp/fm-stop-live.gVTYQW/wt
+  PASS agent process gone
+  PASS herdr pane preserved
+  worktree after  :  M README.md|?? uncommitted-draft.md|
+  PASS uncommitted work survived
+--- the worker's pane after the stop ---
+  | cd /tmp/fm-stop-live.gVTYQW/wt && HOME=/tmp/fm-stop-live.gVTYQW/grokhome grok
+  | 
+  | proj main ❯ cd /tmp/fm-stop-live.gVTYQW/wt && HOME=/tmp/fm-stop-live.gVTYQW/grokhome grok
+  | 
+  | wt stop-live  ? ❯
+############################################################
+# S4 (adversarial): A REAL UNSENT DRAFT IS NEVER SIGNALLED AWAY
+############################################################
+  composer state (idle)  : empty  no-content-observed: yes
+--- the worker's pane, holding an unsent draft ---
+  | 
+  | 
+  | 
+  | 
+  | 
+  | 
+  | 
+  | 
+  | 
+  | 
+  | 
+  | 
+  | 
+  |   /tmp/fm-stop-live.gVTYQW/wt:stop-live                                                                        1.18.31  composer state (draft) : pending  no-content-observed: no
+  resolved agent pid     : 3663206
+  $ fm-control.sh lt4 stop   -> rc=1
+  | error: task lt4's composer was not established to be free of content, so stopping it could discard text the agent is holding; refusing to signal. Read the pane and clear or submit what is there, then use 'stop' or 'exit'
+  PASS agent left running
+  PASS the draft is still on screen
+
+############################################################
+# S5: AN AGENT THAT EXITED ON ITS OWN STOPS PINGING BUSY
+# The likeliest path into the reported state: the wedged worker
+# exhausts its retries and exits before a supervisor reaches it.
+############################################################
+  agent state         : dead
+  busy wiring armed   : lt5.busy-gen lt5.busy-state 
+  busy verdict BEFORE : busy fm-spawn
+  $ fm-control.sh lt5 stop   -> rc=0
+  | already-stopped lt5 harness=opencode backend=herdr endpoint=fm-lab-fmstoplive-3657968-21335:w1:p3 worktree=/tmp/fm-stop-live.gVTYQW/wt
+  PASS busy wiring retired
+  busy verdict AFTER  : unknown missing
+  PASS the pane's shell was never signalled
+
+=== teardown ===
+  lab session torn down, live default session verified unchanged

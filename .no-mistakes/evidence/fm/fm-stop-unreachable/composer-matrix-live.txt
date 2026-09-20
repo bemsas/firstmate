@@ -1,0 +1,20 @@
+$ FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh   # at 9ad3b56
+
+The two assertions this change owns - opencode 1.18.31's real idle composer
+classifying empty on the cursored read AND on the cursorless read herdr takes -
+both pass. The six 'not ok' lines are every other installed harness parked on a
+FOLDER-TRUST dialog, because this run's cwd is a fresh gate worktree no harness
+has been told to trust. The guard's own header states that a trust dialog is a
+real unreadable-composer state that correctly fails a harness's check, so those
+six are an environment condition of this checkout, not a result about the change.
+
+not ok - claude (2.1.277 (Claude Code)): idle composer never classified empty (last verdict: pending)
+not ok - codex (codex-cli 0.155.1): idle composer never classified empty (last verdict: unknown)
+ok - opencode (1.18.31): real idle composer classifies empty
+ok - opencode (1.18.31): real idle composer classifies empty cursorless too
+not ok - pi (0.85.1): idle composer never classified empty (last verdict: unknown)
+not ok - grok (grok 1.0.34 (3736acbc8658) [stable]): idle composer never classified empty (last verdict: unknown)
+not ok - kimi (2.0.2): idle composer never classified empty (last verdict: unknown)
+not ok - muse (Muse Code 1.3.0 (1.3.0-R3401.1)): idle composer never classified empty (last verdict: unknown)
+ok - strict posture live: a blank shell row classifies unknown and injection defers
+not ok - live composer-matrix guard observed failures above
