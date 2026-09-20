@@ -301,6 +301,33 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
       done
 }
 
+# fm_backend_tmux_agent_pids: the foreground process-group members of
+# <target> that the shared classifier names as a verified harness, one pid
+# per line. Empty output with a successful return is "this pane has no
+# identified agent process"; a failed return is an unreadable pane. The
+# control plane's non-typing stop uses this list and refuses rather than
+# signaling a process group or an unattributed pid.
+fm_backend_tmux_agent_pids() {  # <target>
+  local target=$1 tty pid pgid tpgid comm args argv0
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  case "$tty" in
+    /dev/*) ;;
+    *) return 1 ;;
+  esac
+  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+    | while read -r pid pgid tpgid comm; do
+        case "$pid" in
+          ''|*[!0-9]*|0) continue ;;
+        esac
+        [ "$pgid" = "$tpgid" ] || continue
+        args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || args=
+        args=${args#"${args%%[![:space:]]*}"}
+        argv0=${args%%[[:space:]]*}
+        [ "$(fm_agent_process_classify "$comm" "$argv0" "$args" "$pid")" = agent ] || continue
+        printf '%s\n' "$pid"
+      done
+}
+
 # fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
 # recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
 # shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for

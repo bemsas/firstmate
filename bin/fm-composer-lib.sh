@@ -66,7 +66,11 @@
 #                the idle placeholders) - none of which is ever typed input.
 #   left-bar   - opencode: rows prefixed by a heavy left bar `┃` with no
 #                closing border, holding the idle hint, blank rows, and a
-#                mode/model footer line.
+#                mode/model footer line. The `╹▀` floor bounds the composer
+#                from below; OpenCode 1.18 draws its status chrome on the
+#                next row with no blank separator, which is furniture, not
+#                the stale-activity invalidation that a `Working on request...`
+#                row still is.
 #   separated  - pi: content rows between two solid horizontal `─` rules, no
 #                glyph and no side border. Provable only with a live agent
 #                identity reporting an idle/done pi (herdr `agent
@@ -472,6 +476,30 @@ FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
 # is deliberately not matched - and the marker is quantifier-free so the same
 # bytes match under LC_ALL=C as under a UTF-8 locale.
 FM_COMPOSER_MODE_HINT_RE_DEFAULT='^[[:space:]]*(⏵|⏸)'
+# OpenCode's idle hint, including the optional rotating quoted suggestion that
+# follows it. End-anchored so `Ask anything... please investigate` stays
+# pending typed text. Applied to any left-bar content row, not only the
+# placeholder-position row: Herdr's ANSI 20-row tail can drop the leading
+# blank `┃`, which would otherwise make a genuine idle hint read pending.
+FM_COMPOSER_LEFTBAR_IDLE_RE_DEFAULT='^Ask anything(\.\.\.|…)([[:space:]]+".*")?$'
+# OpenCode 1.18 draws one status row immediately under the `╹▀` floor, with no
+# blank separator: a path or busy spinner, a token counter, `ctrl+p commands`,
+# and `OpenCode <version>` (verified live through Herdr on OpenCode 1.18.31:
+# idle `/home/... 40.1K (4%)  ctrl+p commands    • OpenCode 1.18.31` and busy
+# `esc interrupt  ...  ctrl+p commands    • OpenCode 1.18.31`). Without this
+# rule the cursorless "activity below a proven container" check treats that
+# chrome as unclaimed transcript, rejects the left-bar, and every OpenCode
+# pane on Herdr - including a genuinely idle empty composer - reads `unknown`.
+# Any one of the three independent signals is enough; `Working on request...`
+# matches none of them, so the stale-leftbar invalidation stays honest.
+FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT='ctrl\+p commands|OpenCode [0-9]|esc interrupt'
+# Grok draws a keybind hint row immediately under its titled box on some
+# surfaces (`Shift+Tab:mode  │  Ctrl+x:shortcuts`, also `Ctrl+.:shortcuts`).
+# The same cursorless invalidation that OpenCode's status row hits will reject
+# an otherwise proven Grok box when that hint has no blank separator. The
+# two independent keybind spellings are the furniture; a `Working on
+# request...` row still invalidates.
+FM_COMPOSER_GROK_STATUS_RE_DEFAULT='Shift\+Tab:mode|Ctrl\+[x.]:shortcuts'
 # omp (Oh My Pi) draws a one-row status line directly BELOW its borderless
 # composer: an identity or spinner cell, then middle-dot separated model, path,
 # git, and context cells. Verified live through Herdr on omp 18.1.11:
@@ -1182,6 +1210,60 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_OMP_STATUS_RE:-$FM_COMPOSER_OMP_STATUS_RE_DEFAULT}" sensitive
 }
 
+# _fm_composer_row_is_opencode_status: 0 when the trimmed row is OpenCode's
+# status chrome (FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT above). Consulted only
+# as the row immediately BELOW a proven left-bar floor (or box), never as
+# composer content.
+_fm_composer_row_is_opencode_status() {  # <trimmed-row>
+  fm_composer_idle_matches "$1" "${FM_COMPOSER_OPENCODE_STATUS_RE:-$FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT}" sensitive
+}
+
+# _fm_composer_row_is_grok_status: 0 when the trimmed row is Grok's keybind
+# hint (FM_COMPOSER_GROK_STATUS_RE_DEFAULT above). Same below-container role.
+_fm_composer_row_is_grok_status() {  # <trimmed-row>
+  fm_composer_idle_matches "$1" "${FM_COMPOSER_GROK_STATUS_RE:-$FM_COMPOSER_GROK_STATUS_RE_DEFAULT}" sensitive
+}
+
+# _fm_composer_row_is_below_container_furniture: 0 when the trimmed row is a
+# harness status line that sits directly under a proven box or left-bar and
+# must not be read as the stale-activity invalidation. Typed composer text
+# never appears here: it lives inside the container, above the floor or
+# bottom border.
+_fm_composer_row_is_below_container_furniture() {  # <trimmed-row>
+  _fm_composer_row_is_omp_status "$1" && return 0
+  _fm_composer_row_is_opencode_status "$1" && return 0
+  _fm_composer_row_is_grok_status "$1" && return 0
+  return 1
+}
+
+# _fm_composer_leftbar_is_cwd_wrap: 0 when <raw-row> is OpenCode's right-aligned
+# cwd wrap - a `┃` row whose post-bar body starts with at least eight spaces
+# then a single path token. Typed input is left-aligned with two spaces
+# (`┃  draft`); the footer's overflow path is pushed onto the previous row
+# with a long run of spaces. Eight spaces is more indent than typed input uses,
+# so a human typing a path still reads pending.
+_fm_composer_leftbar_is_cwd_wrap() {  # <raw-row>
+  local row=$1 body
+  fm_composer_normalize_trim_var row
+  case "$row" in
+    '┃'*) body=${row#┃} ;;
+    *) return 1 ;;
+  esac
+  case "$body" in
+    '        '*) ;;
+    *) return 1 ;;
+  esac
+  fm_composer_normalize_trim_var body
+  case "$body" in
+    /*|[~]/*|[~]) ;;
+    *) return 1 ;;
+  esac
+  case "$body" in
+    *[[:space:]]*) return 1 ;;
+  esac
+  return 0
+}
+
 # _fm_composer_row_is_braille_furniture: 0 when the row is non-blank and its
 # non-whitespace content is entirely braille cells (fm_composer_strip_braille
 # above) - an animation row that never counts as typed content and bounds a
@@ -1267,16 +1349,24 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 # can prove it real, unknown otherwise.
 _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
   local screen=$1 styled=$2 first=$3 last=$4
-  local row raw content pending_seen=0 footer_re leading_blank=1 placeholder_position=0
+  local row raw content plain_content pending_seen=0 footer_re leading_blank=1 placeholder_position=0
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   row=$first
   while [ "$row" -le "$last" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
+    if _fm_composer_leftbar_is_cwd_wrap "$raw"; then
+      row=$((row + 1)); continue
+    fi
     content=$(_fm_composer_row_content "$raw" "$styled")
+    plain_content=$(_fm_composer_row_content "$raw" 0)
     case "$content" in
       '┃'*) content=${content#┃} ;;
     esac
+    case "$plain_content" in
+      '┃'*) plain_content=${plain_content#┃} ;;
+    esac
     fm_composer_normalize_trim_var content
+    fm_composer_normalize_trim_var plain_content
     if [ -z "$content" ]; then row=$((row + 1)); continue; fi
     if [ "$leading_blank" = 1 ] && [ "$row" -gt "$first" ]; then
       placeholder_position=1
@@ -1284,8 +1374,20 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
       placeholder_position=0
     fi
     leading_blank=0
+    # The rotating quoted suggestion after OpenCode's idle hint is often
+    # bright while the hint itself is dim. Ghost stripping then leaves only
+    # the quote, which is not the idle pattern. The plain row is the
+    # styling-independent signal. The left-bar-specific pattern is
+    # end-anchored and is consulted on every content row, because a 20-row
+    # ANSI tail can drop the leading blank `┃` that would otherwise mark
+    # placeholder position.
+    if fm_composer_idle_matches "$plain_content" "${FM_COMPOSER_LEFTBAR_IDLE_RE:-$FM_COMPOSER_LEFTBAR_IDLE_RE_DEFAULT}" insensitive \
+       || fm_composer_idle_matches "$content" "${FM_COMPOSER_LEFTBAR_IDLE_RE:-$FM_COMPOSER_LEFTBAR_IDLE_RE_DEFAULT}" insensitive; then
+      row=$((row + 1)); continue
+    fi
     if [ "$placeholder_position" = 1 ] \
-       && fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive; then
+       && { fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive \
+            || fm_composer_idle_matches "$plain_content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive; }; then
       row=$((row + 1)); continue
     fi
     if [ "$row" -eq "$last" ] \
@@ -1501,7 +1603,8 @@ _fm_composer_select_cursorless() {
     raw=$(_fm_composer_screen_row "$next" "$plain")
     trimmed=$raw
     fm_composer_normalize_trim_var trimmed
-    if [ -n "$trimmed" ] && ! fm_composer_row_has_edge "$trimmed"; then
+    if [ -n "$trimmed" ] && ! fm_composer_row_has_edge "$trimmed" \
+       && ! _fm_composer_row_is_below_container_furniture "$trimmed"; then
       FM_COMPOSER_SELECTED_KIND=
       return 1
     fi
@@ -1534,15 +1637,19 @@ EOF
         fi
         ;;
       leftbar)
-        case "$content" in '┃'*) content=${content#┃} ;; esac
-        fm_composer_normalize_trim_var content
-        if [ -z "$content" ]; then
-          :
-        elif [ "$leading_blank" = 1 ] && [ "$row" -gt "$FM_COMPOSER_SELECTED_FIRST" ]; then
-          placeholder_position=1
-          leading_blank=0
+        if _fm_composer_leftbar_is_cwd_wrap "$raw"; then
+          content=
         else
-          leading_blank=0
+          case "$content" in '┃'*) content=${content#┃} ;; esac
+          fm_composer_normalize_trim_var content
+          if [ -z "$content" ]; then
+            :
+          elif [ "$leading_blank" = 1 ] && [ "$row" -gt "$FM_COMPOSER_SELECTED_FIRST" ]; then
+            placeholder_position=1
+            leading_blank=0
+          else
+            leading_blank=0
+          fi
         fi
         ;;
       box)

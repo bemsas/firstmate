@@ -653,6 +653,27 @@ FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
 On 2026-09-20 that guard could not reach its new arm for either installed harness, and the same failures reproduce on the unmodified library: bare `claude` 2.1.236 opens the session picker rather than a session, and the guard's mid-budget Escape then quits it, while codex-cli 0.147.0 parks on a hooks-trust modal the guard correctly refuses to confirm.
 The Herdr captures above are therefore this entry's live evidence, and the guard's claude arm owes a separate repair before it can refresh it.
 
+### 2026-09-20 OpenCode 1.18.31 idle composer through Herdr, and the non-typing stop
+
+Verified on 2026-09-20 on Linux against OpenCode 1.18.31 inside an isolated Herdr 0.9.1 lab session (`tests/fm-control-opencode-herdr-live-e2e.test.sh`), with no prompt submitted.
+Before the classifier change, a genuinely idle empty OpenCode composer on Herdr classified `unknown`: OpenCode draws its status chrome (`ctrl+p commands`, `OpenCode <version>`, or `esc interrupt`) on the row immediately under the `╹▀` floor, with no blank separator, and Herdr's ANSI 20-row tail can drop the leading blank `┃` so the idle hint sits on the first left-bar row.
+The cursorless container check treated that chrome as unclaimed transcript and rejected the left-bar, so `bin/fm-control.sh exit` refused to type `/exit`.
+After the change the same live idle pane classifies `empty`, and `fm-control exit` stops the worker while leaving the pane and the local copy in place.
+
+```text
+ok - opencode (1.18.31) on herdr: idle empty composer classifies empty
+ok - opencode (1.18.31) on herdr: fm-control exit stops the worker and preserves the pane and local copy
+```
+
+The portable regressions in `tests/fm-composer-lib.test.sh` pin that layout, keep typed drafts `pending`, and keep `Working on request...` immediately under the floor as `unknown`.
+`tests/fm-control.test.sh` pins that pending text still refuses and that an unknown composer with no identified agent pid still refuses.
+When the composer is not proven empty and is not pending, `exit` signals each pid the recovery-grade classifier named as this task's agent rather than typing; `tests/fm-control-signal-stop.test.sh` and `tests/fm-control-herdr-smoke.test.sh` prove that path against a harness-named process on tmux and Herdr.
+This guard is the refresh command after an OpenCode or Herdr upgrade:
+
+```sh
+tests/fm-control-opencode-herdr-live-e2e.test.sh
+```
+
 ### 2026-09-15 codex-cli 0.154.0 idle starfield and status footer through Herdr
 
 Verified on 2026-09-15 on macOS arm64 (Darwin 25.5.0) against codex-cli 0.154.0 (model gpt-6-astra, fast mode) running as a Codex second mate inside a Herdr pane, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).

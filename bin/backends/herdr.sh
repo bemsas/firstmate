@@ -2210,6 +2210,88 @@ EOF
   printf 'shell'
 }
 
+# fm_backend_herdr_agent_pids: pids in <target>'s pane that the shared
+# classifier names as a verified harness, one pid per line. Foreground
+# members first, then descendants of the pane shell (the nested-shell crew
+# shape). Empty successful output is "no identified agent process"; a failed
+# return is an unreadable pane. Never prints the shell pid, a process group
+# id, or a non-digit.
+fm_backend_herdr_agent_pids() {  # <target>
+  local session pane_id info shell_pid count i pid name argv0 args ps_bin rows
+  fm_backend_herdr_parse_target "$1" || return 1
+  session=$FM_BACKEND_HERDR_SESSION
+  pane_id=$FM_BACKEND_HERDR_PANE
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) \
+    || return 1
+  printf '%s' "$info" | jq -e --arg pane "$pane_id" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+  ' >/dev/null 2>&1 || return 1
+  shell_pid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) \
+    || return 1
+  count=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.foreground_processes | select(type == "array") | length' 2>/dev/null) \
+    || return 1
+  i=0
+  while [ "$i" -lt "$count" ]; do
+    pid=$(printf '%s' "$info" | jq -r --argjson i "$i" \
+      '.result.process_info.foreground_processes[$i].pid | select(type == "number") | floor' 2>/dev/null)
+    name=$(printf '%s' "$info" | jq -r --argjson i "$i" \
+      '.result.process_info.foreground_processes[$i].name // empty' 2>/dev/null)
+    argv0=$(printf '%s' "$info" | jq -r --argjson i "$i" '
+      .result.process_info.foreground_processes[$i] as $p
+      | (($p.argv // [])[0]) // $p.argv0 // empty' 2>/dev/null)
+    args=$(printf '%s' "$info" | jq -r --argjson i "$i" '
+      .result.process_info.foreground_processes[$i] as $p
+      | $p.cmdline // (($p.argv // []) | join(" ")) // empty' 2>/dev/null)
+    case "$pid" in
+      ''|*[!0-9]*|0) i=$((i + 1)); continue ;;
+    esac
+    [ "$pid" != "$shell_pid" ] || { i=$((i + 1)); continue; }
+    if [ "$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")" = agent ]; then
+      printf '%s\n' "$pid"
+    fi
+    i=$((i + 1))
+  done
+  ps_bin=${FM_HERDR_PS_BIN:-ps}
+  command -v "$ps_bin" >/dev/null 2>&1 || return 0
+  rows=$(LC_ALL=C "$ps_bin" -axo pid=,ppid=,comm= 2>/dev/null) || return 0
+  while IFS=$'\t' read -r pid name; do
+    [ -n "$pid" ] || continue
+    case "$pid" in
+      ''|*[!0-9]*|0) continue ;;
+    esac
+    [ "$pid" != "$shell_pid" ] || continue
+    args=$(LC_ALL=C "$ps_bin" -p "$pid" -o args= 2>/dev/null) || continue
+    args=${args#"${args%%[![:space:]]*}"}
+    argv0=${args%%[[:space:]]*}
+    [ "$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")" = agent ] || continue
+    printf '%s\n' "$pid"
+  done <<EOF
+$(printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
+  {
+    pid[NR] = $1; ppid[NR] = $2
+    line = $0
+    sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+/, "", line)
+    comm[NR] = line
+  }
+  END {
+    want[shell] = 1
+    changed = 1
+    while (changed) {
+      changed = 0
+      for (n = 1; n <= NR; n++) {
+        if ((ppid[n] in want) && !(pid[n] in want)) { want[pid[n]] = 1; changed = 1 }
+      }
+    }
+    for (n = 1; n <= NR; n++) {
+      if ((pid[n] in want) && pid[n] != shell) printf "%s\t%s\n", pid[n], comm[n]
+    }
+  }')
+EOF
+}
+
 # fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
 # dead|no-agent|stale-agent|live|unknown, from the JSON body of two read-only
 # calls plus, for a registered agent, the pane's process-level view - never

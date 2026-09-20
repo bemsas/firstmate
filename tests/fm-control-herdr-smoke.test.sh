@@ -307,21 +307,28 @@ awk -F= '$1 == "harness" {$0="harness=claude"} {print}' "$HOME_DIR/state/hsmoke.
 mv "$HOME_DIR/state/hsmoke.meta.tmp" "$HOME_DIR/state/hsmoke.meta"
 pass "real herdr: a stale registration no longer blocks relaunch, and the endpoint and local copy survive"
 
-# Last: the foreground process is a plain `sleep`, so the pane never draws any
-# recognized composer chrome. exit's composer-empty guard (bin/fm-control.sh)
-# therefore refuses before ever typing the exit command, rather than typing it
-# into a live agent that ignores it and reporting a stop that did not happen.
+# Last: the foreground process is a harness-named `sleep`, so the pane never
+# draws any recognized composer chrome. Typing an exit command is still
+# refused; the identified agent pid is signaled instead, and the endpoint
+# plus local copy survive.
 start_agent_process
 herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-smoke-agent \
   --state idle --session "$SESSION" >/dev/null 2>&1 \
   || fail "could not re-register the live agent on the task pane"
-if OUT=$(run_control hsmoke exit 2>&1); then
-  fail "exit should fail closed when the agent's composer is not proven empty: $OUT"
-fi
+AGENT_PID=$(herdr pane process-info --pane "$PANE_ID" --session "$SESSION" 2>/dev/null \
+  | jq -r '.result.process_info.foreground_processes[0].pid // empty')
+[ -n "$AGENT_PID" ] || fail "could not read the harness-named process pid before the non-typing stop"
+OUT=$(run_control hsmoke exit) || fail "exit should stop an identified agent whose composer is unreadable without typing: $OUT"
 case "$OUT" in
-  *"not proven empty"*) : ;;
-  *) fail "the exit failure should say the composer is not proven empty, got: $OUT" ;;
+  "stopped hsmoke"*) : ;;
+  *) fail "an identified agent behind an unproven composer should report stopped, got: $OUT" ;;
 esac
-pass "real herdr: an agent behind an unproven composer fails closed instead of typing an exit command into it"
+if kill -0 "$AGENT_PID" 2>/dev/null; then
+  fail "the identified agent pid $AGENT_PID is still running after the non-typing stop"
+fi
+herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
+  || fail "the non-typing stop must not remove the endpoint"
+[ -d "$WT" ] || fail "the non-typing stop must not remove the task's local copy"
+pass "real herdr: an identified agent behind an unproven composer is signaled, not typed into"
 
 fm_backend_herdr_kill "$SESSION:$PANE_ID" 2>/dev/null || true

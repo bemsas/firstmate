@@ -843,6 +843,40 @@ test_grok_idle_footer_does_not_confirm_cancellation() {
 
 # --- 6. marker non-regression -----------------------------------------------
 
+test_exit_refuses_when_composer_holds_pending_text() {
+  local dir out rc
+  dir=$(new_case pending-exit)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  printf '╭────╮\n│ hi │\n╰────╯\n' > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "exit must refuse when the composer holds pending text"$'\n'"$out"
+  assert_contains "$out" "composer visibly holds pending text" \
+    "the refusal should name the pending composer text"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a pending composer refusal must leave the agent running"
+  [ -z "$(literals "$dir")" ] || fail "pending text must not be concatenated onto by the exit command"
+  pass "fm-control exit: pending composer text still refuses, and nothing is typed"
+}
+
+test_exit_refuses_unknown_composer_when_no_agent_pid_is_identified() {
+  local dir out rc
+  dir=$(new_case unknown-nopid)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  printf 'some output\nhuman draft text\n' > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "exit must refuse an unknown composer when no agent pid is identified"$'\n'"$out"
+  assert_contains "$out" "not proven empty" \
+    "the refusal should name the unproven composer state"
+  assert_contains "$out" "no agent process could be identified" \
+    "the refusal should say the non-typing stop could not identify a pid"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "an unidentified-pid refusal must leave the agent running"
+  [ -z "$(literals "$dir")" ] || fail "an unknown composer must not be typed into"
+  pass "fm-control exit: unknown composer without an identified pid still refuses"
+}
+
 test_secondmate_control_command_carries_no_marker() {
   local dir out rc typed home
   dir=$(new_case sm-marker)
@@ -920,5 +954,7 @@ test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
+test_exit_refuses_when_composer_holds_pending_text
+test_exit_refuses_unknown_composer_when_no_agent_pid_is_identified
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task

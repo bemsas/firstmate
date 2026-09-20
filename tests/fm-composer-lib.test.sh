@@ -825,6 +825,52 @@ test_cursorless_container_rejects_contiguous_lower_activity() {
   pass "fm_composer_classify_screen: cursorless containers reject only contiguous unclaimed activity"
 }
 
+test_opencode_status_below_floor_is_furniture() {
+  # THE ORIGINAL FAILURE (2026-09-20, OpenCode 1.18.31 on Herdr): a genuinely
+  # idle, genuinely empty composer classified `unknown` because OpenCode draws
+  # its status chrome on the row immediately under the `╹▀` floor, with no
+  # blank separator. The cursorless invalidation then rejected the left-bar.
+  # This is the live layout, compacted; the three independent status signals
+  # (`ctrl+p commands`, `OpenCode <version>`, `esc interrupt`) each suffice.
+  local idle pending busy cwd_wrap left_path grok_hint grok_stale out
+  idle=$'┃\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)                                                               ~/Projects/firstmate:main\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n /home/bemsas/Projects/firstmate                                            40.1K (4%)  ctrl+p commands    • OpenCode 1.18.31'
+  assert_screen "opencode 1.18.31 idle empty on herdr with status under the floor" empty "$CAPS_STYLED" "$idle"
+  assert_screen "opencode 1.18.31 idle empty on zellij with status under the floor" empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "opencode 1.18.31 idle empty on plain backends with status under the floor" empty "$CAPS_PLAIN" "$idle"
+
+  pending=$'┃\n┃  please stop\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n /home/bemsas/Projects/firstmate                                            40.1K (4%)  ctrl+p commands    • OpenCode 1.18.31'
+  assert_screen "opencode typed draft still pending with status under the floor" pending "$CAPS_STYLED" "$pending"
+  assert_screen "opencode typed draft on tmux with status under the floor" pending "$CAPS_TMUX" "$pending" 1
+
+  busy=$'┃\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                                                    63.4K (6%)  ctrl+p commands    • OpenCode 1.18.31'
+  assert_screen "opencode busy chrome under the floor is still an empty composer" empty "$CAPS_STYLED" "$busy"
+
+  cwd_wrap=$'┃\n┃        ~/.treehouse/basisone-b4b6a9/5/\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)                                                               basisone\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                                                    63.4K (6%)  ctrl+p commands    • OpenCode 1.18.31'
+  assert_screen "opencode right-aligned cwd wrap is furniture not pending text" empty "$CAPS_STYLED" "$cwd_wrap"
+
+  left_path=$'┃\n┃  ~/Projects/foo\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
+  assert_screen "opencode left-aligned path is pending typed text" pending "$CAPS_STYLED" "$left_path"
+
+  # Live OpenCode 1.18.31 on Herdr: the hint is dim, the rotating quoted
+  # suggestion is bright. Ghost stripping leaves only the quote; the plain
+  # row still names the hint at the placeholder position.
+  remnant=$'┃\n┃  '"${ESC}[2mAsk anything… \"Fix a TODO in the codebase\"${ESC}[0m"$'\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n tab agents  ctrl+p commands'
+  assert_screen "opencode dim hint plus bright rotating suggestion is empty" empty "$CAPS_STYLED" "$remnant"
+  # Herdr's ANSI 20-row tail can drop the leading blank bar, putting the idle
+  # hint on the first left-bar row (placeholder_position=0).
+  first_idle=$'┃  Ask anything… "Fix a TODO in the codebase"\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n tab agents  ctrl+p commands'
+  assert_screen "opencode idle hint on the first left-bar row is empty" empty "$CAPS_STYLED" "$first_idle"
+
+  grok_hint=$'╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯\n Shift+Tab:mode  │  Ctrl+x:shortcuts'
+  assert_screen "grok keybind row immediately under the box is furniture" empty "$CAPS_STYLED" "$grok_hint"
+  grok_stale=$'╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯\nWorking on request...'
+  assert_screen "grok box above unclaimed activity still unknown" unknown "$CAPS_STYLED" "$grok_stale"
+
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$idle")
+  [ "$out" = empty ] || fail "the original idle-empty OpenCode-on-Herdr failure must now read empty, got '$out'"
+  pass "fm_composer_classify_screen: OpenCode status under the floor is furniture; pending drafts still pending"
+}
+
 test_bottom_most_candidate_wins() {
   # The one ranking rule: the live composer is bottom-anchored, so a stale
   # decorative box (codex's startup banner) can never outrank the real row
@@ -938,6 +984,7 @@ test_contiguous_transcript_reanchors_on_live_prompt
 test_lower_dead_shell_invalidates_cursorless_candidate
 test_cursorless_bare_wrap_region_classifies
 test_cursorless_container_rejects_contiguous_lower_activity
+test_opencode_status_below_floor_is_furniture
 test_bottom_most_candidate_wins
 test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width

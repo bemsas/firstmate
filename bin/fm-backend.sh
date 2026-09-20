@@ -879,6 +879,22 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
   esac
 }
 
+# fm_backend_agent_pids: pids at <target> that the shared process classifier
+# names as a verified harness, one pid per line. Used by the control plane's
+# non-typing stop. Empty successful output means no identified agent process;
+# a failed return means the pane could not be read. Only tmux and herdr can
+# prove process identity; other backends fail rather than guess.
+fm_backend_agent_pids() {  # <backend> <target> [expected-label]
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_agent_pids "$@" ;;
+    herdr) fm_backend_herdr_agent_pids "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_target_exists: cheap, READ-ONLY existence check - does the
 # recorded TARGET endpoint still exist on BACKEND? Never starts a server or
 # session: for herdr this deliberately queries the pane directly instead of
