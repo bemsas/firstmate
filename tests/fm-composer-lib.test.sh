@@ -848,11 +848,12 @@ test_opencode_status_below_floor_is_furniture() {
   left_path=$'┃\n┃  ~/Projects/foo\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
   assert_screen "opencode left-aligned path is pending typed text" pending "$CAPS_STYLED" "$left_path"
 
-  # Live OpenCode 1.18.31 on Herdr: the hint is dim, the rotating quoted
-  # suggestion is bright. Ghost stripping leaves only the quote; the plain
-  # row still names the hint at the placeholder position.
+  # Live OpenCode 1.18.31 on Herdr draws the hint and its rotating quoted
+  # suggestion as ONE span, so the two are always styled alike. This fixture is
+  # the case where that span is ghost: stripping takes the whole row with it and
+  # the run reads empty through the blank-row path, never through the idle rule.
   remnant=$'┃\n┃  '"${ESC}[2mAsk anything… \"Fix a TODO in the codebase\"${ESC}[0m"$'\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n tab agents  ctrl+p commands'
-  assert_screen "opencode dim hint plus bright rotating suggestion is empty" empty "$CAPS_STYLED" "$remnant"
+  assert_screen "opencode hint row styled ghost end to end is empty" empty "$CAPS_STYLED" "$remnant"
   # Herdr's ANSI 20-row tail can drop the leading blank bar, putting the idle
   # hint on the first left-bar row (placeholder_position=0).
   first_idle=$'┃  Ask anything… "Fix a TODO in the codebase"\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n tab agents  ctrl+p commands'

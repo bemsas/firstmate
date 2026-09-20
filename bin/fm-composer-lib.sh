@@ -1200,17 +1200,15 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
 
 # _fm_composer_leftbar_is_idle_hint: 0 when a left-bar row is the harness's idle
 # placeholder. The pattern is the fleet-wide FM_COMPOSER_IDLE_RE set above -
-# this owner keeps ONE idle set, and the left bar does not get a second. Both
-# row views are consulted because OpenCode renders the hint dim and its rotating
-# suggestion bright, so ghost stripping can leave only the quote while the plain
-# row still carries the hint. Both left-bar walkers - the classifier and the
-# content extractor - call this on the FIRST non-blank content row of the run,
-# so one screen cannot read empty to one of them and pending to the other.
-_fm_composer_leftbar_is_idle_hint() {  # <content> <plain-row>
-  local idle_re=${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}
-  fm_composer_idle_matches "$1" "$idle_re" insensitive && return 0
-  fm_composer_idle_matches "$2" "$idle_re" insensitive && return 0
-  return 1
+# this owner keeps ONE idle set, and the left bar does not get a second. The row
+# is read exactly as every other composer row is, through the capture's own
+# styling: OpenCode 1.18.31 draws the hint and its rotating quoted suggestion as
+# ONE truecolor span, so whatever survives ghost stripping carries both or
+# neither. Both left-bar walkers - the classifier and the content extractor -
+# call this on the FIRST non-blank content row of the run, so one screen cannot
+# read empty to one of them and pending to the other.
+_fm_composer_leftbar_is_idle_hint() {  # <content>
+  fm_composer_idle_matches "$1" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive
 }
 
 # _fm_composer_row_is_opencode_status: 0 when the trimmed row is OpenCode's
@@ -1307,21 +1305,16 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 # can prove it real, unknown otherwise.
 _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
   local screen=$1 styled=$2 first=$3 last=$4
-  local row raw content plain_content pending_seen=0 footer_re leading_blank=1 first_content=0
+  local row raw content pending_seen=0 footer_re leading_blank=1 first_content=0
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   row=$first
   while [ "$row" -le "$last" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
-    plain_content=$(_fm_composer_row_content "$raw" 0)
     case "$content" in
       '┃'*) content=${content#┃} ;;
     esac
-    case "$plain_content" in
-      '┃'*) plain_content=${plain_content#┃} ;;
-    esac
     fm_composer_normalize_trim_var content
-    fm_composer_normalize_trim_var plain_content
     if [ -z "$content" ]; then row=$((row + 1)); continue; fi
     first_content=$leading_blank
     leading_blank=0
@@ -1330,7 +1323,7 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
     # first non-blank content row is the one position that covers both; every
     # later row is ordinary content and takes the pending path.
     if [ "$first_content" = 1 ] \
-       && _fm_composer_leftbar_is_idle_hint "$content" "$plain_content"; then
+       && _fm_composer_leftbar_is_idle_hint "$content"; then
       row=$((row + 1)); continue
     fi
     if [ "$row" -eq "$last" ] \
@@ -1558,7 +1551,7 @@ _fm_composer_select_cursorless() {
 }
 
 fm_composer_extract_selected_content() {  # <caps> <screen>
-  local caps=$1 screen=$2 styled=0 kv plain row raw content plain_content glyph joined='' footer_re prompt_row=-1
+  local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
   local leading_blank=1 placeholder_position=0 prompt_is_shell=0 first_content=0
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
@@ -1575,7 +1568,6 @@ EOF
     content=$(_fm_composer_row_content "$raw" "$styled")
     placeholder_position=0
     first_content=0
-    plain_content=
     case "$FM_COMPOSER_SELECTED_KIND" in
       bare)
         if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \
@@ -1584,9 +1576,6 @@ EOF
         fi
         ;;
       leftbar)
-        plain_content=$(_fm_composer_row_content "$raw" 0)
-        case "$plain_content" in '┃'*) plain_content=${plain_content#┃} ;; esac
-        fm_composer_normalize_trim_var plain_content
         case "$content" in '┃'*) content=${content#┃} ;; esac
         fm_composer_normalize_trim_var content
         if [ -z "$content" ]; then
@@ -1622,7 +1611,7 @@ EOF
     if [ -z "$content" ] \
        || { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
             && [ "$first_content" = 1 ] \
-            && _fm_composer_leftbar_is_idle_hint "$content" "$plain_content"; } \
+            && _fm_composer_leftbar_is_idle_hint "$content"; } \
        || { [ "$FM_COMPOSER_SELECTED_KIND" = box ] && [ "$prompt_is_shell" = 1 ] \
             && [ "$placeholder_position" = 1 ] \
             && fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive; } \
