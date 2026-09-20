@@ -870,6 +870,16 @@ test_opencode_status_below_floor_is_furniture() {
   typed_tail_first_row=$'┃  Ask anything… please investigate the crash\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀\n /home/bemsas 40.1K (4%)  ctrl+p commands'
   assert_screen "a typed line opening with the hint stays pending on the first row" \
     pending "$CAPS_STYLED" "$typed_tail_first_row"
+  # The rotating suggestion is ONE quoted run, so the optional group stops at
+  # its closing quote. A draft that opens with the hint and carries quotes of
+  # its own is typed text, and it must still be extractable - the zellij send
+  # path proves what it typed by reading this content back.
+  local quoted_draft extracted
+  quoted_draft=$'┃  Ask anything… "a" and also "b"\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀\n /home/bemsas 40.1K (4%)  ctrl+p commands'
+  assert_screen "a draft carrying its own quotes stays pending" pending "$CAPS_STYLED" "$quoted_draft"
+  extracted=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$quoted_draft")
+  [ "$extracted" = 'Ask anything… "a" and also "b"' ] \
+    || fail "a quoted draft must remain extractable user content, got '$extracted'"
 
   out=$(fm_composer_classify_screen "$CAPS_STYLED" "$idle")
   [ "$out" = empty ] || fail "the original idle-empty OpenCode-on-Herdr failure must now read empty, got '$out'"

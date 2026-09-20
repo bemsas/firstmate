@@ -668,10 +668,10 @@ ok - opencode (1.18.31) on herdr: idle empty composer classifies empty under the
 ok - opencode (1.18.31) on herdr: fm-control exit stops the worker and preserves the pane and local copy
 ```
 
-The `floor=yes status-row=yes` line is the guard refusing a vacuous pass: `empty` alone would also come from a bare shell prompt, so the capture behind the verdict must carry the two facts this entry rests on.
+The `floor=yes status-row=yes` line is the guard refusing a vacuous pass: `empty` alone would also come from a bare shell prompt, so the frame behind the verdict must carry the two facts this entry rests on - the same ANSI capture at the same row count the classifier read, never a longer scrollback that could let rows it did not see vouch for rows it did.
 The portable regressions in `tests/fm-composer-lib.test.sh` pin that layout, keep typed drafts `pending`, and keep `Working on request...` immediately under the floor as `unknown`.
 The status row is furniture only directly under a left-bar floor the classifier actually matched - a floorless left-bar above the same row is a layout nobody has observed and stays `unknown`, and below a box the row still invalidates the container.
-One idle set owns the `Ask anything…` hint and is end-anchored apart from OpenCode's rotating quoted suggestion, so a human line that merely opens with those words stays `pending` wherever it sits in the run.
+One idle set owns the `Ask anything…` hint and is end-anchored apart from OpenCode's rotating quoted suggestion, whose optional group spans exactly one quoted run, so a human line that merely opens with those words - including a draft carrying quotes of its own - stays `pending` wherever it sits in the run.
 `tests/fm-control.test.sh` pins that pending text still refuses and that a composer which is not proven empty refuses rather than typing the exit command.
 
 A note for whoever reads this entry next, earned over five review rounds on this change: the code does the right thing; what keeps being wrong is what the code and its documents CLAIM about it.

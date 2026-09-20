@@ -100,7 +100,12 @@ budget=${FM_CONTROL_OPENCODE_HERDR_LIVE_POLLS:-45}
 while [ "$i" -lt "$budget" ]; do
   verdict=$(fm_backend_herdr_composer_state "$TARGET")
   if [ "$verdict" = empty ]; then
-    screen=$(fm_backend_herdr_capture "$TARGET" 40 2>/dev/null || true)
+    # The SAME frame the verdict was read from: fm_backend_herdr_composer_state
+    # classifies the ANSI capture at $FM_COMPOSER_CAPTURE_LINES rows, so a
+    # longer plain scrollback would let rows the classifier never saw vouch for
+    # rows it did.
+    screen=$(fm_backend_herdr_capture_ansi "$TARGET" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null \
+      | fm_composer_strip_ansi || true)
     break
   fi
   i=$((i + 1))
