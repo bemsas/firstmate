@@ -1,0 +1,83 @@
+### SCENARIO 1: live idle OpenCode 1.18.31 composer verdict = empty
+--- the exact frame the classifier read (20 rows, ANSI stripped for display) ---
+    |                        ┃  Ask anything… "Fix a TODO in the codebase"                                                    
+    |                        ┃                                                                                                
+    |                        ┃  Build · Kimi K3 Kimi For Coding (kimi.ai)                                                     
+    |                        ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀                      
+    |                                                                        tab agents  ctrl+p commands                      
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |   /tmp/fm-oc-evid.wViynH/wt:ocstop                                                                             1.18.31  
+    |                                                                                                                         
+---
+layout: left-bar floor ╹▀ present
+layout: status row 'ctrl+p commands' present
+### SCENARIO 2: same live frame through the BASE (pre-fix) classifier
+base classifier verdict on this live frame : unknown
+head classifier verdict on this live frame : empty
+agent state before any stop attempt: alive
+### SCENARIO 3: adversarial - operator draft left in the composer, exit must refuse
+composer verdict with the draft typed: pending
+--- frame with the operator draft ---
+    |                        ┃  please investigate "the crash" and also "the hang"                                            
+    |                        ┃                                                                                                
+    |                        ┃  Build · Kimi K3 Kimi For Coding (kimi.ai)                                                     
+    |                        ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀                      
+    |                                                                        tab agents  ctrl+p commands                      
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |   /tmp/fm-oc-evid.wViynH/wt:ocstop                                                                             1.18.31  
+    |                                                                                                                         ---
+fm-control exit rc=1
+fm-control exit says: error: task ocstop's composer visibly holds pending text; refusing to type the /exit exit command because it would concatenate onto that text. Clear or submit the pending text, then retry 'exit'
+agent state after the refusal: alive
+--- composer after the refusal (proves nothing was typed onto the draft) ---
+    |                        ┃  please investigate "the crash" and also "the hang"                                            
+    |                        ┃                                                                                                
+    |                        ┃  Build · Kimi K3 Kimi For Coding (kimi.ai)                                                     
+    |                        ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀                      
+    |                                                                        tab agents  ctrl+p commands                      
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |                                                                                                                         
+    |   /tmp/fm-oc-evid.wViynH/wt:ocstop                                                                             1.18.31  
+    |                                                                                                                         ---
+### SCENARIO 4: draft cleared, fm-control exit stops the unreachable worker
+composer verdict after clearing: empty
+fm-control exit rc=0
+fm-control exit says: stopped ocstop harness=opencode backend=herdr endpoint=fm-lab-oc-eviD-2295965:w1:p2 worktree=/tmp/fm-oc-evid.wViynH/wt
+agent state after exit: dead
+pane preserved: yes
+local copy preserved: yes

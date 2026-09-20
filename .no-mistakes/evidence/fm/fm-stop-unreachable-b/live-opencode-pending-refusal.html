@@ -1,0 +1,11 @@
+<!doctype html><meta charset="utf-8"><title>fm-control exit refuses a composer holding an operator draft</title><style>body{background:#12141a;color:#d4d4d4;margin:0;padding:24px;font-family:ui-sans-serif,system-ui}h1{font-size:16px;margin:0 0 4px}h2{font-size:14px;font-weight:600;margin:22px 0 4px;color:#e5e5e5}.n{margin:0 0 8px;color:#9aa0a6;font-size:12.5px;max-width:110ch}pre{background:#1e1e1e;padding:14px;border-radius:8px;overflow:auto;font:13px/1.35 "JetBrains Mono","DejaVu Sans Mono",monospace;white-space:pre}</style><h1>Live OpenCode 1.18.31 on Herdr — the composer gate refuses rather than typing blind</h1><h2>1 · Operator draft typed into the live OpenCode composer</h2><p class=n>fm_backend_herdr_composer_state → pending. The draft carries quotes of its own (&quot;the crash&quot;, &quot;the hang&quot;) — the case a greedy idle regex would have swallowed.</p><pre>                       ┃  please investigate &quot;the crash&quot; and also &quot;the hang&quot;
+                       ┃
+                       ┃  Build · Kimi K3 Kimi For Coding (kimi.ai)
+                       ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+                                                                       tab agents  ctrl+p commands
+</pre><h2>2 · The same pane after `fm-control ocstop exit` refused</h2><p class=n>error: task ocstop&#x27;s composer visibly holds pending text; refusing to type the /exit exit command because it would concatenate onto that text.  Agent state: alive. The draft is byte-identical — nothing was typed blind.</p><pre>                       ┃  please investigate &quot;the crash&quot; and also &quot;the hang&quot;
+                       ┃
+                       ┃  Build · Kimi K3 Kimi For Coding (kimi.ai)
+                       ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+                                                                       tab agents  ctrl+p commands
+</pre>

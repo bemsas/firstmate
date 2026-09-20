@@ -1,0 +1,3 @@
+# opencode layout behind the empty verdict: floor=yes status-row=yes
+ok - opencode (1.18.31) on herdr: idle empty composer classifies empty under the ╹▀ floor and its status row
+ok - opencode (1.18.31) on herdr: fm-control exit stops the worker and preserves the pane and local copy
