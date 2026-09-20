@@ -15,7 +15,7 @@ The failure repeated across harnesses and homes, and the workaround (remember to
 
 `bin/fm-control-lib.sh` is the single executable owner of three capability tables, which have no side effects, so they can be read as a contract:
 
-- The **verb allowlist**: `interrupt`, `exit`, `relaunch`.
+- The **verb allowlist**: `interrupt`, `exit`, `stop`, `relaunch`.
   There is no arbitrary-text and no generic raw-key entry point.
   A caller either names an allowlisted verb or is refused.
 - **Per-harness mechanics**: the key that cancels a running turn, how many times it must be delivered, whether the composer needs clearing afterwards, the command that exits the agent, and which task kinds the adapter is verified to run.
@@ -34,7 +34,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. An endpoint reading `missing` goes through the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) the reclaim uses before anything is claimed about it, and only Herdr can supply one: proven gone reports `endpoint-gone` (the agent went with it, and the endpoint this verb normally preserves did not survive), a pane that turns out to be there and idle is the ordinary `already-stopped`, one whose agent is back takes the ordinary interrupt-then-exit path. A tmux `missing` always refuses rather than claim a stop it cannot see. |
-| `stop` | Stop the agent without typing anything, by signalling the agent process, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone, the endpoint still exists, and the worktree's `HEAD` and dirty-file count are unchanged. Already-stopped is idempotent success. An endpoint that did not survive the agent reports `stopped-endpoint-gone` rather than an unqualified success. |
+| `stop` | Stop the agent without typing anything, by signalling the agent process, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone, the endpoint is still there on every read across a settle window rather than on one sample, and the worktree's `HEAD` and dirty-file count are unchanged. Already-stopped is idempotent success. An endpoint that did not survive the agent reports `stopped-endpoint-gone` rather than an unqualified success. |
 | `relaunch` | Replace the running agent with a new one in the same worktree - and the same endpoint whenever that endpoint still exists - on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint the task's record now names, and that record names the harness that is actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
@@ -74,6 +74,10 @@ It cannot make a promise about text the capture never showed it - a composer scr
 
 SIGTERM is the only signal sent.
 SIGKILL would deny the harness its chance to flush, so an agent that has not stopped within the wait is reported unconfirmed rather than escalated to a stronger signal.
+
+The endpoint-survival postcondition is established, not sampled.
+A terminal whose window *was* the agent tears that window down after the process exits, so a single read taken the moment the agent state settles can still see a window that is already going away.
+`stop` therefore requires the endpoint on every read across a settle window (`FM_CONTROL_STOP_SETTLE`, 2s), and reports `stopped-endpoint-gone` the moment any read cannot see it.
 
 **Teardown and discard are not verbs and will not become verbs.**
 `exit` and `stop` stop an agent and preserve everything else.

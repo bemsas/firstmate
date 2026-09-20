@@ -875,7 +875,7 @@ test_count_and_clip_columns_are_locale_independent() {
 }
 
 test_matrix_opencode_below_floor_and_sidebar() {
-  local bar floor idle wedged typed narrow mismatched pad
+  local bar floor idle wedged typed narrow mismatched blanking unaligned pad
   # Geometry, in columns, mirroring the live capture: the floor is the
   # composer's own width (63), composer text sits well inside it, and the
   # sidebar starts at column 70 - beyond the floor's right edge, across a gap.
@@ -946,9 +946,66 @@ test_matrix_opencode_below_floor_and_sidebar() {
     '  ┃' '  ┃   the draft' '  ┃  Build · Big Pickle OpenCode Zen' '  ╹▀▀')
   assert_screen "opencode mismatched floor keeps the draft on tmux" pending "$CAPS_TMUX" "$mismatched" 1
   assert_screen "opencode mismatched floor keeps the draft cursorless" pending "$CAPS_STYLED" "$mismatched"
+  # 6. THE CLIP MUST NOT BLANK A ROW THAT HOLDS TEXT. A bound whose span covers
+  # only the left bar and the gap after it cuts cleanly - no run is split, so
+  # the fit test alone is satisfied - and deletes the draft that starts past
+  # that gap. A floor whose span blanks every row it covers is not describing
+  # this composer, so the bound is refused and the rows are read whole.
+  blanking=$(printf '%s\n%s\n%s' \
+    ' ┃' ' ┃   hidden draft' ' ╹▀▀')
+  assert_screen "opencode floor that blanks its own rows keeps the draft cursorless" \
+    pending "$CAPS_STYLED" "$blanking"
+  assert_screen "opencode floor that blanks its own rows keeps the draft on tmux" \
+    pending "$CAPS_TMUX" "$blanking" 1
+
+  # 7. THE ALIGNMENT GUARD. A floor indented differently from the bar it is
+  # supposed to close belongs to some other box, so its width is not this
+  # composer's bound. Both glyphs come from the same renderer, so equal columns
+  # is a real invariant rather than a tolerance. Here the stray floor's span
+  # clears the footer (so content inside the bound exists) and cuts cleanly in
+  # the gap before the draft (so nothing is split), and it still deletes the
+  # draft - which only the column match rejects.
+  unaligned=$(printf '%s\n%s\n%s\n%s' \
+    '  ┃' "  ┃$(printf '%*s' 14 '')draft text here" '  ┃  Build · x' \
+    '     ╹▀▀▀▀▀▀▀▀▀▀')
+  assert_screen "opencode misaligned floor is not this composer's bound" \
+    pending "$CAPS_STYLED" "$unaligned"
+  assert_screen "opencode misaligned floor is not this composer's bound on tmux" \
+    pending "$CAPS_TMUX" "$unaligned" 1
   unset -f oc_row
   pass "matrix: opencode's below-floor furniture and side panel are bounded, and typed text still refuses"
 }
 
 test_count_and_clip_columns_are_locale_independent
 test_matrix_opencode_below_floor_and_sidebar
+
+# --- the stop gate's own question: was anything OBSERVED? --------------------
+# fm_composer_no_content_observed is the only thing standing between
+# bin/fm-control.sh `stop` and a SIGTERM, so it answers about OBSERVATION, not
+# about the verdict. These cases pin both directions of that.
+test_no_content_observed_requires_a_readable_capture() {
+  local blank
+  # A pane whose composer is scrolled out of the captured window still carries
+  # transcript rows: nothing composer-shaped was observed, so the gate opens.
+  fm_composer_no_content_observed unknown \
+    "$(printf 'building index\nwrote 12 files\n')" \
+    || fail "a readable capture with no composer shape must read as no content observed"
+  # A capture that came back with nothing readable did not fail, but it is an
+  # unreadable pane - not a pane proven to hold nothing - and must refuse.
+  for blank in '' '   ' "$(printf '\n\n\n')" "$(printf '  \n\t\n')" "$NBSP"; do
+    ! fm_composer_no_content_observed unknown "$blank" \
+      || fail "an unreadable (blank) capture must not read as no content observed"
+    ! fm_composer_no_content_observed empty "$blank" \
+      || fail "an unreadable (blank) capture must refuse even when the verdict says empty"
+  done
+  # A composer that was read and proven to hold nothing is the other yes.
+  fm_composer_no_content_observed empty "$(printf 'transcript\n❯\n')" \
+    || fail "a composer proven empty must read as no content observed"
+  # A composer shape that was SEEN but not proven empty must refuse, whatever
+  # the verdict degraded to.
+  ! fm_composer_no_content_observed unknown "$(printf '  ┃\n  ┃  a draft\n  ╹▀▀▀\n')" \
+    || fail "an observed left-bar composer must refuse regardless of the verdict"
+  pass "fm_composer_no_content_observed: only a readable capture with no shape, or a proven-empty composer, opens the gate"
+}
+
+test_no_content_observed_requires_a_readable_capture

@@ -3075,24 +3075,9 @@ fm_backend_herdr_capture_ansi() {  # <target> <lines>
 # test, so the two can never disagree about different bytes.
 # fm_composer_no_content_observed owns what the answer means.
 fm_backend_herdr_composer_no_content_observed() {  # <target>
-  local target=$1 cap caps verdict identity
-  fm_backend_herdr_parse_target "$target" || return 1
-  if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null); then
-    caps=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
-  elif cap=$(fm_backend_herdr_capture "$target" "$FM_COMPOSER_CAPTURE_LINES"); then
-    caps=$(printf 'styled=0\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
-  else
-    return 1
-  fi
-  verdict=$(fm_composer_classify_screen "$caps" "$cap")
-  if [ "$verdict" = need-identity ]; then
-    if ! identity=$(fm_backend_herdr_composer_identity "$target" 2>/dev/null) || [ -z "$identity" ]; then
-      identity=probe-absent
-    fi
-    verdict=$(fm_composer_classify_screen "$caps" "$cap" '' "$identity")
-    [ "$verdict" != need-identity ] || verdict=unknown
-  fi
-  fm_composer_no_content_observed "$verdict" "$cap"
+  _fm_backend_herdr_composer_read "$1" || return 1
+  fm_composer_no_content_observed \
+    "$FM_BACKEND_HERDR_COMPOSER_VERDICT" "$FM_BACKEND_HERDR_COMPOSER_CAPTURE"
 }
 
 # fm_backend_herdr_agent_process: the pid of the process in the FOREGROUND of
@@ -3166,15 +3151,27 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # pair below every other candidate), preserving this adapter's original
 # consult-only-when-needed behavior.
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
+  _fm_backend_herdr_composer_read "$1" || { printf 'unknown'; return 0; }
+  printf '%s' "$FM_BACKEND_HERDR_COMPOSER_VERDICT"
+}
+
+# _fm_backend_herdr_composer_read: capture <target> ONCE and classify those
+# exact bytes, publishing both through FM_BACKEND_HERDR_COMPOSER_CAPTURE and
+# FM_BACKEND_HERDR_COMPOSER_VERDICT. Returns 1 when the pane cannot be read at
+# all. Every herdr consumer of a composer verdict goes through here, so the
+# capture ladder and the capability descriptors have exactly one definition and
+# the stop gate can never read a different pane than the verdict it is given.
+_fm_backend_herdr_composer_read() {  # <target>
   local target=$1 cap caps verdict identity
-  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  FM_BACKEND_HERDR_COMPOSER_CAPTURE=
+  FM_BACKEND_HERDR_COMPOSER_VERDICT=unknown
+  fm_backend_herdr_parse_target "$target" || return 1
   if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null); then
     caps=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
   elif cap=$(fm_backend_herdr_capture "$target" "$FM_COMPOSER_CAPTURE_LINES"); then
     caps=$(printf 'styled=0\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
   else
-    printf 'unknown'
-    return 0
+    return 1
   fi
   verdict=$(fm_composer_classify_screen "$caps" "$cap")
   if [ "$verdict" = need-identity ]; then
@@ -3184,7 +3181,8 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
     verdict=$(fm_composer_classify_screen "$caps" "$cap" '' "$identity")
     [ "$verdict" != need-identity ] || verdict=unknown
   fi
-  printf '%s' "$verdict"
+  FM_BACKEND_HERDR_COMPOSER_CAPTURE=$cap
+  FM_BACKEND_HERDR_COMPOSER_VERDICT=$verdict
 }
 
 # fm_backend_herdr_rendered_busy_state: busy|idle|unknown from the pane's

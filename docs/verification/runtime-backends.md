@@ -627,6 +627,11 @@ stopped pid=2583811 comm=opencode signal=TERM endpoint=preserved worktree=unchan
 ```
 
 Typed text still refuses on every path (`pending`), a floor too narrow to be its composer's own border still refuses contiguous activity below it - on the cursor-anchored read as well as the cursorless one, because the width clip is where bytes are deleted - and a composer whose leading blank row is outside the capture keeps the strict position rule rather than gaining a cheaper verdict.
+A floor is accepted as the composer's bound only when it also opens in the same column as the `┃` of every row it closes, and only when at least one of those rows still carries content inside that bound.
+Both are structural properties of the same renderer rather than tolerances, and each rejects a floor that the other admits: the column match rejects a floor belonging to some other box, and the in-bound test rejects a span that would blank every row it covers and report a composer holding a draft as `empty`.
+The column match held on every real capture available at the time: herdr idle 24/24 rows, wedged-with-sidebar 3/3, typed draft 3/3, and a full tmux pane 64/64.
+Neither case was reproduced from a real opencode render, so both are recorded as uncovered shapes rather than observed regressions; they get the careful treatment because their consequence is a visible draft read as `empty`, which `exit` would type onto and `stop` would signal away.
+The residual is stated plainly: a composer whose every row really is blank inside the bound also falls back to reading rows whole and refuses, which is the safe direction, and opencode does not render that shape because its `Build · …` footer is drawn inside the composer.
 The live guard's cursorless assertion reads the WHOLE pane, because opencode centres its composer on a splash screen and a bottom-anchored window can miss it entirely - that is a capture-window property, not a classification one.
 claude 2.1.277 and opencode 1.18.31 are the harnesses whose cursorless read is established `empty`; kimi 2.0.2 still classifies `unknown` cursorless because it draws its own footer rows below its `╰───╯` composer border, which is the same defect class in the box shape and is not addressed here.
 codex 0.155.1, pi 0.85.1, and muse 1.3.0 could not be verified in that run because an untrusted worktree parks them on a trust dialog, which the strict classifier correctly refuses; grok 1.0.34 read `pending-unproven`.
@@ -647,12 +652,18 @@ ok - fm-control stop: the agent stops while its endpoint, shell, and uncommitted
 ok - fm-control stop: an already-stopped task is idempotent and never signals the shell
 ok - fm-control stop: an observed draft refuses, and neither the draft nor the agent is touched
 ok - fm-control stop: a worktree that loses its single dirty file is reported CHANGED, never unchanged
+ok - fm-control stop: a window that WAS the agent reports endpoint-gone, never an unestablished preserved
 ok - fm-control stop: a backend that cannot identify the agent process refuses rather than guessing
 ```
 
 tmux creates a task window with no command and types the launch line into the shell, so the agent is the shell's foreground job and the window survives the agent; a pane whose agent was launched as the pane command itself reports `stopped-endpoint-gone` rather than an unqualified success.
 Removing the content gate makes the draft case signal the agent away silently, which is what that case pins.
-The worktree postcondition counts dirty entries with `grep -c ''` rather than `wc -l`, because command substitution strips git's trailing newline and `wc -l` would then report both a clean worktree and one holding a single dirty entry as 0; the last case above stages exactly that single-file loss and requires `worktree=CHANGED`.
+The worktree postcondition counts dirty entries with `grep -c ''` rather than `wc -l`, because command substitution strips git's trailing newline and `wc -l` would then report both a clean worktree and one holding a single dirty entry as 0; that case stages exactly that single-file loss and requires `worktree=CHANGED`.
+
+The endpoint postcondition reads the recovery-grade agent-state classifier, repeatedly, across `FM_CONTROL_STOP_SETTLE` (2s), rather than the cheap pane-presence read.
+Measured on 2026-09-20 against a real private tmux server: after the window holding a directly-launched agent is gone, `tmux display-message -p -t '<session>:<window>' '#{pane_id}'` still exits 0 and answers for the session's CURRENT window, so that read cannot tell a preserved endpoint from a destroyed one and reported `endpoint=preserved` for a window that no longer existed.
+`fm_backend_agent_state` classified the same endpoint `missing` from its exact session inventory throughout.
+The direct-launch case above stages that shape - the stand-in agent is `exec`ed as the pane's own command, so the window dies with it - and requires `stopped-endpoint-gone`; the other cases keep covering the real fleet shape, where `bin/backends/tmux.sh` creates the window with no command and the shell genuinely outlives the agent.
 
 The 2026-08-23 steering-inbox doorbell run observed grok 1.0.5's idle composer classifying `unknown` (and sometimes pending-family), never `empty`.
 Issue #3436's recorded idle capture reproduced the cause on 2026-09-14: Grok 1.0.5 renders the titled bottom border three columns wider than its aligned top and content rows, so the cursorless Herdr profile rejected the otherwise complete box as ambiguous.

@@ -209,6 +209,60 @@ esac
 pass "fm-control stop: a worktree that loses its single dirty file is reported CHANGED, never unchanged"
 printf 'uncommitted\n' > "$WORK/wt/dirty.txt"
 
+# --- 4d. THE ENDPOINT POSTCONDITION is established, not sampled -------------
+# The fleet's tmux path types the launch line into a shell, so the shell
+# outlives the agent and the window really is preserved - every case above
+# covers that shape. A pane whose own COMMAND is the agent tears the window
+# down after the process exits, and a single read taken the moment the agent
+# state settles can still see a window that is already going away. `stop` must
+# report the outcome it can establish, not the one it happened to sample first.
+start_agent_as_pane_command() {
+  "$REAL_TMUX" -L "$SOCKET" kill-window -t fmses:fm-t1 2>/dev/null || true
+  # `sh -c` execs into the stand-in, so the pane process IS the agent (same pid,
+  # comm `opencode`) and the window closes with it - while the printed line
+  # keeps the pane readable, which the content gate requires.
+  "$REAL_TMUX" -L "$SOCKET" new-window -d -t fmses: -n fm-t1 -c "$WORK/wt" \
+    "sh -c 'printf \"session ready\\n\"; exec opencode 600'" >/dev/null
+  local i=0 pid pane_pid comm
+  while [ "$i" -lt 150 ]; do
+    pane_pid=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t fmses:fm-t1 '#{pane_pid}' 2>/dev/null || true)
+    pid=$(agent_pid 2>/dev/null || true)
+    case "$pid" in
+      ''|*[!0-9]*) ;;
+      *)
+        comm=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d '[:space:]')
+        # The exec has landed only once the pane process itself reports the
+        # stand-in's name; before that `sh` is still in front of it.
+        [ "$comm" != opencode ] || { [ "$pid" = "$pane_pid" ] && return 0; }
+        ;;
+    esac
+    sleep 0.1; i=$((i + 1))
+  done
+  return 1
+}
+PATH="$WORK/bin:$PATH" start_agent_as_pane_command \
+  || { echo "skip: could not stage an agent as the pane's own command"; DIRECT_LAUNCH=skip; }
+if [ "${DIRECT_LAUNCH:-}" != skip ]; then
+  DIRECT_PID=$(agent_pid) || fail "the agent process could not be resolved from a direct-launch pane"
+  out=$(run_stop) || fail "stop failed against a direct-launch agent: $out"
+  case "$out" in
+    "stopped-endpoint-gone pid=$DIRECT_PID "*) ;;
+    *) fail "stop must report that a window which was the agent did not survive, got: $out" ;;
+  esac
+  case "$out" in
+    *endpoint=did-not-survive*) ;;
+    *) fail "stop must name the endpoint outcome it established, got: $out" ;;
+  esac
+  case "$out" in
+    *endpoint=preserved*) fail "stop claimed a survival it could not establish, got: $out" ;;
+  esac
+  "$REAL_TMUX" -L "$SOCKET" list-windows -t fmses -F '#{window_name}' | grep -qx fm-t1 \
+    && fail "the direct-launch window outlived the report that it did not survive"
+  ! kill -0 "$DIRECT_PID" 2>/dev/null || fail "the direct-launch agent survived a reported stop"
+  [ "$(cat "$WORK/wt/dirty.txt")" = uncommitted ] || fail "the direct-launch stop lost uncommitted work"
+  pass "fm-control stop: a window that WAS the agent reports endpoint-gone, never an unestablished preserved"
+fi
+
 # --- 5. a backend that cannot name a pane's process refuses, never guesses --
 sed 's|^window=.*|window=zjses:fm-t1|' "$WORK/home/state/t1.meta" > "$WORK/home/state/t1.meta.new"
 { cat "$WORK/home/state/t1.meta.new"; echo "backend=zellij"; } > "$WORK/home/state/t1.meta"

@@ -1256,23 +1256,19 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 # the idle hint read empty; the run's LAST row may be the mode/model footer
 # (composer furniture, never typed text). Real content is pending when styling
 # can prove it real, unknown otherwise.
-_fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row> <plain-screen>
-  local screen=$1 styled=$2 first=$3 last=$4 plain=$5
+_fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row> <plain-screen> [bound]
+  local screen=$1 styled=$2 first=$3 last=$4 plain=$5 width=${6-unresolved}
   local row raw content pending_seen=0 footer_re leading_blank=1 placeholder_position=0
-  local width=''
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
-  # Bound the composer to its own floor's width when one is drawn AND that floor
-  # is a credible border for the composer above it, so a panel sharing these
-  # physical rows to the RIGHT of the composer cannot read as typed text. THE
-  # CLIP IS WHERE BYTES ARE ACTUALLY DELETED, so the credibility check belongs
-  # here and not only in the cursorless selector: the cursor-anchored path
-  # reaches this function without passing through that selector at all. Absent a
-  # proven bound the row is read whole, exactly as before.
-  if width=$(_fm_composer_leftbar_floor_width "$plain" "$last") \
-     && _fm_composer_leftbar_floor_fits "$plain" "$first" "$last" "$width"; then
-    :
-  else
-    width=''
+  # Bound the composer to its own floor when that floor credibly closes it, so a
+  # panel sharing these physical rows to the RIGHT of the composer cannot read as
+  # typed text. THE CLIP IS WHERE BYTES ARE ACTUALLY DELETED, so a bound is used
+  # here only once _fm_composer_leftbar_bound has proven it. The cursorless
+  # selector has already proven the same bound for its own decision and hands it
+  # down; the cursor-anchored path has no selector, so it resolves its own.
+  # Absent a proven bound the row is read whole, exactly as before.
+  if [ "$width" = unresolved ]; then
+    width=$(_fm_composer_leftbar_bound "$plain" "$first" "$last") || width=''
   fi
   row=$first
   while [ "$row" -le "$last" ]; do
@@ -1328,39 +1324,75 @@ _fm_composer_leftbar_floor_row() {  # <trimmed-row>
   [ -z "${blocks//▀/}" ]
 }
 
-# _fm_composer_leftbar_floor_width: print the composer's right edge in display
-# columns when the row directly below <last-row> is a validated floor, and
-# nothing otherwise. Measured from the UNTRIMMED plain row, because the bound
-# has to be an absolute column in the captured row, not a width relative to the
-# floor's own indent.
-_fm_composer_leftbar_floor_width() {  # <plain-screen> <last-row>
-  local plain=$1 last=$2 raw trimmed
+# _fm_composer_row_glyph_indent_var: set <varname> to the display column at
+# which <plain-row> opens with <glyph>, and fail when the glyph is absent or
+# anything but whitespace precedes it. The prefix is whitespace only, so once
+# Unicode spaces are normalized its character count IS its column count and no
+# subprocess is needed.
+_fm_composer_row_glyph_indent_var() {  # <varname> <plain-row> <glyph>
+  local __fmgi_name=$1 __fmgi_row=$2 __fmgi_glyph=$3 __fmgi_prefix
+  fm_composer_normalize_spaces_var __fmgi_row
+  case "$__fmgi_row" in
+    *"$__fmgi_glyph"*) __fmgi_prefix=${__fmgi_row%%"$__fmgi_glyph"*} ;;
+    *) return 1 ;;
+  esac
+  case "$__fmgi_prefix" in
+    *[![:space:]]*) return 1 ;;
+  esac
+  printf -v "$__fmgi_name" '%s' "${#__fmgi_prefix}"
+}
+
+# _fm_composer_leftbar_bound: THE one owner of the composer's right edge. Print
+# the display column that bounds the left-bar composer occupying rows
+# <first>..<last>, and fail when the row directly below it is not a floor that
+# CREDIBLY closes that composer. The bound is measured from the UNTRIMMED plain
+# floor row, because it has to be an absolute column in the captured row rather
+# than a width relative to the floor's own indent.
+#
+# Three properties must hold, and each rejects a different wrong floor:
+#
+#   SHAPE      - the row below is `╹▀…`, the composer's own closing glyph.
+#   ALIGNMENT  - that floor's `╹` sits in the same column as the `┃` of every
+#                row it closes. Both glyphs come from the same renderer, so a
+#                floor at a different indent belongs to some other box.
+#   FIT        - no row's text runs across the bound (the clip refuses to split
+#                a run, so such a row comes back whole and overflows), AND at
+#                least one row still carries content INSIDE the bound. A floor
+#                whose span blanks every row it covers is not describing this
+#                composer at all: trusting it would delete a visible draft and
+#                report the composer `empty`.
+#
+# Any failure means there is no proven bound, and the caller reads rows whole -
+# which can only defer, never claim a false `empty`. The residual is stated
+# plainly: a composer whose every row really is blank inside the bound also
+# falls back to reading rows whole and refuses. That is the safe direction, and
+# opencode does not render that shape because its `Build · …` footer is drawn
+# inside the composer.
+_fm_composer_leftbar_bound() {  # <plain-screen> <first> <last> -> width
+  local plain=$1 first=$2 last=$3
+  local raw trimmed width floor_col bar_col row clipped cols inbound=0
   raw=$(_fm_composer_screen_row "$((last + 1))" "$plain")
   trimmed=$raw
   fm_composer_normalize_trim_var trimmed
   _fm_composer_leftbar_floor_row "$trimmed" || return 1
-  printf '%s' "$(printf '%s\n' "${raw%"${raw##*[![:space:]]}"}" | fm_composer_count_columns)"
-}
-
-# _fm_composer_leftbar_floor_fits: 0 when <width> is a credible width for the
-# composer occupying rows <first>..<last> - every one of those rows fits inside
-# it once the safe clip has run. A row that still overflows is a row the clip
-# REFUSED to cut because cutting would have split a run of text, which means the
-# floor is narrower than the composer it is supposed to close. That is a
-# mismatched or stale shape, not a live composer with a panel drawn beside it,
-# and it keeps the strict cursorless verdict it has always had.
-_fm_composer_leftbar_floor_fits() {  # <plain-screen> <first> <last> <width>
-  local plain=$1 first=$2 last=$3 width=$4 row raw cols
+  _fm_composer_row_glyph_indent_var floor_col "$raw" '╹' || return 1
+  width=$(printf '%s\n' "${raw%"${raw##*[![:space:]]}"}" | fm_composer_count_columns)
   row=$first
   while [ "$row" -le "$last" ]; do
     raw=$(_fm_composer_screen_row "$row" "$plain")
-    raw=$(printf '%s\n' "$raw" | fm_composer_clip_columns "$width")
-    raw=${raw%"${raw##*[![:space:]]}"}
-    cols=$(printf '%s\n' "$raw" | fm_composer_count_columns)
+    _fm_composer_row_glyph_indent_var bar_col "$raw" '┃' || return 1
+    [ "$bar_col" = "$floor_col" ] || return 1
+    clipped=$(printf '%s\n' "$raw" | fm_composer_clip_columns "$width")
+    cols=$(printf '%s\n' "${clipped%"${clipped##*[![:space:]]}"}" | fm_composer_count_columns)
     [ "$cols" -le "$width" ] || return 1
+    fm_composer_normalize_trim_var clipped
+    case "$clipped" in '┃'*) clipped=${clipped#┃} ;; esac
+    fm_composer_normalize_trim_var clipped
+    [ -z "$clipped" ] || inbound=1
     row=$((row + 1))
   done
-  return 0
+  [ "$inbound" = 1 ] || return 1
+  printf '%s' "$width"
 }
 
 # _fm_composer_row_below_floor_ok: 0 when <trimmed-row>, sitting directly below
@@ -1386,6 +1418,7 @@ _fm_composer_select_cursorless() {
   FM_COMPOSER_SELECTED_FIRST=-1
   FM_COMPOSER_SELECTED_LAST=-1
   FM_COMPOSER_SELECTED_AMBIG=0
+  FM_COMPOSER_SELECTED_BOUND=
   if [ "$FM_COMPOSER_SCAN_BOX_BOTTOM" -ge 0 ]; then
     generic=$FM_COMPOSER_SCAN_BOX_BOTTOM
     FM_COMPOSER_SELECTED_KIND=box
@@ -1453,12 +1486,13 @@ _fm_composer_select_cursorless() {
       fm_composer_normalize_trim_var trimmed
       if _fm_composer_leftbar_floor_row "$trimmed"; then
         boundary=$next
-        # The floor only EXPLAINS what sits below it when it is a credible
-        # border for the composer above it; see _fm_composer_leftbar_floor_fits.
-        if width=$(_fm_composer_leftbar_floor_width "$plain" "$FM_COMPOSER_SELECTED_LAST") \
-           && _fm_composer_leftbar_floor_fits "$plain" \
-                "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST" "$width"; then
+        # The floor only EXPLAINS what sits below it when it credibly closes
+        # the composer above it; see _fm_composer_leftbar_bound, whose proven
+        # bound is then handed to the classifier rather than proven twice.
+        if width=$(_fm_composer_leftbar_bound "$plain" \
+             "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"); then
           floored=1
+          FM_COMPOSER_SELECTED_BOUND=$width
         fi
       fi
     fi
@@ -1656,7 +1690,8 @@ EOF
       ;;
     leftbar)
       _fm_composer_classify_leftbar "$screen" "$styled" \
-        "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST" "$plain"
+        "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST" "$plain" \
+        "$FM_COMPOSER_SELECTED_BOUND"
       ;;
   esac
 }
@@ -1685,9 +1720,16 @@ EOF
 # each adapter keeps its own capability semantics rather than having them
 # re-derived here.
 fm_composer_no_content_observed() {  # <verdict> <screen>
-  local verdict=$1 screen=$2 plain
-  [ "$verdict" != empty ] || return 0
+  local verdict=$1 screen=$2 plain probe
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  # A capture that came back with nothing readable on it is an UNREADABLE pane,
+  # not a pane proven to hold nothing, and both readers can produce one without
+  # failing. It answers NO before any shape scan, because a screen with no rows
+  # to scan trivially finds no shape and would otherwise open the gate.
+  probe=$plain
+  fm_composer_normalize_trim_var probe
+  [ -n "$probe" ] || return 1
+  [ "$verdict" != empty ] || return 0
   _fm_composer_scan_screen "$plain" ''
   [ "$FM_COMPOSER_SCAN_LEFTBAR_END" -lt 0 ] || return 1
   [ "$FM_COMPOSER_SCAN_BOX_BOTTOM" -lt 0 ] || return 1

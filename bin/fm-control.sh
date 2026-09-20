@@ -196,6 +196,11 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
+# How long `stop` must keep classifying its endpoint as present-and-agentless
+# before it will claim the endpoint survived. A terminal whose window WAS the
+# agent tears that window down after the process exits, so a single read taken
+# the instant the agent state settles can still land before the teardown.
+STOP_SETTLE=${FM_CONTROL_STOP_SETTLE:-2}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
 
@@ -642,6 +647,30 @@ worktree_fingerprint() {  # -> a comparable string for $WT, or `unreadable`
   printf '%s %s' "$head" "$dirty"
 }
 
+# endpoint_survived: 0 only when this verb's whole promise - the endpoint is
+# still there and the agent is gone from it - is ESTABLISHED, which is exactly
+# the recovery-grade classifier's `dead`. It is read repeatedly across a bounded
+# settle window rather than sampled once, because a terminal whose window WAS
+# the agent tears that window down after the process exits and the first read
+# can land before that has happened.
+#
+# The cheap pane-presence read is deliberately not used here: on tmux it
+# resolves `<session>:<window>` loosely and answers for the session's CURRENT
+# window once the named one is gone, so it cannot tell a preserved endpoint from
+# a destroyed one. `agent_state` is the surface this verb already requires a
+# backend to have, and the tmux adapter implements it from an exact session
+# inventory. Anything other than a stable `dead` leaves survival unestablished,
+# and do_stop reports stopped-endpoint-gone rather than claiming preservation.
+endpoint_survived() {
+  local elapsed=0
+  while :; do
+    [ "$(agent_state)" = dead ] || return 1
+    awk -v e="$elapsed" -v t="$STOP_SETTLE" 'BEGIN{exit !(e < t)}' || return 0
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+}
+
 do_stop() {
   local state absence pid comm cwd before after waited
   require_state_verified_backend stop
@@ -704,8 +733,7 @@ do_stop() {
   fi
   # The endpoint SHOULD have survived: that is this verb's promise. Where it did
   # not, say so plainly instead of reporting an unqualified success.
-  state=$(fm_backend_target_exists "$BACKEND" "$T" 2>/dev/null && printf 'present' || printf 'absent')
-  if [ "$state" != present ]; then
+  if ! endpoint_survived; then
     after=$(worktree_fingerprint)
     [ "$after" = "$before" ] \
       || die "stop-delivered $ID pid=$pid comm=$comm signal=TERM agent=stopped worktree=CHANGED before='$before' after='$after'"
