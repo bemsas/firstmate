@@ -693,7 +693,7 @@ The first two require the verb to refuse - `worktree-state=CHANGED` and `worktre
 The token claims what a porcelain read proves and no more: the entry set and its status letters were preserved.
 It is not a content guarantee, and a further case pins that boundary honestly - a tracked file the agent had already modified, truncated to zero bytes during shutdown, keeps its ` M <path>` entry on both sides, so the verb completes and reports `entries-preserved` over contents that are gone.
 Proving content survival would mean hashing every dirty path on every stop; this check does not do that and the wording no longer implies it.
-Each of those exits retires the task's busy wiring first: the agent is already proven dead or missing by then, so a record that outlived it would leave the task classifying `busy` with no agent behind it.
+Each of those exits retires the task's busy wiring first, and so does every early return for an agent already established not running - the `already-stopped` and `endpoint-gone` cases, which is how a worker that exhausted its authentication retries and exited on its own stops pinging busy rather than merely being reported already stopped: the agent is already proven dead or missing by then, so a record that outlived it would leave the task classifying `busy` with no agent behind it.
 
 `stop`'s own outcome keys are `endpoint-state=` and `worktree-state=`, distinct from the `endpoint=` address and `worktree=` path the shared result line carries, so one line never uses a key for two meanings.
 
