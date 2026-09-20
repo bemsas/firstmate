@@ -165,6 +165,29 @@ esac
 kill -0 "$SHELL_PID" 2>/dev/null || fail "an already-stopped stop killed the pane's shell"
 pass "fm-control stop: an already-stopped task is idempotent and never signals the shell"
 
+# --- 4a. AN AGENT THAT EXITED ON ITS OWN still leaves a task pinging busy ---
+# This is the likeliest real path into the state the verb exists to clear: a
+# worker wedged at authentication exhausts its retries and exits before anyone
+# gets to it. fm_busy_classify reads the busy RECORD and never consults
+# liveness, so the task keeps classifying `busy` with nothing behind it. A
+# `stop` that reports `already-stopped` and touches nothing leaves it costing a
+# supervision turn every few minutes, and calls that success.
+bash "$ROOT/bin/fm-busy-event.sh" arm "$WORK/home/state" t1 >/dev/null 2>&1 \
+  || fail "could not arm a busy incarnation for the already-stopped case"
+[ -f "$WORK/home/state/t1.busy-state" ] || fail "arming did not write a busy record"
+[ -f "$WORK/home/state/t1.busy-gen" ] || fail "arming did not write a busy generation"
+out=$(run_stop) || fail "stop on an already-stopped task must succeed, got: $out"
+case "$out" in
+  already-stopped*) ;;
+  *) fail "stop must report already-stopped for an agent that exited on its own, got: $out" ;;
+esac
+[ ! -e "$WORK/home/state/t1.busy-state" ] \
+  || fail "an already-stopped stop left the task recorded busy with no agent behind it"
+[ ! -e "$WORK/home/state/t1.busy-gen" ] \
+  || fail "an already-stopped stop left an orphaned busy generation"
+kill -0 "$SHELL_PID" 2>/dev/null || fail "the already-stopped busy case killed the pane's shell"
+pass "fm-control stop: an agent that exited on its own stops pinging busy, not just reports already-stopped"
+
 # --- 4b. THE CONTENT GATE. A visible draft is never signalled away ----------
 # A signal destroys whatever the composer holds, so the stop path is reachable
 # only where the classifier positively establishes that nothing was observed.

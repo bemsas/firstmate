@@ -798,8 +798,17 @@ do_stop() {
   local state absence pid comm cwd wt_real before after waited endpoint
   require_state_verified_backend stop
   state=$(agent_state)
+  # Every exit below reports an agent already established not running, and each
+  # one retires the task's busy wiring before it returns. fm_busy_classify reads
+  # the busy RECORD and never consults liveness, so an agent that exhausted its
+  # authentication retries and exited on its own leaves the task classifying
+  # `busy` with nothing behind it. Reporting `already-stopped` and touching
+  # nothing would leave that task costing a supervision turn every few minutes -
+  # the exact state this verb exists to clear, reached by the path most likely to
+  # happen in real use. The call is a no-op where no incarnation is armed.
   case "$state" in
     dead)
+      retire_busy_incarnation
       printf 'already-stopped'
       return 0
       ;;
@@ -807,8 +816,8 @@ do_stop() {
     missing)
       absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T")
       case "${absence%%$'\t'*}" in
-        gone) printf 'endpoint-gone'; return 0 ;;
-        dead) printf 'already-stopped'; return 0 ;;
+        gone) retire_busy_incarnation; printf 'endpoint-gone'; return 0 ;;
+        dead) retire_busy_incarnation; printf 'already-stopped'; return 0 ;;
         alive) ;;
         *) die "task $ID's endpoint $T reads 'missing', but ${absence#*$'\t'}; stop will not signal a process at an address it cannot trust" ;;
       esac

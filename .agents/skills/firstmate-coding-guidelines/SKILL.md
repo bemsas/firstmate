@@ -135,5 +135,6 @@ Firstmate PR #3644 demonstrated the cost: pinning a 75-162-script walk took 32.7
   This is the rule a rename breaks: a change that renames a token or reworks a message will find that token inside recorded transcripts too, and rewriting it there silently turns evidence into fabrication that no test can catch, because a transcript is prose.
   If a token inside a transcript disagrees with the code, the capture is stale and needs re-running; it is never the line to edit.
   Say so explicitly in any brief that asks for a rename, so the work leaves evidence blocks alone.
+  Expect to break this rule while writing it: applying a rule and obeying it are different acts, and the moment of applying it is when nobody is checking - which is why it is written down, so the next instance is findable.
 - Include the date, version, exact commands run, and exact output needed to support the current guarantee.
 - Keep incident chronology and delivery evidence in private task reports or PR evidence unless a concise rationale is required to maintain a current safety boundary.

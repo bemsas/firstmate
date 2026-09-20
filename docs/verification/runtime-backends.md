@@ -580,7 +580,7 @@ Observed output:
 ```text
 ok - claude (2.1.227 (Claude Code)): real idle composer classifies empty
 ok - codex (codex-cli 0.146.0): real idle composer classifies empty
-ok - opencode (1.14.46): real idle composer classifies empty   # superseded for 1.18.31; see below
+ok - opencode (1.14.46): real idle composer classifies empty
 ok - pi (0.84.0): real idle composer classifies empty
 ok - grok (grok 1.0.0 (3cd0d0cbcebe)): real idle composer classifies empty
 # harness absent, not verified here: kimi
@@ -594,6 +594,7 @@ All six installed harnesses' real idle composers reached a proven `empty` (Claud
 The strict blank-row posture held live (a blank shell row deferred injection), and a zellij pane changing for reasons unrelated to submission never confirmed a delivery, replacing the retired content-diff heuristic's false positive.
 Kimi was not installed on the verification machine; its bordered shape is pinned by the portable byte-capture regressions in `tests/fm-composer-lib.test.sh`, which also carry the other five adapters' capability profiles for every harness under both a UTF-8 locale and `LC_ALL=C`.
 This guard is the refresh command after an upgrade to any matrix-covered harness; rerun it and update the versions above rather than trusting this table across releases.
+OpenCode's 1.14.46 result in that run is superseded by the 1.18.31 findings recorded below.
 ### opencode 1.18.31: furniture below the composer floor, and a panel beside it
 
 On 2026-09-20 every cursorless composer read of opencode 1.18.31 returned `unknown`, idle or busy, so `bin/fm-control.sh exit` and `relaunch` refused for every opencode worker on herdr, zellij, cmux, and orca - the refusal was correct and the verdict was wrong.
@@ -657,6 +658,7 @@ ok - fm-control stop: the resolved pid is the pane's foreground agent, not its s
 ok - fm-control stop: an agent outside the recorded worktree refuses and is left running
 ok - fm-control stop: the agent stops while its endpoint, shell, and uncommitted work survive
 ok - fm-control stop: an already-stopped task is idempotent and never signals the shell
+ok - fm-control stop: an agent that exited on its own stops pinging busy, not just reports already-stopped
 ok - fm-control stop: an observed draft refuses, and neither the draft nor the agent is touched
 ok - fm-control stop: a worktree that loses its single dirty file is reported CHANGED, never preserved
 ok - fm-control stop: a window that WAS the agent reports its fate unestablished, never preserved or proven gone
