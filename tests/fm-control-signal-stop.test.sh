@@ -55,8 +55,12 @@ printf '# brief\n' > "$LAB/home/data/t1/brief.md"
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n shell -c "$LAB/wt" -- bash
 "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n fm-t1 -c "$LAB/wt" -- bash
 # Launch the harness-named sleep as a foreground child of the pane shell so
-# signaling it leaves the endpoint behind.
-"$REAL_TMUX" -L "$SOCKET" send-keys -t "$SESSION:fm-t1" "$LAB/bin/claude 900" Enter
+# signaling it leaves the endpoint behind. The blank lines scroll the shell's
+# own echo off the visible pane and the status row that follows is the only
+# thing left on it, which is the screen the non-typing stop is defined for: a
+# capture that was read and holds nothing that could be a draft.
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$SESSION:fm-t1" \
+  "yes '' | head -60; printf '  ctrl+p commands\n'; $LAB/bin/claude 900" Enter
 
 waited=0
 state=
@@ -70,7 +74,7 @@ done
 
 composer=$(PATH="$LAB/shim:$PATH" bash -c '. "$1/bin/fm-backend.sh"; fm_backend_composer_state tmux "$2"' _ "$ROOT" "$SESSION:fm-t1")
 [ "$composer" = no-composer ] \
-  || fail "the non-typing stop is reachable only from a pane proven to hold no composer; this construction read '$composer'"
+  || fail "the non-typing stop is reachable only from a capture proven to hold nothing draft-shaped; this construction read '$composer'"
 
 # tmux answers an absent target from the session's CURRENT window instead of
 # failing, so a pid read that skips window membership would hand the stop

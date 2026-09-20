@@ -48,9 +48,10 @@ The clear is refused before anything is sent when the recorded backend cannot de
 `exit` reads the composer's state before typing the exit command.
 An `empty` verdict types the harness's exit command.
 A `pending` verdict refuses by naming the pending text, and `pending-unproven` and `unknown` - the verdicts where the classifier observed composer content it could not prove - refuse too, without typing and without signaling.
-Text that was observed is therefore never concatenated onto and never discarded by a signal; the guarantee is exactly that, and it does not extend to text no read ever saw.
-The one remaining verdict, `no-composer`, is the classifier's positive finding that the screen holds no composer at all - no container of any shape, no shell prompt, no structure at the bottom of the capture, and on a cursor-anchored backend a blank cursor row - so no draft was observed and there is nowhere to type.
-That verdict, and only that verdict, stops the agent by signaling each pid the recovery-grade classifier established as this task's agent.
+Text that was observed is therefore never concatenated onto and never discarded by a signal.
+The one remaining verdict, `no-composer`, is the classifier's positive reading of the capture: the read happened (the body holds at least one non-blank row), no container of any shape is on it, and every non-blank row is harness furniture the classifier recognizes - so nothing that could be a draft was read, on every backend alike, with or without a cursor.
+An empty body, an all-blank body, and a body holding any other text all read `unknown` and refuse.
+That one verdict stops the agent by signaling each pid the recovery-grade classifier established as this task's agent.
 The non-typing stop refuses rather than guessing when no such pid can be named, and it never signals a process group.
 
 **Teardown and discard are not verbs and will not become verbs.**

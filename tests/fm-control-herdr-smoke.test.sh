@@ -227,7 +227,11 @@ wait_process_state() {  # <expected> <tries>
 }
 
 start_agent_process() {
-  fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "$AGENT_Q 900" \
+  # The blank lines scroll the shell's own echo off the visible pane, leaving
+  # the status row as the only thing on it: the screen the non-typing stop is
+  # defined for, a capture that was read and holds nothing draft-shaped.
+  fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" \
+    "yes '' | head -60; printf '  ctrl+p commands\n'; $AGENT_Q 900" \
     || fail "could not start the agent-named foreground process in the task pane"
   wait_process_state agent 50 \
     || version_fail "a real agent-named foreground process reads '$(fm_backend_herdr_pane_process_state "$SESSION" "$PANE_ID")' rather than 'agent' through pane process-info"

@@ -113,13 +113,14 @@
 #     classified state acts.
 #   - A composer that visibly holds pending text refuses before an exit command
 #     is typed, so existing text is preserved instead of being concatenated.
-#   - When the classifier reports `no-composer` - its positive finding that the
-#     screen holds no composer, so no draft was observed - `exit` stops the
-#     identified agent process without typing. That path still refuses when it
-#     cannot name a pid that the recovery-grade classifier established as this
-#     task's agent, and it never signals a process group. `unknown` and
-#     `pending-unproven` saw content they could not prove, so they refuse both
-#     the typed exit command and the signal.
+#   - When the classifier reports `no-composer` - its positive reading that the
+#     capture was read and holds nothing that could be a draft - `exit` stops
+#     the identified agent process without typing. That path still refuses when
+#     it cannot name a pid that the recovery-grade classifier established as
+#     this task's agent, and it never signals a process group. `unknown` and
+#     `pending-unproven` either saw content they could not prove or read
+#     nothing at all, so they refuse both the typed exit command and the
+#     signal.
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
@@ -481,12 +482,14 @@ retire_busy_incarnation() {
 }
 
 # stop_agent_by_signal: TERM each pid the recovery-grade classifier named as
-# this task's agent, without typing into the composer. Re-reads the pid list
-# immediately before signaling so a reused pid is not killed. Refuses when it
-# cannot name a digit-only pid that is still this pane's agent. Never signals
-# a process group (a leading minus is rejected by the digit-only check).
+# this task's agent, without typing into the composer. Refuses when the backend
+# cannot read the pane, when it names no pid, or when any line of the list is
+# not a digit-only process id - so a process group (a leading minus) is never
+# signaled. The pane is read once; a pid that exits between that read and the
+# kill below is the ordinary race every signal carries, and `kill` failing on
+# it is not an error here.
 stop_agent_by_signal() {
-  local pids_raw pid still='' live
+  local pids_raw pid
   pids_raw=$(fm_backend_agent_pids "$BACKEND" "$T" "$LABEL" 2>/dev/null) || return 1
   [ -n "$pids_raw" ] || return 1
   while IFS= read -r pid; do
@@ -497,24 +500,11 @@ stop_agent_by_signal() {
   done <<EOF
 $pids_raw
 EOF
-  live=$(fm_backend_agent_pids "$BACKEND" "$T" "$LABEL" 2>/dev/null) || return 1
-  [ -n "$live" ] || return 1
-  while IFS= read -r pid; do
-    [ -n "$pid" ] || continue
-    case "$pid" in
-      *[!0-9]*|0) continue ;;
-    esac
-    printf '%s\n' "$live" | grep -qxF -- "$pid" || continue
-    still="${still}${still:+$'\n'}$pid"
-  done <<EOF
-$pids_raw
-EOF
-  [ -n "$still" ] || return 1
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     kill -s TERM "$pid" 2>/dev/null || true
   done <<EOF
-$still
+$pids_raw
 EOF
   return 0
 }
@@ -593,11 +583,11 @@ do_exit() {
       die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Clear or submit the pending text, then retry '$VERB'"
       ;;
     no-composer)
-      # The classifier established that this screen holds no composer at all,
-      # so no draft was observed and there is nothing a stop could destroy.
-      # Typing is still refused - there is nowhere to type - and the
-      # non-typing stop signals the identified agent process instead. Refuse
-      # rather than guess when no pid is established as this task's agent.
+      # The classifier read this capture and established that nothing on it
+      # could be a draft, so there is nothing a stop could destroy. Typing is
+      # still refused - there is nowhere to type - and the non-typing stop
+      # signals the identified agent process instead. Refuse rather than guess
+      # when no pid is established as this task's agent.
       if ! stop_agent_by_signal; then
         die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text, and no agent process could be identified to stop without typing. Clear the composer, then retry '$VERB'"
       fi
@@ -613,10 +603,11 @@ do_exit() {
       return 0
       ;;
     *)
-      # `unknown` and `pending-unproven` are the verdicts where composer
-      # content WAS observed and could not be proven. Typing would concatenate
-      # onto it and a signal would destroy it, so both refuse; only a screen
-      # the classifier proved holds no composer reaches the non-typing stop.
+      # `unknown` and `pending-unproven` are the verdicts where content was
+      # observed and could not be proven, or where nothing was read at all.
+      # Typing would concatenate onto text that may be there and a signal would
+      # destroy it, so both refuse; only a capture the classifier proved holds
+      # nothing draft-shaped reaches the non-typing stop.
       die "task $ID's composer state is '$composer_state', not proven empty and not proven free of text; refusing to type the $cmd exit command because it could concatenate onto existing text, and refusing to stop the agent by signal because that would discard text this read could not rule out. Clear the composer, then retry '$VERB'"
       ;;
   esac

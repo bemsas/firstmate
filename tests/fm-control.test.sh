@@ -864,10 +864,10 @@ test_exit_refuses_composerless_pane_when_no_agent_pid_is_identified() {
   dir=$(new_case nocomposer-nopid)
   add_task "$dir" t1 claude
   alive_as "$dir" claude
-  # No container anywhere and a blank cursor row: the classifier proves this
-  # pane holds no composer, so the non-typing stop is allowed to try - and
-  # still refuses, because no pid is established as this task's agent.
-  printf 'some output\n\n' > "$dir/fake/pane"
+  # A capture that was read and holds nothing but harness chrome: the classifier
+  # proves nothing on it could be a draft, so the non-typing stop is allowed to
+  # try - and still refuses, because no pid is established as this task's agent.
+  printf '  ctrl+p commands\n\n' > "$dir/fake/pane"
   out=$(run_control "$dir" t1 exit); rc=$?
   expect_code 1 "$rc" "exit must refuse a composerless pane when no agent pid is identified"$'\n'"$out"
   assert_contains "$out" "not proven empty" \
@@ -885,9 +885,9 @@ test_exit_never_signals_a_draft_it_could_not_place() {
   dir=$(new_case unknown-draft)
   add_task "$dir" t1 claude
   alive_as "$dir" claude
-  # Text under the cursor that the classifier cannot place in a container:
-  # content WAS observed, so this is `unknown`, not `no-composer`. Typing would
-  # concatenate onto it and a signal would destroy it, so exit does neither.
+  # Text the classifier cannot place in a container: content WAS observed, so
+  # this is `unknown`, not `no-composer`. Typing would concatenate onto it and a
+  # signal would destroy it, so exit does neither.
   printf 'some output\nhuman draft text\n' > "$dir/fake/pane"
   out=$(run_control "$dir" t1 exit); rc=$?
   expect_code 1 "$rc" "exit must refuse when observed text could not be placed"$'\n'"$out"

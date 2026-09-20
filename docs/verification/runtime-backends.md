@@ -656,7 +656,7 @@ The Herdr captures above are therefore this entry's live evidence, and the guard
 ### 2026-09-20 OpenCode 1.18.31 idle composer through Herdr, and the non-typing stop
 
 Verified on 2026-09-20 on Linux against OpenCode 1.18.31 inside an isolated Herdr 0.9.1 lab session (`tests/fm-control-opencode-herdr-live-e2e.test.sh`), with no prompt submitted.
-Before the classifier change, a genuinely idle empty OpenCode composer on Herdr classified `unknown`: OpenCode draws its status chrome (`ctrl+p commands`, `OpenCode <version>`, or `esc interrupt`) on the row immediately under the `╹▀` floor, with no blank separator, and Herdr's ANSI 20-row tail can drop the leading blank `┃` so the idle hint sits on the first left-bar row.
+Before the classifier change, a genuinely idle empty OpenCode composer on Herdr classified `unknown`: OpenCode draws its status chrome - the `ctrl+p commands` keybind cell, present on both the idle and the busy row - immediately under the `╹▀` floor, with no blank separator, and Herdr's ANSI 20-row tail can drop the leading blank `┃` so the idle hint sits on the first left-bar row.
 The cursorless container check treated that chrome as unclaimed transcript and rejected the left-bar, so `bin/fm-control.sh exit` refused to type `/exit`.
 After the change the same live idle pane classifies `empty`, and `fm-control exit` stops the worker while leaving the pane and the local copy in place.
 
@@ -667,7 +667,7 @@ ok - opencode (1.18.31) on herdr: fm-control exit stops the worker and preserves
 
 The portable regressions in `tests/fm-composer-lib.test.sh` pin that layout, keep typed drafts `pending`, and keep `Working on request...` immediately under the floor as `unknown`.
 `tests/fm-control.test.sh` pins that pending text still refuses, that a pane with no composer and no identified agent pid still refuses, and that observed text the classifier cannot place is neither typed into nor signaled.
-Only the `no-composer` verdict - the classifier's positive finding that the screen holds no composer at all, so no draft was observed - reaches the non-typing stop, where `exit` signals each pid the recovery-grade classifier named as this task's agent rather than typing; `tests/fm-control-signal-stop.test.sh` and `tests/fm-control-herdr-smoke.test.sh` prove that path against a harness-named process on tmux and Herdr.
+Only the `no-composer` verdict - the classifier's positive reading that the capture was read and every non-blank row on it is harness furniture, so nothing that could be a draft was seen - reaches the non-typing stop, where `exit` signals each pid the recovery-grade classifier named as this task's agent rather than typing; `tests/fm-control-signal-stop.test.sh` and `tests/fm-control-herdr-smoke.test.sh` prove that path against a harness-named process behind a chrome-only screen on tmux and Herdr.
 This guard is the refresh command after an OpenCode or Herdr upgrade:
 
 ```sh

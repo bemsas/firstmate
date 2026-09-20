@@ -837,7 +837,7 @@ test_composer_state_unknown_on_capture_failure() {
   pass "fm_backend_cmux_composer_state: reports unknown when the surface cannot be captured"
 }
 
-test_composer_state_not_empty_when_no_composer_row_found() {
+test_composer_state_unknown_when_no_composer_row_found() {
   local dir fb out
   dir="$TMP_ROOT/composer-no-row"; mkdir -p "$dir/responses"
   cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
@@ -845,11 +845,8 @@ test_composer_state_not_empty_when_no_composer_row_found() {
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_composer_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
-  # Nothing container-shaped is on this capture at all, so the shared owner
-  # reports `no-composer`. What this pins is the injection guarantee: it is not
-  # `empty` and not `pending`, so no caller may type into it.
-  [ "$out" = no-composer ] || fail "a capture with no recognizable composer row should read as no-composer, got '$out'"
-  pass "fm_backend_cmux_composer_state: never reports empty when no border-delimited composer row is found"
+  [ "$out" = unknown ] || fail "a capture with no recognizable composer row should read as unknown, got '$out'"
+  pass "fm_backend_cmux_composer_state: reports unknown when no border-delimited composer row is found"
 }
 
 # --- send_text_submit: structural composer-row verify-and-retry --------------
@@ -1154,7 +1151,7 @@ test_composer_state_ghost_placeholder_is_empty
 test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure
-test_composer_state_not_empty_when_no_composer_row_found
+test_composer_state_unknown_when_no_composer_row_found
 test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter

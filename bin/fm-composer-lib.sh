@@ -483,16 +483,15 @@ FM_COMPOSER_MODE_HINT_RE_DEFAULT='^[[:space:]]*(⏵|⏸)'
 # blank `┃`, which would otherwise make a genuine idle hint read pending.
 FM_COMPOSER_LEFTBAR_IDLE_RE_DEFAULT='^Ask anything(\.\.\.|…)([[:space:]]+".*")?$'
 # OpenCode 1.18 draws one status row immediately under the `╹▀` floor, with no
-# blank separator: a path or busy spinner, a token counter, `ctrl+p commands`,
-# and `OpenCode <version>` (verified live through Herdr on OpenCode 1.18.31:
+# blank separator. Both rows verified live through Herdr on OpenCode 1.18.31 -
 # idle `/home/... 40.1K (4%)  ctrl+p commands    • OpenCode 1.18.31` and busy
-# `esc interrupt  ...  ctrl+p commands    • OpenCode 1.18.31`). Without this
-# rule the cursorless "activity below a proven container" check treats that
-# chrome as unclaimed transcript, rejects the left-bar, and every OpenCode
-# pane on Herdr - including a genuinely idle empty composer - reads `unknown`.
-# Any one of the three independent signals is enough; `Working on request...`
-# matches none of them, so the stale-leftbar invalidation stays honest.
-FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT='ctrl\+p commands|OpenCode [0-9]|esc interrupt'
+# `esc interrupt  ...  ctrl+p commands    • OpenCode 1.18.31` - carry the
+# keybind cell, so that one cell is the whole rule. Without it the cursorless
+# "activity below a proven container" check treats that chrome as unclaimed
+# transcript, rejects the left-bar, and every OpenCode pane on Herdr -
+# including a genuinely idle empty composer - reads `unknown`. `Working on
+# request...` does not match, so the stale-leftbar invalidation stays honest.
+FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT='ctrl\+p commands'
 # omp (Oh My Pi) draws a one-row status line directly BELOW its borderless
 # composer: an identity or spinner cell, then middle-dot separated model, path,
 # git, and context cells. Verified live through Herdr on omp 18.1.11:
@@ -751,15 +750,16 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # `no-composer` and `unknown` are BOTH "not proven empty" and both refuse every
 # consumer that can overwrite input, but they are not the same finding and a
 # caller that destroys state must not conflate them:
-#   no-composer - the POSITIVE finding that this screen holds no composer at
-#                 all: no container of any shape anywhere on it, no shell
-#                 prompt row, no structure at the bottom of the capture, and in
-#                 cursor mode a blank cursor row (see
-#                 _fm_composer_unresolved_verdict). No composer content was
-#                 observed, so no draft can be lost.
-#   unknown     - a composer, or something structural enough to be one, WAS
-#                 seen and its contents could not be proven. Content may be
-#                 sitting in it, so nothing may act as though the pane is empty.
+#   no-composer - the POSITIVE finding that this capture was read and holds
+#                 nothing that could be a draft: at least one non-blank row, no
+#                 container of any shape, and every non-blank row is harness
+#                 furniture this owner recognizes (see
+#                 _fm_composer_unresolved_verdict). No content was observed, so
+#                 no draft can be lost.
+#   unknown     - anything else that is not proven: content was seen, or a
+#                 container was seen and could not be proven, or nothing was
+#                 read at all. Content may be sitting in the pane, so nothing
+#                 may act as though it is empty.
 # `pending-unproven` is the same shape as `unknown` with the pending row
 # already identified: content was observed, the container geometry was not.
 #
@@ -1237,37 +1237,6 @@ _fm_composer_row_is_below_container_furniture() {  # <trimmed-row>
   return 1
 }
 
-# _fm_composer_leftbar_is_cwd_wrap: 0 when <raw-row> is OpenCode's right-aligned
-# cwd wrap. The row is ANSI-stripped through the shared row extractor first,
-# exactly as every sibling row predicate is, because OpenCode dims the cwd and
-# a styled capture would otherwise carry an escape ahead of the bar or the
-# indent. It matches a `┃` row whose post-bar body starts with at least eight
-# spaces then a single path token. Typed input is left-aligned with two spaces
-# (`┃  draft`); the footer's overflow path is pushed onto the previous row
-# with a long run of spaces. Eight spaces is more indent than typed input uses,
-# so a human typing a path still reads pending.
-_fm_composer_leftbar_is_cwd_wrap() {  # <raw-row>
-  local row body
-  row=$(_fm_composer_row_content "$1" 0)
-  case "$row" in
-    '┃'*) body=${row#┃} ;;
-    *) return 1 ;;
-  esac
-  case "$body" in
-    '        '*) ;;
-    *) return 1 ;;
-  esac
-  fm_composer_normalize_trim_var body
-  case "$body" in
-    /*|[~]/*|[~]) ;;
-    *) return 1 ;;
-  esac
-  case "$body" in
-    *[[:space:]]*) return 1 ;;
-  esac
-  return 0
-}
-
 # _fm_composer_row_is_braille_furniture: 0 when the row is non-blank and its
 # non-whitespace content is entirely braille cells (fm_composer_strip_braille
 # above) - an animation row that never counts as typed content and bounds a
@@ -1358,9 +1327,6 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
   row=$first
   while [ "$row" -le "$last" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
-    if _fm_composer_leftbar_is_cwd_wrap "$raw"; then
-      row=$((row + 1)); continue
-    fi
     content=$(_fm_composer_row_content "$raw" "$styled")
     plain_content=$(_fm_composer_row_content "$raw" 0)
     case "$content" in
@@ -1390,8 +1356,7 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
       row=$((row + 1)); continue
     fi
     if [ "$placeholder_position" = 1 ] \
-       && { fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive \
-            || fm_composer_idle_matches "$plain_content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive; }; then
+       && fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive; then
       row=$((row + 1)); continue
     fi
     if [ "$row" -eq "$last" ] \
@@ -1411,18 +1376,22 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
 # _fm_composer_unresolved_verdict: the verdict for a screen whose composer this
 # owner could not resolve, split into the two findings a caller that destroys
 # state has to tell apart (see the verdict contract above
-# fm_composer_classify_screen). `no-composer` is printed ONLY when the row scan
-# found no container of any shape - no complete or partial box, no left bar, no
-# bare agent glyph, no pi separator - and no shell prompt row (a live shell can
-# hold a half-typed command, which is the dead-shell posture this owner has
-# always kept unsafe), no structural chrome on the bottom-most non-blank row,
-# and, in cursor mode, a blank cursor row; that is a positive "no composer
-# content was observed here". Every other unresolved screen saw something and
-# prints `unknown`, which means a draft may be sitting in it. Reads the
+# fm_composer_classify_screen). `no-composer` is a POSITIVE reading of the
+# capture and needs both halves of one:
+#   - the capture holds at least one non-blank row, so a read actually
+#     happened. An empty or all-blank body is the absence of a read (a backend
+#     that answered with nothing, or a pane caught mid-redraw), never a finding
+#     about the screen.
+#   - every non-blank row on it is harness furniture this owner recognizes.
+#     Anything else - transcript, a shell command line, a container this owner
+#     could not resolve - is content that could be a draft.
+# The reading never consults the cursor, so a cursorless backend answers the
+# same question as a cursor-anchored one, and no backend can treat
+# unrecognized-container-plus-visible-text as content-free. Reads the
 # FM_COMPOSER_SCAN_* results of the scan that just ran, so it is only ever
 # called after one.
-_fm_composer_unresolved_verdict() {  # <plain-screen> [cursor-row]
-  local plain=$1 cy=${2:-} row
+_fm_composer_unresolved_verdict() {  # <plain-screen>
+  local plain=$1 row seen=0
   if [ "$FM_COMPOSER_SCAN_BOX_TOP" -ge 0 ] \
      || [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -ge 0 ] \
      || [ "$FM_COMPOSER_SCAN_LEFTBAR_START" -ge 0 ] \
@@ -1432,24 +1401,15 @@ _fm_composer_unresolved_verdict() {  # <plain-screen> [cursor-row]
     printf 'unknown'
     return 0
   fi
-  if [ -n "$cy" ]; then
-    row=$(_fm_composer_screen_row "$cy" "$plain")
+  while IFS= read -r row; do
     fm_composer_normalize_trim_var row
-    if [ -n "$row" ]; then
-      printf 'unknown'
-      return 0
-    fi
-  fi
-  # A composer is bottom-anchored, so structural chrome on the LAST non-blank
-  # row is an unresolved container rather than the absence of one - a composer
-  # drawn in a shape this owner does not recognize, or caught mid-redraw, would
-  # otherwise read as "nothing here" while holding a draft.
-  row=$(printf '%s\n' "$plain" | LC_ALL=C awk 'NF { last = $0 } END { print last }')
-  fm_composer_normalize_trim_var row
-  if [ -n "$row" ] && fm_composer_row_has_edge "$row"; then
-    printf 'unknown'
-    return 0
-  fi
+    [ -n "$row" ] || continue
+    _fm_composer_row_is_below_container_furniture "$row" || { printf 'unknown'; return 0; }
+    seen=1
+  done <<EOF
+$plain
+EOF
+  [ "$seen" = 1 ] || { printf 'unknown'; return 0; }
   printf 'no-composer'
 }
 
@@ -1686,19 +1646,15 @@ EOF
         fi
         ;;
       leftbar)
-        if _fm_composer_leftbar_is_cwd_wrap "$raw"; then
-          content=
+        case "$content" in '┃'*) content=${content#┃} ;; esac
+        fm_composer_normalize_trim_var content
+        if [ -z "$content" ]; then
+          :
+        elif [ "$leading_blank" = 1 ] && [ "$row" -gt "$FM_COMPOSER_SELECTED_FIRST" ]; then
+          placeholder_position=1
+          leading_blank=0
         else
-          case "$content" in '┃'*) content=${content#┃} ;; esac
-          fm_composer_normalize_trim_var content
-          if [ -z "$content" ]; then
-            :
-          elif [ "$leading_blank" = 1 ] && [ "$row" -gt "$FM_COMPOSER_SELECTED_FIRST" ]; then
-            placeholder_position=1
-            leading_blank=0
-          else
-            leading_blank=0
-          fi
+          leading_blank=0
         fi
         ;;
       box)
@@ -1810,8 +1766,8 @@ EOF
     # STRICT: a blank or otherwise unidentified cursor row has no positive
     # container proof. This replaced the permissive blank-cursor-row rule
     # (captain decision blank-row-injection-posture). It stays a refusal either
-    # way; the split only names whether a container was seen at all.
-    _fm_composer_unresolved_verdict "$plain" "$cy"
+    # way; the split only names whether anything that could be a draft was read.
+    _fm_composer_unresolved_verdict "$plain"
     return 0
   fi
   # No cursor: the bottom-most shape wins, with the pi-separator staleness
