@@ -657,6 +657,20 @@ worktree_fingerprint() {  # -> a comparable value for $WT, `absent`, or `unreada
   printf '%s\n%s' "$head" "$status"
 }
 
+# worktree_entries: the porcelain entries carried by <fingerprint>, and nothing
+# at all when it carries none.
+#
+# The boundary between the HEAD line and the entries is STATED here rather than
+# inferred from whether a newline survived command substitution. A CLEAN
+# worktree fingerprints as its HEAD line alone, and "everything after the first
+# newline" read off that returns the HEAD sha itself - which would then be
+# compared as though it were an uncommitted entry, and never found.
+worktree_entries() {  # <fingerprint>
+  case "$1" in
+    *$'\n'*) printf '%s' "${1#*$'\n'}" ;;
+  esac
+}
+
 # worktree_outcome: what can be ESTABLISHED about $WT between two fingerprints.
 # A worktree that could not be read is not a worktree that came through intact,
 # so `unreadable` is its own answer rather than a constant that compares equal
@@ -679,9 +693,9 @@ worktree_outcome() {  # <before> <after> -> unchanged|changed|unverified
     printf 'unchanged'
     return 0
   fi
-  # HEAD is the fingerprint's first line; the porcelain entries are the rest.
+  # HEAD is the fingerprint's first line; worktree_entries owns the rest.
   [ "${1%%$'\n'*}" = "${2%%$'\n'*}" ] || { printf 'changed'; return 0; }
-  after_entries=$'\n'"${2#*$'\n'}"$'\n'
+  after_entries=$'\n'$(worktree_entries "$2")$'\n'
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     case "$after_entries" in
@@ -689,7 +703,7 @@ worktree_outcome() {  # <before> <after> -> unchanged|changed|unverified
       *) printf 'changed'; return 0 ;;
     esac
   done <<EOF
-${1#*$'\n'}
+$(worktree_entries "$1")
 EOF
   printf 'unchanged'
 }
@@ -754,8 +768,17 @@ endpoint_outcome() {  # -> preserved|did-not-survive|unestablished
   esac
 }
 
+# physical_path: <dir> with every symlink resolved, or failure when it does not
+# resolve. Both sides of the worktree identity proof go through here so the
+# proof asks whether the process is IN the task's worktree rather than whether
+# two paths happen to be spelled the same way.
+physical_path() {  # <dir>
+  [ -n "${1-}" ] || return 1
+  (cd -P -- "$1" 2>/dev/null && pwd -P)
+}
+
 do_stop() {
-  local state absence pid comm cwd before after waited endpoint
+  local state absence pid comm cwd wt_real before after waited endpoint
   require_state_verified_backend stop
   state=$(agent_state)
   case "$state" in
@@ -788,7 +811,11 @@ do_stop() {
     || die "task $ID records no worktree, so stop cannot confirm pid $pid belongs to this task; refusing to signal it"
   cwd=$(fm_backend_process_cwd "$pid") \
     || die "task $ID's agent pid $pid has no readable working directory on this host, so its identity cannot be confirmed; refusing to signal it"
-  [ "$cwd" = "$WT" ] \
+  cwd=$(physical_path "$cwd") \
+    || die "task $ID's agent pid $pid reports a working directory that does not resolve on this host, so its identity cannot be confirmed; refusing to signal it"
+  wt_real=$(physical_path "$WT") \
+    || die "task $ID's recorded worktree '$WT' does not resolve on this host, so stop cannot confirm pid $pid belongs to this task; refusing to signal it"
+  [ "$cwd" = "$wt_real" ] \
     || die "task $ID's agent pid $pid is working in '$cwd', not the task's recorded worktree '$WT'; refusing to signal a process this task cannot claim"
 
   # THE CONTENT GATE. A signal destroys whatever the composer is holding, so

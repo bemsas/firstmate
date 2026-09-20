@@ -359,6 +359,76 @@ esac
 pass "fm-control stop: a file the harness flushed on its way out is not a destroyed worktree"
 rm -f "$WORK/wt/flushed.log"
 
+# --- 4e1. AN ALTERED ENTRY is destroyed work too, not a benign write --------
+# "Every entry present before must still be present after WITH THE SAME STATUS"
+# has two halves, and the cases around this one only pin the first. A tracked
+# file the agent had modified, reverted during shutdown, leaves the path present
+# and its porcelain status changed - nothing was added or removed, so an
+# entry-presence test alone would call that intact.
+printf 'edited by the agent\n' >> "$WORK/wt/README.md"
+git -C "$WORK/wt" add README.md
+[ "$(git -C "$WORK/wt" status --porcelain -- README.md)" = "M  README.md" ] \
+  || fail "this case needs README.md staged-modified, got: $(git -C "$WORK/wt" status --porcelain -- README.md)"
+start_agent "$WORK/wt" "git -C '$WORK/wt' reset -q -- README.md; PATH=$WORK/bin:\$PATH opencode 1" \
+  || fail "could not stage an agent that alters an entry's status as it stops"
+out=$(run_stop) && fail "stop must not report an altered entry as intact, got: $out"
+case "$out" in
+  *worktree-state=CHANGED*) ;;
+  *) fail "stop must report an entry whose status changed as a changed worktree, got: $out" ;;
+esac
+[ "$(git -C "$WORK/wt" status --porcelain -- README.md)" = " M README.md" ] \
+  || fail "this case never actually altered the entry's status"
+pass "fm-control stop: an entry whose status changed is CHANGED, though the path is still there"
+git -C "$WORK/wt" checkout -q -- README.md
+
+# --- 4e3. THE SAME RULE ON A CLEAN WORKTREE, which is the headline case -----
+# 4e2 above staged a dirty file first, so its `before` fingerprint always
+# carried an entry and it could not fail on a defect that only bites when there
+# are none. A worker wedged at authentication has produced no commits and no
+# dirty files, so its worktree is CLEAN - and that is precisely the worker this
+# verb exists to stop. A pure addition on top of nothing must still report that
+# nothing was destroyed.
+rm -f "$WORK/wt/dirty.txt" "$WORK/wt/flushed.log"
+[ -z "$(git -C "$WORK/wt" status --porcelain)" ] \
+  || fail "this case needs a genuinely clean worktree, got: $(git -C "$WORK/wt" status --porcelain)"
+start_agent "$WORK/wt" ": > '$WORK/wt/flushed.log'; PATH=$WORK/bin:\$PATH opencode 1" \
+  || fail "could not stage an agent that flushes a new file into a clean worktree"
+out=$(run_stop) || fail "stop must succeed when a CLEAN worktree only gained a file, got: $out"
+case "$out" in
+  *worktree-state=intact*) ;;
+  *) fail "a pure addition to a clean worktree must report the worktree intact, got: $out" ;;
+esac
+[ -e "$WORK/wt/flushed.log" ] || fail "this case never actually flushed a new file"
+pass "fm-control stop: a clean worktree that only gained a flushed file is intact, not destroyed"
+rm -f "$WORK/wt/flushed.log"
+printf 'uncommitted\n' > "$WORK/wt/dirty.txt"
+
+# --- 4g. THE IDENTITY PROOF asks about the directory, not its spelling ------
+# The process's working directory comes back from the kernel with every symlink
+# already resolved, while the recorded worktree is whatever string the spawn
+# wrote. If the proof compared those two spellings a single symlinked component
+# would refuse every worker on the host - leaving this verb's headline case
+# exactly as unstoppable as it was before. macOS puts $TMPDIR under
+# /var/folders, which is a symlink, so that host reaches this on every task.
+mkdir -p "$WORK/linkroot"
+ln -sfn "$WORK/wt" "$WORK/linkroot/wt-link"
+write_meta "$WORK/linkroot/wt-link"
+start_agent "$WORK/wt" || fail "could not stage an agent for the symlinked-worktree case"
+LINK_PID=$(agent_pid) || fail "the agent process could not be resolved for the symlinked case"
+out=$(run_stop) || fail "stop must claim an agent whose worktree is recorded through a symlink, got: $out"
+case "$out" in
+  "stopped pid=$LINK_PID "*) ;;
+  *) fail "stop must signal the agent when the recorded worktree resolves to its cwd, got: $out" ;;
+esac
+case "$out" in
+  *"not the task's recorded worktree"*) fail "stop refused an agent that IS in its worktree, got: $out" ;;
+esac
+i=0
+while kill -0 "$LINK_PID" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+! kill -0 "$LINK_PID" 2>/dev/null || fail "the agent survived a reported stop in the symlinked case"
+pass "fm-control stop: a worktree recorded through a symlink is still the agent's own worktree"
+write_meta "$WORK/wt"
+
 # --- 4f. A WORKTREE THAT COULD NOT BE READ is not a worktree left alone -----
 # Reading nothing is not evidence of nothing changing. If the postcondition
 # read fails the verb must say it could not check, never claim `unchanged`.
