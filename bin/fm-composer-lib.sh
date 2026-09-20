@@ -457,13 +457,15 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # The ONE fleet-wide idle-placeholder set: composer text a harness renders in
 # an EMPTY composer that a plain capture cannot tell from typed text. Grok's
 # bordered placeholder and opencode's left-bar hint (which uses either three
-# ASCII periods or U+2026 and continues with a rotating quoted suggestion,
-# hence the unanchored tail). cursor-agent renders
+# ASCII periods or U+2026 and may continue with a rotating QUOTED suggestion,
+# hence the optional quoted group). Every entry is end-anchored, so a human
+# line that merely opens with a placeholder's words - `Ask anything... please
+# investigate` - is typed text and stays pending. cursor-agent renders
 # two, both anchored: `Plan, search, build anything` in a fresh session and
 # `Add a follow-up` once a turn has completed (verified live on cursor-agent
 # 2026.08.11-e8db854). FM_COMPOSER_IDLE_RE overrides for an unverified harness;
 # matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$'
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)([[:space:]]+".*")?$|^Plan, search, build anything$|^Add a follow-up$'
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
@@ -476,12 +478,6 @@ FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
 # is deliberately not matched - and the marker is quantifier-free so the same
 # bytes match under LC_ALL=C as under a UTF-8 locale.
 FM_COMPOSER_MODE_HINT_RE_DEFAULT='^[[:space:]]*(⏵|⏸)'
-# OpenCode's idle hint, including the optional rotating quoted suggestion that
-# follows it. End-anchored so `Ask anything... please investigate` stays
-# pending typed text. Applied to any left-bar content row, not only the
-# placeholder-position row: Herdr's ANSI 20-row tail can drop the leading
-# blank `┃`, which would otherwise make a genuine idle hint read pending.
-FM_COMPOSER_LEFTBAR_IDLE_RE_DEFAULT='^Ask anything(\.\.\.|…)([[:space:]]+".*")?$'
 # OpenCode 1.18 draws one status row immediately under the `╹▀` floor, with no
 # blank separator. Both rows verified live through Herdr on OpenCode 1.18.31 -
 # idle `/home/... 40.1K (4%)  ctrl+p commands    • OpenCode 1.18.31` and busy
@@ -1202,21 +1198,26 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_OMP_STATUS_RE:-$FM_COMPOSER_OMP_STATUS_RE_DEFAULT}" sensitive
 }
 
-# _fm_composer_leftbar_is_idle_hint: 0 when <plain-row> is OpenCode's idle hint
-# (FM_COMPOSER_LEFTBAR_IDLE_RE_DEFAULT above). The PLAIN row is the signal:
-# OpenCode renders the hint dim and the rotating suggestion bright, so ghost
-# stripping leaves only the quote. Both left-bar walkers - the classifier and
-# the content extractor - consult this one rule, on the FIRST non-blank
-# left-bar content row only, so one screen cannot read empty to one of them
-# and pending to the other.
-_fm_composer_leftbar_is_idle_hint() {  # <plain-row>
-  fm_composer_idle_matches "$1" "${FM_COMPOSER_LEFTBAR_IDLE_RE:-$FM_COMPOSER_LEFTBAR_IDLE_RE_DEFAULT}" insensitive
+# _fm_composer_leftbar_is_idle_hint: 0 when a left-bar row is the harness's idle
+# placeholder. The pattern is the fleet-wide FM_COMPOSER_IDLE_RE set above -
+# this owner keeps ONE idle set, and the left bar does not get a second. Both
+# row views are consulted because OpenCode renders the hint dim and its rotating
+# suggestion bright, so ghost stripping can leave only the quote while the plain
+# row still carries the hint. Both left-bar walkers - the classifier and the
+# content extractor - call this on the FIRST non-blank content row of the run,
+# so one screen cannot read empty to one of them and pending to the other.
+_fm_composer_leftbar_is_idle_hint() {  # <content> <plain-row>
+  local idle_re=${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}
+  fm_composer_idle_matches "$1" "$idle_re" insensitive && return 0
+  fm_composer_idle_matches "$2" "$idle_re" insensitive && return 0
+  return 1
 }
 
 # _fm_composer_row_is_opencode_status: 0 when the trimmed row is OpenCode's
 # status chrome (FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT above). Consulted only
-# as the row immediately BELOW a proven left-bar floor - the one layout the
-# live record covers - never below a box and never as composer content.
+# as the row immediately below a left-bar floor this owner actually matched -
+# the one layout the live record covers - never below a floorless left-bar,
+# never below a box, and never as composer content.
 _fm_composer_row_is_opencode_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_OPENCODE_STATUS_RE:-$FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT}" sensitive
 }
@@ -1306,7 +1307,7 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 # can prove it real, unknown otherwise.
 _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
   local screen=$1 styled=$2 first=$3 last=$4
-  local row raw content plain_content pending_seen=0 footer_re leading_blank=1 placeholder_position=0 first_content=0
+  local row raw content plain_content pending_seen=0 footer_re leading_blank=1 first_content=0
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   row=$first
   while [ "$row" -le "$last" ]; do
@@ -1323,23 +1324,13 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
     fm_composer_normalize_trim_var plain_content
     if [ -z "$content" ]; then row=$((row + 1)); continue; fi
     first_content=$leading_blank
-    if [ "$first_content" = 1 ] && [ "$row" -gt "$first" ]; then
-      placeholder_position=1
-    else
-      placeholder_position=0
-    fi
     leading_blank=0
-    # The idle hint normally sits at placeholder position, but Herdr's 20-row
-    # ANSI tail can drop the leading blank `┃` and leave it on the run's
-    # first row, where placeholder position is 0. The first non-blank content
-    # row is the one position that covers both; every later row is ordinary
-    # content and takes the pending path.
+    # The idle hint normally sits under a blank bar row, but Herdr's 20-row ANSI
+    # tail can drop that row and leave the hint on the run's first row. The
+    # first non-blank content row is the one position that covers both; every
+    # later row is ordinary content and takes the pending path.
     if [ "$first_content" = 1 ] \
-       && _fm_composer_leftbar_is_idle_hint "$plain_content"; then
-      row=$((row + 1)); continue
-    fi
-    if [ "$placeholder_position" = 1 ] \
-       && fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive; then
+       && _fm_composer_leftbar_is_idle_hint "$content" "$plain_content"; then
       row=$((row + 1)); continue
     fi
     if [ "$row" -eq "$last" ] \
@@ -1456,7 +1447,7 @@ _fm_composer_locate_footer_zone() {  # <plain>
 }
 
 _fm_composer_select_cursorless() {
-  local plain=$1 generic=-1 next boundary raw trimmed glyph bare footer=0
+  local plain=$1 generic=-1 next boundary raw trimmed glyph bare footer=0 floor_seen=0
   FM_COMPOSER_SELECTED_KIND=
   FM_COMPOSER_SELECTED_FIRST=-1
   FM_COMPOSER_SELECTED_LAST=-1
@@ -1543,6 +1534,7 @@ _fm_composer_select_cursorless() {
       fm_composer_normalize_trim_var trimmed
       if _fm_composer_leftbar_floor_row "$trimmed"; then
         boundary=$next
+        floor_seen=1
       fi
     fi
     # The same footer zone, read from the other side: rows this envelope's own
@@ -1556,7 +1548,7 @@ _fm_composer_select_cursorless() {
     trimmed=$raw
     fm_composer_normalize_trim_var trimmed
     if [ -n "$trimmed" ] && ! fm_composer_row_has_edge "$trimmed" \
-       && ! { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
+       && ! { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] && [ "$floor_seen" = 1 ] \
               && _fm_composer_row_is_opencode_status "$trimmed"; }; then
       FM_COMPOSER_SELECTED_KIND=
       return 1
@@ -1601,9 +1593,6 @@ EOF
           :
         else
           first_content=$leading_blank
-          if [ "$first_content" = 1 ] && [ "$row" -gt "$FM_COMPOSER_SELECTED_FIRST" ]; then
-            placeholder_position=1
-          fi
           leading_blank=0
         fi
         ;;
@@ -1633,9 +1622,8 @@ EOF
     if [ -z "$content" ] \
        || { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
             && [ "$first_content" = 1 ] \
-            && _fm_composer_leftbar_is_idle_hint "$plain_content"; } \
-       || { { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
-              || { [ "$FM_COMPOSER_SELECTED_KIND" = box ] && [ "$prompt_is_shell" = 1 ]; }; } \
+            && _fm_composer_leftbar_is_idle_hint "$content" "$plain_content"; } \
+       || { [ "$FM_COMPOSER_SELECTED_KIND" = box ] && [ "$prompt_is_shell" = 1 ] \
             && [ "$placeholder_position" = 1 ] \
             && fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive; } \
        || { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \

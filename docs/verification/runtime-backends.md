@@ -660,14 +660,22 @@ Before the classifier change, a genuinely idle empty OpenCode composer on Herdr 
 The cursorless container check treated that chrome as unclaimed transcript and rejected the left-bar, so `bin/fm-control.sh exit` refused to type `/exit`.
 After the change the same live idle pane classifies `empty`, so `fm-control exit` types the harness's exit command and stops the worker while leaving the pane and the local copy in place.
 
+The guard re-run that produced this entry printed:
+
 ```text
-ok - opencode (1.18.31) on herdr: idle empty composer classifies empty
+# opencode layout behind the empty verdict: floor=yes status-row=yes
+ok - opencode (1.18.31) on herdr: idle empty composer classifies empty under the ╹▀ floor and its status row
 ok - opencode (1.18.31) on herdr: fm-control exit stops the worker and preserves the pane and local copy
 ```
 
+The `floor=yes status-row=yes` line is the guard refusing a vacuous pass: `empty` alone would also come from a bare shell prompt, so the capture behind the verdict must carry the two facts this entry rests on.
 The portable regressions in `tests/fm-composer-lib.test.sh` pin that layout, keep typed drafts `pending`, and keep `Working on request...` immediately under the floor as `unknown`.
-The status row is furniture only directly under a left-bar floor; below a box it still invalidates the container, which is the one layout this entry records.
+The status row is furniture only directly under a left-bar floor the classifier actually matched - a floorless left-bar above the same row is a layout nobody has observed and stays `unknown`, and below a box the row still invalidates the container.
+One idle set owns the `Ask anything…` hint and is end-anchored apart from OpenCode's rotating quoted suggestion, so a human line that merely opens with those words stays `pending` wherever it sits in the run.
 `tests/fm-control.test.sh` pins that pending text still refuses and that a composer which is not proven empty refuses rather than typing the exit command.
+
+A note for whoever reads this entry next, earned over five review rounds on this change: the code does the right thing; what keeps being wrong is what the code and its documents CLAIM about it.
+Three of the defects found here were a comment or a recorded transcript describing behaviour the tree did not have - an end-anchoring guarantee the fleet-wide rule overrode, an exemption scoped to a floor the selector never required, and a `pass` line no version of the guard could emit.
 This guard is the refresh command after an OpenCode or Herdr upgrade:
 
 ```sh

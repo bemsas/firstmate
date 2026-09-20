@@ -858,6 +858,18 @@ test_opencode_status_below_floor_is_furniture() {
   first_idle=$'┃  Ask anything… "Fix a TODO in the codebase"\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n tab agents  ctrl+p commands'
   assert_screen "opencode idle hint on the first left-bar row is empty" empty "$CAPS_STYLED" "$first_idle"
 
+  # One idle set owns the hint, and it is end-anchored apart from the rotating
+  # QUOTED suggestion, so a human line that merely opens with the placeholder's
+  # words is typed text wherever it sits in the run - at placeholder position
+  # (a blank bar row above it) as well as on the run's first row.
+  local typed_tail_at_placeholder typed_tail_first_row
+  typed_tail_at_placeholder=$'┃\n┃  Ask anything… please investigate the crash\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀\n /home/bemsas 40.1K (4%)  ctrl+p commands'
+  assert_screen "a typed line opening with the hint stays pending at placeholder position" \
+    pending "$CAPS_STYLED" "$typed_tail_at_placeholder"
+  typed_tail_first_row=$'┃  Ask anything… please investigate the crash\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀\n /home/bemsas 40.1K (4%)  ctrl+p commands'
+  assert_screen "a typed line opening with the hint stays pending on the first row" \
+    pending "$CAPS_STYLED" "$typed_tail_first_row"
+
   out=$(fm_composer_classify_screen "$CAPS_STYLED" "$idle")
   [ "$out" = empty ] || fail "the original idle-empty OpenCode-on-Herdr failure must now read empty, got '$out'"
   pass "fm_composer_classify_screen: OpenCode status under the floor is furniture; pending drafts still pending"
@@ -879,6 +891,14 @@ test_status_row_is_furniture_only_under_a_left_bar_floor() {
   # bare composer above it rather than reading as typed input.
   bare_below_omp=$'transcript line\n\n❯'"$NBSP"$'\n π  · Kimi K3 · ~/proj · ◫ 4.0%/40K ⟲'
   assert_screen "omp status still bounds a bare composer" empty "$CAPS_STYLED" "$bare_below_omp"
+  # The live record covers the status row under a `╹▀` floor. A left-bar run
+  # with no floor drawn is a layout nobody has observed, so the row below it is
+  # unclaimed activity again and the container is not accepted.
+  local floorless floored
+  floorless=$'┃\n┃\n┃  Build · Kimi K3\n /home/x 40.1K (4%)  ctrl+p commands • OpenCode 1.18.31'
+  assert_screen "a floorless left-bar above the status row is not accepted" unknown "$CAPS_STYLED" "$floorless"
+  floored=$'┃\n┃\n┃  Build · Kimi K3\n╹▀▀▀▀▀▀▀▀\n /home/x 40.1K (4%)  ctrl+p commands • OpenCode 1.18.31'
+  assert_screen "the same rows with the floor drawn are the verified layout" empty "$CAPS_STYLED" "$floored"
   pass "fm_composer_classify_screen: the status-row exemption is scoped to the left-bar floor"
 }
 
