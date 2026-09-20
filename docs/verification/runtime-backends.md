@@ -605,7 +605,9 @@ At a wide pane opencode also draws its context sidebar on the composer's OWN row
 A bottom-anchored 20-row capture additionally clips the composer's leading blank row on herdr, leaving the idle placeholder on the selection's first row where position alone reads it as typed input.
 
 Measured on the live pane, the floor spans columns 2-155 while composer text sits at columns 5-30 and the sidebar at columns 160-191, so the floor's own rendered width bounds the composer in both axes and is the anchor the fix uses.
-The placeholder is drawn at `38;2;128;128;128` and real typed text at `38;2;238;238;238`, which is the second, independent signal required at the capture boundary.
+The clipped leading blank row is a capture-window property and is fixed there rather than with a second placeholder rule: on this harness that row is clipped at 20 captured rows and present from 22 up, and the single position rule then classifies the real idle capture `empty` at 22, 24, 26, 30, and 40, so `FM_COMPOSER_CAPTURE_LINES` defaults to 32 with headroom for the furniture observed above the composer (a status row wrapping to two lines, the startup Tip row).
+That bound is not universal and is not claimed to be: opencode centres its composer vertically on the splash screen only, so a tall enough pane at splash can still leave the composer outside any fixed window, and the verdict is then `unknown` - which is correct, and is the case `stop` exists for.
+A worker with conversation history, which is what the incident reported, is bottom-anchored roughly 8 rows from the pane bottom and is well inside the window either way.
 
 ```sh
 FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
@@ -624,7 +626,7 @@ stopped pid=2583811 comm=opencode signal=TERM endpoint=preserved worktree=unchan
   PASS herdr pane preserved
 ```
 
-Typed text still refuses on every path (`pending`), a floor too narrow to be its composer's own border still refuses contiguous activity below it, and a capture with no styling to read keeps the strict position rule rather than gaining a cheaper verdict.
+Typed text still refuses on every path (`pending`), a floor too narrow to be its composer's own border still refuses contiguous activity below it - on the cursor-anchored read as well as the cursorless one, because the width clip is where bytes are deleted - and a composer whose leading blank row is outside the capture keeps the strict position rule rather than gaining a cheaper verdict.
 The live guard's cursorless assertion reads the WHOLE pane, because opencode centres its composer on a splash screen and a bottom-anchored window can miss it entirely - that is a capture-window property, not a classification one.
 claude 2.1.277 and opencode 1.18.31 are the harnesses whose cursorless read is established `empty`; kimi 2.0.2 still classifies `unknown` cursorless because it draws its own footer rows below its `╰───╯` composer border, which is the same defect class in the box shape and is not addressed here.
 codex 0.155.1, pi 0.85.1, and muse 1.3.0 could not be verified in that run because an untrusted worktree parks them on a trust dialog, which the strict classifier correctly refuses; grok 1.0.34 read `pending-unproven`.
@@ -644,11 +646,13 @@ ok - fm-control stop: an agent outside the recorded worktree refuses and is left
 ok - fm-control stop: the agent stops while its endpoint, shell, and uncommitted work survive
 ok - fm-control stop: an already-stopped task is idempotent and never signals the shell
 ok - fm-control stop: an observed draft refuses, and neither the draft nor the agent is touched
+ok - fm-control stop: a worktree that loses its single dirty file is reported CHANGED, never unchanged
 ok - fm-control stop: a backend that cannot identify the agent process refuses rather than guessing
 ```
 
 tmux creates a task window with no command and types the launch line into the shell, so the agent is the shell's foreground job and the window survives the agent; a pane whose agent was launched as the pane command itself reports `stopped-endpoint-gone` rather than an unqualified success.
 Removing the content gate makes the draft case signal the agent away silently, which is what that case pins.
+The worktree postcondition counts dirty entries with `grep -c ''` rather than `wc -l`, because command substitution strips git's trailing newline and `wc -l` would then report both a clean worktree and one holding a single dirty entry as 0; the last case above stages exactly that single-file loss and requires `worktree=CHANGED`.
 
 The 2026-08-23 steering-inbox doorbell run observed grok 1.0.5's idle composer classifying `unknown` (and sometimes pending-family), never `empty`.
 Issue #3436's recorded idle capture reproduced the cause on 2026-09-14: Grok 1.0.5 renders the titled bottom border three columns wider than its aligned top and content rows, so the cursorless Herdr profile rejected the otherwise complete box as ambiguous.

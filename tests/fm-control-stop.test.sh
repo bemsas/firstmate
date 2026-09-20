@@ -72,10 +72,10 @@ printf '# brief\n' > "$WORK/home/data/t1/brief.md"
 
 run_stop() { env PATH="$SHIM:$PATH" FM_HOME="$WORK/home" bash "$ROOT/bin/fm-control.sh" t1 stop 2>&1; }
 
-start_agent() {  # <cwd>
+start_agent() {  # <cwd> [shell-command to run once the agent exits]
   "$REAL_TMUX" -L "$SOCKET" kill-window -t fmses:fm-t1 2>/dev/null || true
   "$REAL_TMUX" -L "$SOCKET" new-window -d -t fmses: -n fm-t1 -c "$1" >/dev/null
-  "$REAL_TMUX" -L "$SOCKET" send-keys -t fmses:fm-t1 "PATH=$WORK/bin:\$PATH opencode 600" Enter
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t fmses:fm-t1 "PATH=$WORK/bin:\$PATH opencode 600${2:+; $2}" Enter
   # Wait until the pane's FOREGROUND is the stand-in rather than the shell that
   # is about to launch it; the resolver reports whichever is in front, and it is
   # the caller's not-a-shell proof that tells them apart.
@@ -185,6 +185,29 @@ kill -0 "$DRAFT_PID" 2>/dev/null || fail "stop signalled an agent whose composer
 "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t fmses:fm-t1 | grep -q 'a draft the human has not sent yet' \
   || fail "the draft did not survive the refusal"
 pass "fm-control stop: an observed draft refuses, and neither the draft nor the agent is touched"
+
+# --- 4c. THE WORKTREE POSTCONDITION discriminates ONE destroyed dirty file --
+# `stop` reports `worktree=unchanged`, so that claim has to be able to FAIL for
+# the smallest real loss there is: the single uncommitted file a shutting-down
+# harness discards. A dirty-entry count that cannot tell 0 from 1 reports that
+# loss as unchanged, which is a wrong label emitted without erroring.
+[ -e "$WORK/wt/dirty.txt" ] || printf 'uncommitted\n' > "$WORK/wt/dirty.txt"
+[ "$(git -C "$WORK/wt" status --porcelain | grep -c '')" = 1 ] \
+  || fail "this case needs the worktree to hold exactly one dirty entry"
+# The pane discards that file the moment its agent dies, then holds a SECOND
+# short-lived agent, so the recovery-grade classifier cannot reach `dead` until
+# the discard has certainly landed. That orders the race the incident describes
+# without changing what is being measured.
+start_agent "$WORK/wt" "rm -f '$WORK/wt/dirty.txt'; PATH=$WORK/bin:\$PATH opencode 1" \
+  || fail "could not stage an agent that discards uncommitted work as it stops"
+out=$(run_stop) && fail "stop must not report a worktree that lost its only dirty file as unchanged, got: $out"
+case "$out" in
+  *worktree=CHANGED*) ;;
+  *) fail "stop must report the destroyed dirty file as a changed worktree, got: $out" ;;
+esac
+[ ! -e "$WORK/wt/dirty.txt" ] || fail "this case never actually discarded the worktree's only dirty file"
+pass "fm-control stop: a worktree that loses its single dirty file is reported CHANGED, never unchanged"
+printf 'uncommitted\n' > "$WORK/wt/dirty.txt"
 
 # --- 5. a backend that cannot name a pane's process refuses, never guesses --
 sed 's|^window=.*|window=zjses:fm-t1|' "$WORK/home/state/t1.meta" > "$WORK/home/state/t1.meta.new"

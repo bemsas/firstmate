@@ -875,7 +875,7 @@ test_count_and_clip_columns_are_locale_independent() {
 }
 
 test_matrix_opencode_below_floor_and_sidebar() {
-  local bar floor idle wedged typed narrow pad
+  local bar floor idle wedged typed narrow mismatched pad
   # Geometry, in columns, mirroring the live capture: the floor is the
   # composer's own width (63), composer text sits well inside it, and the
   # sidebar starts at column 70 - beyond the floor's right edge, across a gap.
@@ -932,6 +932,20 @@ test_matrix_opencode_below_floor_and_sidebar() {
   narrow=$(printf '%s\n%s\n%s\n%s' \
     '  ┃' '  ┃  Build · Big Pickle OpenCode Zen' '  ╹▀▀▀' 'Working on request...')
   assert_screen "opencode narrow floor above activity stays unknown" unknown "$CAPS_STYLED" "$narrow"
+
+  # 5. THE CLIP'S OWN GUARD, on the CURSOR-ANCHORED path. The clip is where
+  # bytes are deleted, and the cursor path reaches the left-bar classifier
+  # without passing through the cursorless selector, so the floor's credibility
+  # has to be established at the clip itself. Here the floor is drawn narrower
+  # than the composer it closes: the footer row's text runs straight across the
+  # bound (so the floor cannot be this composer's border), while the draft row
+  # happens to have a space at that column and would be cut away to nothing.
+  # Trusting that floor would report a composer visibly holding a draft as
+  # `empty`, and do_exit would then type the exit command onto it.
+  mismatched=$(printf '%s\n%s\n%s\n%s' \
+    '  ┃' '  ┃   the draft' '  ┃  Build · Big Pickle OpenCode Zen' '  ╹▀▀')
+  assert_screen "opencode mismatched floor keeps the draft on tmux" pending "$CAPS_TMUX" "$mismatched" 1
+  assert_screen "opencode mismatched floor keeps the draft cursorless" pending "$CAPS_STYLED" "$mismatched"
   unset -f oc_row
   pass "matrix: opencode's below-floor furniture and side panel are bounded, and typed text still refuses"
 }

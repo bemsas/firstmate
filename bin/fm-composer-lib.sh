@@ -571,7 +571,22 @@ fm_composer_clip_columns() {  # <cols>; stdin -> clipped row
 # 20/20/200): the composer is bottom-anchored, so a small tail window is
 # sufficient and keeps stale scrollback (startup banners, old transcript
 # boxes) from ever competing with the live composer.
-FM_COMPOSER_CAPTURE_LINES=${FM_COMPOSER_CAPTURE_LINES:-20}
+#
+# 32 is MEASURED, not chosen. The window has to reach far enough above the
+# composer to include its LEADING BLANK ROW, because that row is what the
+# left-bar classifier reads position against: clip it and the idle placeholder
+# lands on the selection's first row and reads as typed input. On real opencode
+# 1.18.31 that row is clipped at 20 and present from 22 up, and 32 leaves
+# headroom for the furniture observed live above it (a status row that wraps to
+# two lines, the startup Tip row).
+#
+# The bound is not universal and is not claimed to be: opencode centres its
+# composer vertically on its SPLASH screen only, so a tall enough pane at splash
+# can still put the composer outside any fixed window. The verdict is then
+# `unknown`, which is correct - and is exactly the case bin/fm-control.sh's
+# `stop` exists for. A worker with conversation history is bottom-anchored and
+# sits a few rows from the bottom, well inside this window.
+FM_COMPOSER_CAPTURE_LINES=${FM_COMPOSER_CAPTURE_LINES:-32}
 
 # Pi allows a multi-line composer between its horizontal separators. Bound the
 # structural candidate so two unrelated transcript rules with an arbitrarily
@@ -1241,17 +1256,24 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 # the idle hint read empty; the run's LAST row may be the mode/model footer
 # (composer furniture, never typed text). Real content is pending when styling
 # can prove it real, unknown otherwise.
-_fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
-  local screen=$1 styled=$2 first=$3 last=$4
+_fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row> <plain-screen>
+  local screen=$1 styled=$2 first=$3 last=$4 plain=$5
   local row raw content pending_seen=0 footer_re leading_blank=1 placeholder_position=0
   local width=''
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
-  # Bound the composer to its own floor's width when one is drawn, so a panel
-  # sharing these physical rows to the RIGHT of the composer cannot read as
-  # typed text. Absent a floor there is no proven bound and the row is read
-  # whole, exactly as before.
-  width=$(_fm_composer_leftbar_floor_width \
-    "$(printf '%s\n' "$screen" | fm_composer_strip_ansi)" "$last") || width=''
+  # Bound the composer to its own floor's width when one is drawn AND that floor
+  # is a credible border for the composer above it, so a panel sharing these
+  # physical rows to the RIGHT of the composer cannot read as typed text. THE
+  # CLIP IS WHERE BYTES ARE ACTUALLY DELETED, so the credibility check belongs
+  # here and not only in the cursorless selector: the cursor-anchored path
+  # reaches this function without passing through that selector at all. Absent a
+  # proven bound the row is read whole, exactly as before.
+  if width=$(_fm_composer_leftbar_floor_width "$plain" "$last") \
+     && _fm_composer_leftbar_floor_fits "$plain" "$first" "$last" "$width"; then
+    :
+  else
+    width=''
+  fi
   row=$first
   while [ "$row" -le "$last" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
@@ -1265,26 +1287,15 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
     fm_composer_normalize_trim_var content
     if [ -z "$content" ]; then row=$((row + 1)); continue; fi
     # The idle placeholder sits BELOW the composer's leading blank row, so a
-    # first row carrying text is normally real input, and that POSITION is what
-    # keeps `Ask anything... please investigate` - a real instruction that opens
-    # with the placeholder's own words - from reading as idle. The idle pattern
-    # is a prefix match, so position is load-bearing and is not given up here.
-    #
-    # A BOUNDED capture that begins at the composer cannot show what was above
-    # it: herdr's bottom-anchored window does exactly this to opencode, clipping
-    # the blank row and leaving the placeholder on the selection's first row,
-    # where it read as typed text and made every idle opencode-on-herdr composer
-    # `pending`. At that one boundary the position carries no information, so a
-    # SECOND, independent signal replaces it - the row must also be rendered
-    # entirely de-emphasised, which real typed input never is (verified live on
-    # opencode 1.18.31: placeholder 38;2;128;128;128, typed text 38;2;238;238;238).
-    # Both signals are required, and an unbounded capture or one with no styling
-    # to read keeps the strict position rule and refuses instead.
+    # first row carrying text is real input, and that POSITION is the whole rule:
+    # it is what keeps `Ask anything... please investigate` - a real instruction
+    # that opens with the placeholder's own words - from reading as idle. The
+    # idle pattern is a prefix match, so position is load-bearing and there is no
+    # second, cheaper way to reach the same acceptance. A capture that clips the
+    # leading blank row is a capture-WINDOW problem and is fixed there, by
+    # FM_COMPOSER_CAPTURE_LINES reaching above the composer; a composer still
+    # outside the window keeps the strict rule and refuses.
     if [ "$leading_blank" = 1 ] && [ "$row" -gt "$first" ]; then
-      placeholder_position=1
-    elif [ "$leading_blank" = 1 ] && [ "$row" -eq "$first" ] && [ "$first" -eq 0 ] \
-         && [ "${FM_COMPOSER_CAPS_BOUNDED:-0}" = 1 ] && [ "$styled" = 1 ] \
-         && _fm_composer_row_all_deemphasised "$raw"; then
       placeholder_position=1
     else
       placeholder_position=0
@@ -1329,28 +1340,6 @@ _fm_composer_leftbar_floor_width() {  # <plain-screen> <last-row>
   fm_composer_normalize_trim_var trimmed
   _fm_composer_leftbar_floor_row "$trimmed" || return 1
   printf '%s' "$(printf '%s\n' "${raw%"${raw##*[![:space:]]}"}" | fm_composer_count_columns)"
-}
-
-# The ghost ceiling used for the capture-boundary placeholder test only. One
-# above the ordinary FM_COMPOSER_GHOST_LUMA_MAX so a row drawn exactly AT that
-# ceiling still counts as de-emphasised: opencode renders its placeholder at
-# luminance 128, precisely the value the ordinary strip keeps (real text wins
-# there, because under-stripping only defers). Muse's `\u27e9` prompt glyph at
-# ~149.9 stays above this, so nothing else in the fleet changes meaning.
-FM_COMPOSER_BOUNDARY_GHOST_LUMA=${FM_COMPOSER_BOUNDARY_GHOST_LUMA:-129}
-
-# _fm_composer_row_all_deemphasised: 0 when every readable character on <raw-row>
-# is de-emphasised once its left-bar glyph is removed - the row is placeholder or
-# hint furniture, not typed input. Styled captures only; the caller checks that.
-_fm_composer_row_all_deemphasised() {  # <raw-row>
-  local stripped
-  stripped=$(printf '%s\n' "$1" \
-    | FM_COMPOSER_GHOST_LUMA_MAX="$FM_COMPOSER_BOUNDARY_GHOST_LUMA" fm_composer_strip_ghost)
-  case "$stripped" in
-    *'┃'*) stripped=${stripped#*┃} ;;
-  esac
-  fm_composer_normalize_trim_var stripped
-  [ -z "$stripped" ]
 }
 
 # _fm_composer_leftbar_floor_fits: 0 when <width> is a credible width for the
@@ -1568,17 +1557,11 @@ EOF
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
   local styled=0 cursor=0 has_identity=0 kv plain
-  # A bounded capture (rows=<n>, n>0) is a WINDOW onto the pane and can clip the
-  # composer's top; an unbounded one shows the whole pane and cannot.
-  FM_COMPOSER_CAPS_BOUNDED=0
   while IFS= read -r kv; do
     case "$kv" in
       styled=1) styled=1 ;;
       cursor=1) cursor=1 ;;
       identity=1) has_identity=1 ;;
-      rows=0|rows=) ;;
-      rows=*[!0-9]*) ;;
-      rows=*) FM_COMPOSER_CAPS_BOUNDED=1 ;;
     esac
   done <<EOF
 $caps
@@ -1603,7 +1586,7 @@ EOF
        && [ "$cy" -ge "$FM_COMPOSER_SCAN_LEFTBAR_START" ] \
        && [ "$cy" -le "$FM_COMPOSER_SCAN_LEFTBAR_END" ]; then
       _fm_composer_classify_leftbar "$screen" "$styled" \
-        "$FM_COMPOSER_SCAN_LEFTBAR_START" "$FM_COMPOSER_SCAN_LEFTBAR_END"
+        "$FM_COMPOSER_SCAN_LEFTBAR_START" "$FM_COMPOSER_SCAN_LEFTBAR_END" "$plain"
       return 0
     fi
     if [ "$FM_COMPOSER_SCAN_BARE_ROW" -ge 0 ] && [ "$cy" -eq "$FM_COMPOSER_SCAN_BARE_ROW" ]; then
@@ -1673,22 +1656,11 @@ EOF
       ;;
     leftbar)
       _fm_composer_classify_leftbar "$screen" "$styled" \
-        "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"
+        "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST" "$plain"
       ;;
   esac
 }
 
-# fm_composer_submit_retry_core: the ONE verify-and-retry-Enter submit loop
-# for the cursor-less backends (cmux, orca, zellij), parameterised by the
-# adapter's send-key and composer-state functions. The caller has already
-# typed the text ONCE (send_literal) and settled; this loop submits with
-# Enter, re-reading the composer verdict, and retries Enter ONLY - never
-# retypes, because a swallowed Enter leaves the text in the composer and
-# retyping would duplicate it. Proven pending (and pending-unproven) retries
-# consume the budget; any other verdict returns immediately, so `unknown`
-# stays a loud refusal rather than a blind retry into an unreadable pane.
-# tmux and herdr keep richer cores that consume this same shared verdict plus
-# fm_composer_queued_enter_verdict; no shape knowledge lives in any loop.
 # fm_composer_no_content_observed: 0 only when NOTHING that could be composer
 # content was OBSERVED in <screen>.
 #
@@ -1726,6 +1698,17 @@ fm_composer_no_content_observed() {  # <verdict> <screen>
   return 0
 }
 
+# fm_composer_submit_retry_core: the ONE verify-and-retry-Enter submit loop
+# for the cursor-less backends (cmux, orca, zellij), parameterised by the
+# adapter's send-key and composer-state functions. The caller has already
+# typed the text ONCE (send_literal) and settled; this loop submits with
+# Enter, re-reading the composer verdict, and retries Enter ONLY - never
+# retypes, because a swallowed Enter leaves the text in the composer and
+# retyping would duplicate it. Proven pending (and pending-unproven) retries
+# consume the budget; any other verdict returns immediately, so `unknown`
+# stays a loud refusal rather than a blind retry into an unreadable pane.
+# tmux and herdr keep richer cores that consume this same shared verdict plus
+# fm_composer_queued_enter_verdict; no shape knowledge lives in any loop.
 fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label]
   local send_key_fn=$1 state_fn=$2 target=$3 retries=$4 sleep_s=$5 expected_label=${6:-} i=0 state
   while :; do

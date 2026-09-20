@@ -629,11 +629,17 @@ do_exit() {
 # never report a stop that destroyed what it promised to keep.
 
 worktree_fingerprint() {  # -> a comparable string for $WT, or `unreadable`
-  local head status
+  local head status dirty
   [ -n "$WT" ] && [ -d "$WT" ] || { printf 'absent'; return 0; }
   head=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || head=no-head
   status=$(git -C "$WT" status --porcelain 2>/dev/null) || { printf 'unreadable'; return 0; }
-  printf '%s %s' "$head" "$(printf '%s' "$status" | wc -l | tr -d '[:space:]')"
+  # Counted with `grep -c ''`, which counts a final unterminated line. `wc -l`
+  # counts NEWLINES, and command substitution has already stripped the one
+  # trailing newline git wrote - so a clean worktree and a worktree holding one
+  # dirty entry would both fingerprint as 0, and this verb's `worktree=unchanged`
+  # claim could not detect the loss of a single uncommitted file.
+  dirty=$(printf '%s' "$status" | grep -c '') || dirty=0
+  printf '%s %s' "$head" "$dirty"
 }
 
 do_stop() {
