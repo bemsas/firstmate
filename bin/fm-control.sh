@@ -71,7 +71,7 @@
 #              recovery-grade classifier reports the agent gone, and the
 #              endpoint's and the worktree's fates are each reported as what
 #              could be ESTABLISHED about them - the endpoint preserved, proven
-#              gone, or unestablished; the worktree entries-preserved, changed,
+#              gone, or unestablished; the worktree entries-preserved, CHANGED,
 #              or unverified. Entries-preserved means every `git status`
 #              ENTRY the worktree held is still there with the same status
 #              letters, which is all a porcelain read proves. It is NOT a

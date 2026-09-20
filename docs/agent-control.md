@@ -93,7 +93,7 @@ The worktree postcondition is reported the same way, as `worktree-state=`.
 What it asserts is that **the entry set and its statuses were preserved**, and nothing more.
 It compares `HEAD` plus the `git status --porcelain --untracked-files=all` **text** - not a count or any other summary derived from it, because a shutdown that deletes one untracked file and writes another leaves every such summary identical while the work is gone - and requires every entry present before to still be present after with the same status letters.
 A pure addition passes: `stop` sends SIGTERM precisely so the harness gets its chance to flush, so a transcript, a crash file, or a build artifact written on the way out destroys nothing and reports `entries-preserved`.
-An entry that vanished or changed status reports `changed` and fails the verb; a worktree that could not be read at all reports `unverified`, never `entries-preserved`.
+An entry that vanished or changed status reports `CHANGED` and fails the verb; a worktree that could not be read at all reports `unverified`, never `entries-preserved`.
 
 `entries-preserved` is **not a content guarantee**, and the token says so deliberately.
 An entry that was already dirty keeps the same status letters when its contents change, so a tracked file the agent had modified and that is truncated or rewritten mid-flush as the signal lands reads ` M <path>` on both sides and compares equal.

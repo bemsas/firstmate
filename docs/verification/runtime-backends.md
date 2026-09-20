@@ -614,16 +614,16 @@ FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
 tests/fm-composer-lib.test.sh
 ```
 
-Verified the same day against real opencode 1.18.31 in an isolated Herdr lab session (`bin/fm-herdr-lab.sh`), reproducing the reported failure first and then the fix, with the live `default` session untouched:
+Captured on Linux on 2026-09-20 by running `bin/fm-herdr-lab.sh` against real opencode 1.18.31 on this branch's code, in an isolated Herdr lab session torn down afterwards with the live `default` session untouched:
 
 ```text
-composer state        : empty   [pre-fix this was 'unknown']
-agent state           : alive
-resolved agent pid    : 2583811 (opencode)
-no-content-observed   : yes
-stopped pid=2583811 comm=opencode signal=TERM endpoint-state=preserved worktree-state=entries-preserved lt1 harness=opencode backend=herdr endpoint=default:%3 worktree=/Users/f/wt/lt1
-  PASS agent process gone
-  PASS herdr pane preserved
+composer state : empty
+agent state : alive
+resolved agent pid : 3192796 (opencode)
+no-content-observed : yes
+stopped pid=3192796 comm=opencode signal=TERM endpoint-state=preserved worktree-state=entries-preserved lt1 harness=opencode backend=herdr endpoint=fm-lab-fmstopu-3192513-9215:w1:p1 worktree=/tmp/claude-1000/-home-bemsas--treehouse-firstmate-7bab20-1-firstmate/2f10cd25-3a8c-4465-ab88-b0e6f0f48bf5/scratchpad/lw9
+PASS agent process gone
+PASS herdr pane preserved
 ```
 
 Typed text still refuses on every path (`pending`), a floor too narrow to be its composer's own border still refuses contiguous activity below it - on the cursor-anchored read as well as the cursorless one, because the width clip is where bytes are deleted - and a composer whose leading blank row is outside the capture keeps the strict position rule rather than gaining a cheaper verdict.
@@ -658,13 +658,18 @@ ok - fm-control stop: an agent outside the recorded worktree refuses and is left
 ok - fm-control stop: the agent stops while its endpoint, shell, and uncommitted work survive
 ok - fm-control stop: an already-stopped task is idempotent and never signals the shell
 ok - fm-control stop: an observed draft refuses, and neither the draft nor the agent is touched
-ok - fm-control stop: a worktree that loses its single dirty file is reported CHANGED, never unchanged
+ok - fm-control stop: a worktree that loses its single dirty file is reported CHANGED, never preserved
 ok - fm-control stop: a window that WAS the agent reports its fate unestablished, never preserved or proven gone
 ok - fm-control stop: a worktree whose uncommitted contents were traded is CHANGED, though its entry count is not
 ok - fm-control stop: a file the harness flushed on its way out is not a destroyed worktree
 ok - fm-control stop: a file lost inside an untracked directory is CHANGED, not a collapsed summary
-ok - fm-control stop: a worktree that could not be read is reported unverified, never unchanged
+ok - fm-control stop: an entry whose status changed is CHANGED, though the path is still there
+ok - fm-control stop: a preserved entry set is reported as exactly that, not as intact contents
+ok - fm-control stop: a clean worktree that only gained a flushed file keeps its entry set
+ok - fm-control stop: a worktree recorded through a symlink is still the agent's own worktree
+ok - fm-control stop: a worktree that could not be read is reported unverified, never preserved
 ok - fm-control stop: a backend that cannot identify the agent process refuses rather than guessing
+ok - fm-control stop: real-process identity, signal, postconditions, and refusals
 ```
 
 tmux creates a task window with no command and types the launch line into the shell, so the agent is the shell's foreground job and the window survives the agent.
