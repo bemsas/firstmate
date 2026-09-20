@@ -34,7 +34,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. An endpoint reading `missing` goes through the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) the reclaim uses before anything is claimed about it, and only Herdr can supply one: proven gone reports `endpoint-gone` (the agent went with it, and the endpoint this verb normally preserves did not survive), a pane that turns out to be there and idle is the ordinary `already-stopped`, one whose agent is back takes the ordinary interrupt-then-exit path. A tmux `missing` always refuses rather than claim a stop it cannot see. |
-| `stop` | Stop the agent without typing anything, by signalling the agent process, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone, the endpoint is still there on every read across a settle window rather than on one sample, and the worktree's `HEAD` and dirty-file count are unchanged. Already-stopped is idempotent success. An endpoint that did not survive the agent reports `stopped-endpoint-gone` rather than an unqualified success. |
+| `stop` | Stop the agent without typing anything, by signalling the agent process, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone, and the endpoint's and worktree's fates are each reported as what could be established about them - see [the three endpoint outcomes](#stop-the-non-typing-path). Already-stopped is idempotent success. |
 | `relaunch` | Replace the running agent with a new one in the same worktree - and the same endpoint whenever that endpoint still exists - on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint the task's record now names, and that record names the harness that is actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
@@ -75,9 +75,22 @@ It cannot make a promise about text the capture never showed it - a composer scr
 SIGTERM is the only signal sent.
 SIGKILL would deny the harness its chance to flush, so an agent that has not stopped within the wait is reported unconfirmed rather than escalated to a stronger signal.
 
-The endpoint-survival postcondition is established, not sampled.
+The endpoint postcondition is established, not sampled, and it reports three different facts as three different results.
 A terminal whose window *was* the agent tears that window down after the process exits, so a single read taken the moment the agent state settles can still see a window that is already going away.
-`stop` therefore requires the endpoint on every read across a settle window (`FM_CONTROL_STOP_SETTLE`, 2s), and reports `stopped-endpoint-gone` the moment any read cannot see it.
+`stop` therefore reads the endpoint on every poll across a settle window (`FM_CONTROL_STOP_SETTLE`, 2s) before concluding anything:
+
+| Result | `endpoint=` | What it means, and nothing more |
+| --- | --- | --- |
+| `stopped` | `preserved` | The endpoint was there and held no agent on every read across the window. The promise was kept. |
+| `stopped-endpoint-gone` | `did-not-survive` | The endpoint's absence was **proven**, by the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) `exit` and `relaunch` use. Only Herdr can supply that proof. |
+| `stopped-endpoint-unverified` | `unestablished` | Neither could be shown. The endpoint may be exactly where it was left. |
+
+The third result is the ordinary one on tmux, not an error: a task record carries no socket identity for its endpoint, so a window that is simply not on the server this seat addresses cannot be told from a destroyed one.
+"I could not check" is never reported as "I checked and it is gone", because a spurious `gone` sends the next supervisor hunting for work that is sitting safely where it was left.
+
+The worktree postcondition is reported the same way.
+It compares `HEAD` plus the `git status --porcelain` **text** - not a count or any other summary derived from it, because a shutdown that deletes one untracked file and writes another leaves every such summary identical while the work is gone.
+A worktree that could not be read at all is reported as `worktree=unverified`, never as `worktree=unchanged`.
 
 **Teardown and discard are not verbs and will not become verbs.**
 `exit` and `stop` stop an agent and preserve everything else.

@@ -68,9 +68,13 @@
 #              SIGTERM only: SIGKILL would deny the harness its chance to flush
 #              uncommitted work, so an agent that does not stop is reported
 #              unconfirmed rather than escalated. Postcondition: the backend's
-#              recovery-grade classifier reports the agent gone, the endpoint
-#              still exists, and the worktree's HEAD and dirty-file count are
-#              unchanged. Already-stopped is success (idempotent). Requires a
+#              recovery-grade classifier reports the agent gone, and the
+#              endpoint's and the worktree's fates are each reported as what
+#              could be ESTABLISHED about them - the endpoint preserved, proven
+#              gone, or unestablished; the worktree (HEAD plus its porcelain
+#              status text) unchanged, changed, or unverified. "I could not
+#              check" is never reported as "I checked and it is gone".
+#              Already-stopped is success (idempotent). Requires a
 #              backend that can name a pane's foreground process from process
 #              facts (tmux, herdr); others refuse rather than guess a pid.
 #   relaunch   Transactionally replace the running agent with a new one, in the
@@ -145,6 +149,7 @@
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
 #   FM_CONTROL_SETTLE_WAIT       adapter acknowledgement wait after interrupt (5)
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
+#   FM_CONTROL_STOP_SETTLE       endpoint-survival settle window after stop (2)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
 set -eu
@@ -633,46 +638,88 @@ do_exit() {
 # status, and the endpoint and worktree are re-proved afterwards so this can
 # never report a stop that destroyed what it promised to keep.
 
-worktree_fingerprint() {  # -> a comparable string for $WT, or `unreadable`
-  local head status dirty
+# worktree_fingerprint: everything this verb promises to leave alone, as one
+# comparable value - HEAD plus the porcelain status TEXT.
+#
+# The text itself, never a summary derived from it. Any derived summary answers
+# a narrower question than "is this worktree as I left it": a shutdown that
+# deletes one untracked file and writes another leaves every count and every
+# cardinality identical, and `worktree=unchanged` would be claimed over work
+# that was destroyed.
+worktree_fingerprint() {  # -> a comparable value for $WT, `absent`, or `unreadable`
+  local head status
   [ -n "$WT" ] && [ -d "$WT" ] || { printf 'absent'; return 0; }
   head=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || head=no-head
   status=$(git -C "$WT" status --porcelain 2>/dev/null) || { printf 'unreadable'; return 0; }
-  # Counted with `grep -c ''`, which counts a final unterminated line. `wc -l`
-  # counts NEWLINES, and command substitution has already stripped the one
-  # trailing newline git wrote - so a clean worktree and a worktree holding one
-  # dirty entry would both fingerprint as 0, and this verb's `worktree=unchanged`
-  # claim could not detect the loss of a single uncommitted file.
-  dirty=$(printf '%s' "$status" | grep -c '') || dirty=0
-  printf '%s %s' "$head" "$dirty"
+  printf '%s\n%s' "$head" "$status"
 }
 
-# endpoint_survived: 0 only when this verb's whole promise - the endpoint is
-# still there and the agent is gone from it - is ESTABLISHED, which is exactly
-# the recovery-grade classifier's `dead`. It is read repeatedly across a bounded
-# settle window rather than sampled once, because a terminal whose window WAS
-# the agent tears that window down after the process exits and the first read
-# can land before that has happened.
+# worktree_outcome: what can be ESTABLISHED about $WT between two fingerprints.
+# A worktree that could not be read is not a worktree that came through
+# unchanged, so `unreadable` is its own answer rather than a constant that
+# compares equal to itself and licenses the `unchanged` claim.
+worktree_outcome() {  # <before> <after> -> unchanged|changed|unverified
+  if [ "$1" = unreadable ] || [ "$2" = unreadable ]; then
+    printf 'unverified'
+  elif [ "$1" = "$2" ]; then
+    printf 'unchanged'
+  else
+    printf 'changed'
+  fi
+}
+
+# worktree_brief: a fingerprint folded onto one line, for a refusal message.
+worktree_brief() {  # <fingerprint>
+  printf '%s' "$1" | tr '\n' '|'
+}
+
+# endpoint_outcome: which of THREE different facts about $T this verb can
+# actually establish once the agent has stopped. They are reported apart because
+# collapsing them makes the verb assert something nobody observed:
 #
-# The cheap pane-presence read is deliberately not used here: on tmux it
-# resolves `<session>:<window>` loosely and answers for the session's CURRENT
-# window once the named one is gone, so it cannot tell a preserved endpoint from
-# a destroyed one. `agent_state` is the surface this verb already requires a
-# backend to have, and the tmux adapter implements it from an exact session
-# inventory. Anything other than a stable `dead` leaves survival unestablished,
-# and do_stop reports stopped-endpoint-gone rather than claiming preservation.
-endpoint_survived() {
-  local elapsed=0
+#   preserved       - the endpoint is there and holds no agent: the promise kept.
+#   did-not-survive - absence is PROVEN, by the control plane's single owner of
+#                     that proof, fm_control_endpoint_absence_verdict.
+#   unestablished   - neither could be shown. "I could not check" is not "I
+#                     checked and it is gone": a spurious `gone` sends the next
+#                     supervisor hunting for work that is sitting safely where
+#                     it was left.
+#
+# `unestablished` is the ordinary answer on tmux, not an error. A task record
+# carries no socket identity for its endpoint, so a window absent from the
+# server THIS seat addresses cannot be told from a destroyed one - which is
+# exactly why the absence owner returns `unproven` there, and why no second
+# absence rule is invented here.
+#
+# `dead` is read repeatedly across a bounded settle window rather than sampled
+# once, because a terminal whose window WAS the agent tears that window down
+# after the process exits and the first read can land before that has happened.
+# The cheap pane-presence read is deliberately not used: on tmux it resolves
+# `<session>:<window>` loosely and answers for the session's CURRENT window once
+# the named one is gone, so it cannot tell a preserved endpoint from a destroyed
+# one. `agent_state` is the surface this verb already requires a backend to
+# have, and the tmux adapter implements it from an exact session inventory.
+endpoint_outcome() {  # -> preserved|did-not-survive|unestablished
+  local elapsed=0 state absence
   while :; do
-    [ "$(agent_state)" = dead ] || return 1
-    awk -v e="$elapsed" -v t="$STOP_SETTLE" 'BEGIN{exit !(e < t)}' || return 0
+    state=$(agent_state)
+    [ "$state" = dead ] || break
+    awk -v e="$elapsed" -v t="$STOP_SETTLE" 'BEGIN{exit !(e < t)}' \
+      || { printf 'preserved'; return 0; }
     sleep "$POLL"
     elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
   done
+  [ "$state" = missing ] || { printf 'unestablished'; return 0; }
+  absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T")
+  case "${absence%%$'\t'*}" in
+    gone) printf 'did-not-survive' ;;
+    dead) printf 'preserved' ;;
+    *) printf 'unestablished' ;;
+  esac
 }
 
 do_stop() {
-  local state absence pid comm cwd before after waited
+  local state absence pid comm cwd before after waited endpoint
   require_state_verified_backend stop
   state=$(agent_state)
   case "$state" in
@@ -731,22 +778,34 @@ do_stop() {
   if ! waited=$(wait_agent_state "$EXIT_WAIT" dead missing); then
     die "stop-delivered $ID pid=$pid comm=$comm signal=TERM agent-state=$waited stop=unconfirmed; the agent did not stop within ${EXIT_WAIT}s. No further signal was sent, because SIGKILL would deny the harness its chance to flush uncommitted work"
   fi
-  # The endpoint SHOULD have survived: that is this verb's promise. Where it did
-  # not, say so plainly instead of reporting an unqualified success.
-  if ! endpoint_survived; then
-    after=$(worktree_fingerprint)
-    [ "$after" = "$before" ] \
-      || die "stop-delivered $ID pid=$pid comm=$comm signal=TERM agent=stopped worktree=CHANGED before='$before' after='$after'"
-    retire_busy_incarnation
-    printf 'stopped-endpoint-gone pid=%s comm=%s signal=TERM endpoint=did-not-survive worktree=unchanged' \
-      "$pid" "$comm"
-    return 0
-  fi
+  # The endpoint SHOULD have survived: that is this verb's promise. Both it and
+  # the worktree are reported as what could be established about them, never as
+  # the outcome that would have been convenient.
+  endpoint=$(endpoint_outcome)
   after=$(worktree_fingerprint)
-  [ "$after" = "$before" ] \
-    || die "stop-delivered $ID pid=$pid comm=$comm signal=TERM agent=stopped worktree=CHANGED before='$before' after='$after'; the agent stopped but its worktree did not come through unchanged"
+  case "$(worktree_outcome "$before" "$after")" in
+    unchanged) ;;
+    changed)
+      die "stop-delivered $ID pid=$pid comm=$comm signal=TERM agent=stopped endpoint=$endpoint worktree=CHANGED before='$(worktree_brief "$before")' after='$(worktree_brief "$after")'; the agent stopped but its worktree did not come through unchanged"
+      ;;
+    *)
+      die "stop-delivered $ID pid=$pid comm=$comm signal=TERM agent=stopped endpoint=$endpoint worktree=unverified; the agent stopped, but '$WT' could not be read, so nothing is claimed about what it still holds"
+      ;;
+  esac
   retire_busy_incarnation
-  printf 'stopped pid=%s comm=%s signal=TERM endpoint=preserved worktree=unchanged' "$pid" "$comm"
+  case "$endpoint" in
+    preserved)
+      printf 'stopped pid=%s comm=%s signal=TERM endpoint=preserved worktree=unchanged' "$pid" "$comm"
+      ;;
+    did-not-survive)
+      printf 'stopped-endpoint-gone pid=%s comm=%s signal=TERM endpoint=did-not-survive worktree=unchanged' \
+        "$pid" "$comm"
+      ;;
+    *)
+      printf 'stopped-endpoint-unverified pid=%s comm=%s signal=TERM endpoint=unestablished worktree=unchanged' \
+        "$pid" "$comm"
+      ;;
+  esac
 }
 
 # --- transactional relaunch -------------------------------------------------

@@ -194,6 +194,15 @@ fm_backend_detect_cmux_fallback() {
 #
 # Nothing here ever resolves a process GROUP or a negative pid: a group is
 # exactly the thing that can contain processes this task does not own.
+#
+# What a process NAME means is not decided here either. That vocabulary has one
+# owner, and it is sourced rather than assumed present: the pid these helpers
+# are asked about is resolved through a backend, but that resolution happens
+# inside a command substitution, so an adapter sourced there never reaches this
+# shell. A caller that cannot see the owner would get "not a shell" for every
+# process - the one answer that licenses a signal.
+# shellcheck source=bin/fm-agent-process-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-agent-process-lib.sh"
 
 # fm_backend_process_alive: 0 when <pid> names a live process. Signal 0 tests
 # existence and permission without delivering anything.
@@ -239,11 +248,19 @@ fm_backend_process_cwd() {  # <pid>
 # A pane sitting at its prompt has no agent to stop, and signalling the shell
 # would take the endpoint down with it - the one thing the stop path promises
 # to preserve.
+#
+# What counts as a shell is NOT decided here. bin/fm-agent-process-lib.sh's
+# fm_agent_process_classify_name is the single owner of the process-name
+# vocabulary every liveness signal shares, and it is already loaded wherever
+# this is reachable - the caller resolves the pid through a backend first, and
+# both the tmux and herdr adapters source that owner. A second list here would
+# be a list that drifts: the one kept here recognized six names while the owner
+# recognized ten, so a pane whose shell is ash, mksh, tcsh, or csh read as "not
+# a shell" and was signallable.
 fm_backend_process_is_shell() {  # <pid>
   local comm
   comm=$(fm_backend_process_comm "$1") || return 1
-  case "$comm" in sh|bash|zsh|dash|ksh|fish) return 0 ;; esac
-  return 1
+  [ "$(fm_agent_process_classify_name "$comm")" = shell ]
 }
 
 # fm_backend_process_is_ancestor_of_self: 0 when <pid> is this process or one of

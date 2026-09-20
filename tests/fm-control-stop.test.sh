@@ -245,23 +245,71 @@ PATH="$WORK/bin:$PATH" start_agent_as_pane_command \
 if [ "${DIRECT_LAUNCH:-}" != skip ]; then
   DIRECT_PID=$(agent_pid) || fail "the agent process could not be resolved from a direct-launch pane"
   out=$(run_stop) || fail "stop failed against a direct-launch agent: $out"
+  # The window really is gone - but on tmux that cannot be PROVEN, because a
+  # task record carries no socket identity and a window absent from the server
+  # this seat addresses is indistinguishable from a destroyed one. So the one
+  # honest report is that the endpoint's fate could not be established: not the
+  # `preserved` a single loose read would have claimed, and not a `gone` the
+  # backend has no way to prove.
   case "$out" in
-    "stopped-endpoint-gone pid=$DIRECT_PID "*) ;;
-    *) fail "stop must report that a window which was the agent did not survive, got: $out" ;;
+    "stopped-endpoint-unverified pid=$DIRECT_PID "*) ;;
+    *) fail "stop must report a tmux endpoint's fate as unestablished, got: $out" ;;
   esac
   case "$out" in
-    *endpoint=did-not-survive*) ;;
+    *endpoint=unestablished*) ;;
     *) fail "stop must name the endpoint outcome it established, got: $out" ;;
   esac
   case "$out" in
     *endpoint=preserved*) fail "stop claimed a survival it could not establish, got: $out" ;;
+    *endpoint=did-not-survive*) fail "stop claimed a destruction tmux cannot prove, got: $out" ;;
   esac
   "$REAL_TMUX" -L "$SOCKET" list-windows -t fmses -F '#{window_name}' | grep -qx fm-t1 \
-    && fail "the direct-launch window outlived the report that it did not survive"
+    && fail "the direct-launch window outlived the stop"
   ! kill -0 "$DIRECT_PID" 2>/dev/null || fail "the direct-launch agent survived a reported stop"
   [ "$(cat "$WORK/wt/dirty.txt")" = uncommitted ] || fail "the direct-launch stop lost uncommitted work"
-  pass "fm-control stop: a window that WAS the agent reports endpoint-gone, never an unestablished preserved"
+  pass "fm-control stop: a window that WAS the agent reports its fate unestablished, never preserved or proven gone"
 fi
+
+# --- 4e. THE WORKTREE POSTCONDITION compares CONTENT, not a summary ---------
+# A shutting-down harness that removes one untracked file it owns and writes
+# another - a session lock traded for a crash log - leaves the entry count, and
+# every other summary derived from the status, exactly as it was. Uncommitted
+# work is gone and `worktree=unchanged` would be claimed over it.
+[ -e "$WORK/wt/dirty.txt" ] || printf 'uncommitted\n' > "$WORK/wt/dirty.txt"
+rm -f "$WORK/wt/crash.log"
+BEFORE_COUNT=$(git -C "$WORK/wt" status --porcelain | grep -c '')
+start_agent "$WORK/wt" "rm -f '$WORK/wt/dirty.txt'; : > '$WORK/wt/crash.log'; PATH=$WORK/bin:\$PATH opencode 1" \
+  || fail "could not stage an agent that trades one uncommitted file for another"
+out=$(run_stop) && fail "stop must not report a worktree whose uncommitted contents were traded as unchanged, got: $out"
+case "$out" in
+  *worktree=CHANGED*) ;;
+  *) fail "stop must report the traded file as a changed worktree, got: $out" ;;
+esac
+[ ! -e "$WORK/wt/dirty.txt" ] || fail "this case never actually removed the original uncommitted file"
+[ -e "$WORK/wt/crash.log" ] || fail "this case never actually wrote the replacement file"
+[ "$(git -C "$WORK/wt" status --porcelain | grep -c '')" = "$BEFORE_COUNT" ] \
+  || fail "this case must leave the dirty-entry count identical, or it proves nothing about content"
+pass "fm-control stop: a worktree whose uncommitted contents were traded is CHANGED, though its entry count is not"
+rm -f "$WORK/wt/crash.log"
+printf 'uncommitted\n' > "$WORK/wt/dirty.txt"
+
+# --- 4f. A WORKTREE THAT COULD NOT BE READ is not a worktree left alone -----
+# Reading nothing is not evidence of nothing changing. If the postcondition
+# read fails the verb must say it could not check, never claim `unchanged`.
+GITFILE=$(cat "$WORK/wt/.git")
+start_agent "$WORK/wt" "rm -f '$WORK/wt/.git'; PATH=$WORK/bin:\$PATH opencode 1" \
+  || fail "could not stage an agent that leaves its worktree unreadable"
+out=$(run_stop) && fail "stop must not claim anything about a worktree it could not read, got: $out"
+case "$out" in
+  *worktree=unverified*) ;;
+  *) fail "stop must say the worktree could not be verified, got: $out" ;;
+esac
+case "$out" in
+  *worktree=unchanged*) fail "stop claimed an unchanged worktree it never read, got: $out" ;;
+esac
+printf '%s\n' "$GITFILE" > "$WORK/wt/.git"
+git -C "$WORK/wt" status --porcelain >/dev/null 2>&1 || fail "the worktree was not restored for the cases that follow"
+pass "fm-control stop: a worktree that could not be read is reported unverified, never unchanged"
 
 # --- 5. a backend that cannot name a pane's process refuses, never guesses --
 sed 's|^window=.*|window=zjses:fm-t1|' "$WORK/home/state/t1.meta" > "$WORK/home/state/t1.meta.new"
