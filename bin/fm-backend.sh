@@ -854,7 +854,7 @@ fm_backend_busy_state() {  # <backend> <target>
 }
 
 # fm_backend_composer_state: classify the composer/input area of <target> as
-# empty|pending|pending-unproven|unknown for callers that need a pre-submit
+# empty|pending|pending-unproven|no-composer|unknown for callers that need a pre-submit
 # input guard, a submit acknowledgement, or a launch-readiness check. It is
 # exposed so a caller other than the send path (the away-mode daemon's
 # supervisor-pane pending-input guard in bin/fm-supervise-daemon.sh, and
@@ -865,7 +865,7 @@ fm_backend_busy_state() {  # <backend> <target>
 # fm_composer_classify_screen) - so no backend can hold a private shape
 # assumption; zellij's classifier reads `dump-screen --ansi`, which replaced
 # its old no-classifier content-diff reporting.
-fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pending|pending-unproven|unknown
+fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pending|pending-unproven|no-composer|unknown
   local backend=$1
   shift
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }

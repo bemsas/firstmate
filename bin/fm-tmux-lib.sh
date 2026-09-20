@@ -132,12 +132,12 @@ EOF
 
 # fm_tmux_composer_state: the tmux composer verdict - a thin adapter over the
 # shared screen classifier. The verdict contract (empty | pending |
-# pending-unproven | unknown, positive proof required for empty, unrecognized
+# pending-unproven | no-composer | unknown, positive proof required for empty, unrecognized
 # future verdicts failing safe) is owned by bin/fm-composer-lib.sh. Identity
 # is fetched lazily, only when the classifier reports the verdict depends on
 # it (a pi separator pair under the cursor), so the common read never pays
 # for the process probe.
-fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
+fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|no-composer|unknown
   local target=$1 cy pane verdict identity
   cy=$(fm_tmux_composer_cursor_row "$target") || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
@@ -152,16 +152,21 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   fi
   # Cursor Agent CLI parks its terminal cursor OUTSIDE its composer, below the
   # footer, with #{cursor_flag} 0 - so on a Cursor pane tmux's cursor row is not
-  # a composer locator and the cursor-anchored read can only ever answer
-  # `unknown`. Reclassify that pane the way every cursorless backend already
+  # a composer locator and the cursor-anchored read can only ever answer one of
+  # the two unresolved verdicts (`unknown`, or `no-composer` when the parked
+  # cursor row is blank). Reclassify that pane the way every cursorless backend already
   # classifies it, letting the bottom-most shape win, which is the same rule
   # herdr, zellij, cmux, and orca use for every harness including this one.
   # Gated on Cursor's own structural process identity, never on the verdict
   # alone, so the strict blank-row posture that owns `unknown` for every other
   # harness is untouched.
-  if [ "$verdict" = unknown ] && fm_tmux_pane_is_cursor "$target"; then
-    verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
-  fi
+  case "$verdict" in
+    unknown|no-composer)
+      if fm_tmux_pane_is_cursor "$target"; then
+        verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
+      fi
+      ;;
+  esac
   printf '%s' "$verdict"
 }
 

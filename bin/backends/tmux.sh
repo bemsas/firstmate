@@ -307,8 +307,25 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # identified agent process"; a failed return is an unreadable pane. The
 # control plane's non-typing stop uses this list and refuses rather than
 # signaling a process group or an unattributed pid.
+#
+# The pane read below is a RAW read, so the exact recorded window must appear
+# in a successful session inventory first, exactly as fm_backend_tmux_agent_state
+# does it: tmux answers an absent target from the client's active window rather
+# than failing, and without this the caller would TERM another task's harness
+# when the recorded window closed mid-verb. An absent window, an inventory that
+# could not be read, and a malformed target all fail, so the non-typing stop
+# refuses instead of signaling an unattributed pane.
 fm_backend_tmux_agent_pids() {  # <target>
-  local target=$1 tty pid pgid tpgid comm args argv0
+  local target=$1 tty pid pgid tpgid comm args argv0 session window windows
+  case "$target" in
+    *:*:*|'':*|*:'') return 1 ;;
+    *:*) ;;
+    *) return 1 ;;
+  esac
+  session=${target%%:*}
+  window=${target#*:}
+  windows=$(fm_backend_tmux_window_inventory "$session") || return 1
+  printf '%s\n' "$windows" | grep -Fqx "$window" || return 1
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
   case "$tty" in
     /dev/*) ;;

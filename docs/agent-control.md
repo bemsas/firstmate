@@ -46,10 +46,12 @@ muse is the one verified adapter that restores the cancelled prompt back into it
 The clear is refused before anything is sent when the recorded backend cannot deliver it.
 
 `exit` reads the composer's state before typing the exit command.
-A `pending` verdict refuses by naming the pending text, so a visible draft is never concatenated onto and never discarded by a signal.
 An `empty` verdict types the harness's exit command.
-Any other verdict (`unknown`, `pending-unproven`, or an unreadable read) still refuses to type, matching the fail-safe contract every other consumer that can overwrite composer input follows, and then stops the agent by signaling each pid the recovery-grade classifier established as this task's agent.
-That non-typing stop refuses rather than guessing when no such pid can be named, and it never signals a process group.
+A `pending` verdict refuses by naming the pending text, and `pending-unproven` and `unknown` - the verdicts where the classifier observed composer content it could not prove - refuse too, without typing and without signaling.
+Text that was observed is therefore never concatenated onto and never discarded by a signal; the guarantee is exactly that, and it does not extend to text no read ever saw.
+The one remaining verdict, `no-composer`, is the classifier's positive finding that the screen holds no composer at all - no container of any shape, no shell prompt, no structure at the bottom of the capture, and on a cursor-anchored backend a blank cursor row - so no draft was observed and there is nowhere to type.
+That verdict, and only that verdict, stops the agent by signaling each pid the recovery-grade classifier established as this task's agent.
+The non-typing stop refuses rather than guessing when no such pid can be named, and it never signals a process group.
 
 **Teardown and discard are not verbs and will not become verbs.**
 `exit` stops an agent and preserves everything else.

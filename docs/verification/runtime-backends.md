@@ -666,8 +666,8 @@ ok - opencode (1.18.31) on herdr: fm-control exit stops the worker and preserves
 ```
 
 The portable regressions in `tests/fm-composer-lib.test.sh` pin that layout, keep typed drafts `pending`, and keep `Working on request...` immediately under the floor as `unknown`.
-`tests/fm-control.test.sh` pins that pending text still refuses and that an unknown composer with no identified agent pid still refuses.
-When the composer is not proven empty and is not pending, `exit` signals each pid the recovery-grade classifier named as this task's agent rather than typing; `tests/fm-control-signal-stop.test.sh` and `tests/fm-control-herdr-smoke.test.sh` prove that path against a harness-named process on tmux and Herdr.
+`tests/fm-control.test.sh` pins that pending text still refuses, that a pane with no composer and no identified agent pid still refuses, and that observed text the classifier cannot place is neither typed into nor signaled.
+Only the `no-composer` verdict - the classifier's positive finding that the screen holds no composer at all, so no draft was observed - reaches the non-typing stop, where `exit` signals each pid the recovery-grade classifier named as this task's agent rather than typing; `tests/fm-control-signal-stop.test.sh` and `tests/fm-control-herdr-smoke.test.sh` prove that path against a harness-named process on tmux and Herdr.
 This guard is the refresh command after an OpenCode or Herdr upgrade:
 
 ```sh

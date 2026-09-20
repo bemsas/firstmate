@@ -69,8 +69,17 @@ done
 [ "$state" = alive ] || fail "the harness-named sleep never classified alive (last state: ${state:-none})"
 
 composer=$(PATH="$LAB/shim:$PATH" bash -c '. "$1/bin/fm-backend.sh"; fm_backend_composer_state tmux "$2"' _ "$ROOT" "$SESSION:fm-t1")
-[ "$composer" != empty ] || fail "this construction must not prove the composer empty, or the signal path is not under test"
-[ "$composer" != pending ] || fail "this construction must not read pending composer text"
+[ "$composer" = no-composer ] \
+  || fail "the non-typing stop is reachable only from a pane proven to hold no composer; this construction read '$composer'"
+
+# tmux answers an absent target from the session's CURRENT window instead of
+# failing, so a pid read that skips window membership would hand the stop
+# another task's harness. Make the agent window current, then ask for a window
+# that does not exist: the read must fail rather than answer.
+"$REAL_TMUX" -L "$SOCKET" select-window -t "$SESSION:fm-t1"
+if absent=$(PATH="$LAB/shim:$PATH" bash -c '. "$1/bin/fm-backend.sh"; fm_backend_agent_pids tmux "$2"' _ "$ROOT" "$SESSION:fm-t1-gone"); then
+  fail "an absent window must not report pids, but it answered with '$absent'"
+fi
 
 pids=$(PATH="$LAB/shim:$PATH" bash -c '. "$1/bin/fm-backend.sh"; fm_backend_agent_pids tmux "$2"' _ "$ROOT" "$SESSION:fm-t1")
 [ -n "$pids" ] || fail "the harness-named sleep must be identifiable as an agent pid"

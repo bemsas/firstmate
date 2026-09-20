@@ -29,9 +29,9 @@
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
 #              every uncommitted change. Interrupts first when the task reads
 #              busy, then submits the harness's exit command when the composer
-#              is proven empty. When the composer is not proven empty and is
-#              not visibly pending, it signals each identified agent pid
-#              instead of typing. Postcondition:
+#              is proven empty. When the classifier proves the screen holds no
+#              composer at all, it signals each identified agent pid instead of
+#              typing; every verdict in between refuses. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent). An endpoint that reads
 #              `missing` is put through the control plane's per-backend absence
@@ -113,10 +113,13 @@
 #     classified state acts.
 #   - A composer that visibly holds pending text refuses before an exit command
 #     is typed, so existing text is preserved instead of being concatenated.
-#   - When the composer is not proven empty and is not visibly pending, `exit`
-#     stops the identified agent process without typing. That path still
-#     refuses when it cannot name a pid that the recovery-grade classifier
-#     established as this task's agent, and it never signals a process group.
+#   - When the classifier reports `no-composer` - its positive finding that the
+#     screen holds no composer, so no draft was observed - `exit` stops the
+#     identified agent process without typing. That path still refuses when it
+#     cannot name a pid that the recovery-grade classifier established as this
+#     task's agent, and it never signals a process group. `unknown` and
+#     `pending-unproven` saw content they could not prove, so they refuse both
+#     the typed exit command and the signal.
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
@@ -589,11 +592,12 @@ do_exit() {
     pending)
       die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Clear or submit the pending text, then retry '$VERB'"
       ;;
-    *)
-      # The composer is not proven empty, so typing is still refused. A
-      # non-typing stop is outside that guard: signal the identified agent
-      # process. Refuse rather than guess when no pid is established as this
-      # task's agent.
+    no-composer)
+      # The classifier established that this screen holds no composer at all,
+      # so no draft was observed and there is nothing a stop could destroy.
+      # Typing is still refused - there is nowhere to type - and the
+      # non-typing stop signals the identified agent process instead. Refuse
+      # rather than guess when no pid is established as this task's agent.
       if ! stop_agent_by_signal; then
         die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text, and no agent process could be identified to stop without typing. Clear the composer, then retry '$VERB'"
       fi
@@ -607,6 +611,13 @@ do_exit() {
       retire_busy_incarnation
       printf 'stopped'
       return 0
+      ;;
+    *)
+      # `unknown` and `pending-unproven` are the verdicts where composer
+      # content WAS observed and could not be proven. Typing would concatenate
+      # onto it and a signal would destroy it, so both refuse; only a screen
+      # the classifier proved holds no composer reaches the non-typing stop.
+      die "task $ID's composer state is '$composer_state', not proven empty and not proven free of text; refusing to type the $cmd exit command because it could concatenate onto existing text, and refusing to stop the agent by signal because that would discard text this read could not rule out. Clear the composer, then retry '$VERB'"
       ;;
   esac
   # The submit verdict is NOT the postcondition here: a successful exit command

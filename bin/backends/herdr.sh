@@ -2215,9 +2215,9 @@ EOF
 # members first, then descendants of the pane shell (the nested-shell crew
 # shape). Empty successful output is "no identified agent process"; a failed
 # return is an unreadable pane. Never prints the shell pid, a process group
-# id, or a non-digit.
+# id, a non-digit, or the same pid twice.
 fm_backend_herdr_agent_pids() {  # <target>
-  local session pane_id info shell_pid count i pid name argv0 args ps_bin rows
+  local session pane_id info shell_pid count i pid name argv0 args ps_bin rows printed=''
   fm_backend_herdr_parse_target "$1" || return 1
   session=$FM_BACKEND_HERDR_SESSION
   pane_id=$FM_BACKEND_HERDR_PANE
@@ -2251,6 +2251,7 @@ fm_backend_herdr_agent_pids() {  # <target>
     [ "$pid" != "$shell_pid" ] || { i=$((i + 1)); continue; }
     if [ "$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")" = agent ]; then
       printf '%s\n' "$pid"
+      printed="$printed $pid"
     fi
     i=$((i + 1))
   done
@@ -2263,11 +2264,18 @@ fm_backend_herdr_agent_pids() {  # <target>
       ''|*[!0-9]*|0) continue ;;
     esac
     [ "$pid" != "$shell_pid" ] || continue
+    # The pane's foreground harness is also a descendant of the pane shell, so
+    # without this the ordinary single-harness pane would emit its pid twice
+    # and the caller would signal one process under two names.
+    case "$printed " in
+      *" $pid "*) continue ;;
+    esac
     args=$(LC_ALL=C "$ps_bin" -p "$pid" -o args= 2>/dev/null) || continue
     args=${args#"${args%%[![:space:]]*}"}
     argv0=${args%%[[:space:]]*}
     [ "$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")" = agent ] || continue
     printf '%s\n' "$pid"
+    printed="$printed $pid"
   done <<EOF
 $(printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
   {
@@ -3186,7 +3194,7 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # only when the classifier reports the verdict depends on it (a pi separator
 # pair below every other candidate), preserving this adapter's original
 # consult-only-when-needed behavior.
-fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
+fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|no-composer|unknown
   local target=$1 cap caps verdict identity
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null); then

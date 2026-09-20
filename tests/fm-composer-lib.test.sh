@@ -573,10 +573,11 @@ test_matrix_codex_idle_starfield_furniture() {
   assert_screen "wrapped typed row with a middle dot on herdr" pending "$CAPS_STYLED" $'transcript line\n\n› deploy\nfix · tests before pushing'
   assert_screen "wrapped typed row with a middle dot on tmux" pending "$CAPS_TMUX" $'transcript line\n\n› deploy\nfix · tests before pushing' 3
   # (iv) the footer or a starfield row alone, with no bare glyph above, gains
-  # no new verdict: still no container proof.
-  assert_screen "codex footer alone on herdr" unknown "$CAPS_STYLED" $'transcript line\n\n'"$footer"
+  # no new verdict: still no container proof at all, which is `no-composer` -
+  # not empty, not pending, and nothing a caller may type into.
+  assert_screen "codex footer alone on herdr" no-composer "$CAPS_STYLED" $'transcript line\n\n'"$footer"
   assert_screen "codex footer alone on tmux" unknown "$CAPS_TMUX" $'transcript line\n\n'"$footer" 2
-  assert_screen "starfield row alone on herdr" unknown "$CAPS_STYLED" $'transcript line\n\n'"$below"
+  assert_screen "starfield row alone on herdr" no-composer "$CAPS_STYLED" $'transcript line\n\n'"$below"
   pass "matrix: codex 0.154's starfield rows are furniture; typed, mixed, and unanchored rows keep their verdicts"
 }
 
@@ -714,22 +715,27 @@ test_strict_blank_row_divergence() {
   # permissive posture has silently returned and away-mode injection would
   # again type escalations into unproven panes.
   local out
-  # Permissive read this blank cursor row as empty = safe to inject.
+  # Permissive read this blank cursor row as empty = safe to inject. It is now
+  # `no-composer` - no container anywhere on the screen and a blank cursor row,
+  # so nothing was observed - which is still a refusal, never injectable.
   out=$(fm_composer_classify_screen "$CAPS_TMUX" $'some output\nmore output\n' 2)
-  [ "$out" = unknown ] || fail "a blank unidentified cursor row must be unknown (was permissive empty), got '$out'"
+  [ "$out" = no-composer ] || fail "a blank unidentified cursor row with no container must be no-composer (was permissive empty), got '$out'"
   # A dead shell's prompt row.
   out=$(fm_composer_classify_screen "$CAPS_TMUX" $'output\n$ ' 1)
   [ "$out" = unknown ] || fail "a dead-shell prompt row must be unknown, got '$out'"
   # A bare busy-footer row is not a composer container.
   out=$(fm_composer_classify_screen "$CAPS_TMUX" $'Working...' 0)
   [ "$out" = unknown ] || fail "a bare busy-footer row must be unknown (was permissive empty), got '$out'"
-  # An unidentified free-text cursor row carries no container proof either.
+  # An unidentified free-text cursor row carries no container proof either, and
+  # it must stay `unknown` rather than `no-composer`: text WAS observed under
+  # the cursor, and a caller that destroys state on `no-composer` would destroy
+  # it. This is the one divergence between the two refusals.
   out=$(fm_composer_classify_screen "$CAPS_TMUX" $'output\nhuman draft text' 1)
   [ "$out" = unknown ] || fail "an unidentified text row must be unknown under strict, got '$out'"
-  # A blank screen with no cursor capability.
+  # A blank screen with no cursor capability observed nothing at all.
   out=$(fm_composer_classify_screen "$CAPS_PLAIN" $'\n\n')
-  [ "$out" = unknown ] || fail "a blank screen must be unknown, got '$out'"
-  pass "strict posture: blank and unidentified rows are unknown, never injectable empty"
+  [ "$out" = no-composer ] || fail "a blank screen must be no-composer, got '$out'"
+  pass "strict posture: blank and unidentified rows refuse, never injectable empty, and observed text never reads no-composer"
 }
 
 test_bare_wrap_region_classifies() {
@@ -832,7 +838,7 @@ test_opencode_status_below_floor_is_furniture() {
   # blank separator. The cursorless invalidation then rejected the left-bar.
   # This is the live layout, compacted; the three independent status signals
   # (`ctrl+p commands`, `OpenCode <version>`, `esc interrupt`) each suffice.
-  local idle pending busy cwd_wrap left_path grok_hint grok_stale out
+  local idle pending busy cwd_wrap cwd_wrap_styled left_path out
   idle=$'┃\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)                                                               ~/Projects/firstmate:main\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n /home/bemsas/Projects/firstmate                                            40.1K (4%)  ctrl+p commands    • OpenCode 1.18.31'
   assert_screen "opencode 1.18.31 idle empty on herdr with status under the floor" empty "$CAPS_STYLED" "$idle"
   assert_screen "opencode 1.18.31 idle empty on zellij with status under the floor" empty "$CAPS_STYLED_NOID" "$idle"
@@ -847,6 +853,13 @@ test_opencode_status_below_floor_is_furniture() {
 
   cwd_wrap=$'┃\n┃        ~/.treehouse/basisone-b4b6a9/5/\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)                                                               basisone\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                                                    63.4K (6%)  ctrl+p commands    • OpenCode 1.18.31'
   assert_screen "opencode right-aligned cwd wrap is furniture not pending text" empty "$CAPS_STYLED" "$cwd_wrap"
+  # The same wrap as a STYLED capture actually delivers it: OpenCode colours the
+  # right-aligned cwd, so the row carries an escape between the bar and the
+  # indent. A predicate that pattern-matched the raw row would miss it and score
+  # the row as typed text.
+  cwd_wrap_styled=$'\u2503\n\u2503        '"${ESC}[36m~/.treehouse/basisone-b4b6a9/5/${ESC}[39m"$'\n\u2503  Build \u00b7 Kimi K3 Kimi For Coding (kimi.ai)\n\u2579'"$(printf '\u2580%.0s' $(seq 1 78))"$'\n \u2b1d\u2b1d\u2b1d\u2b1d  esc interrupt                                                    63.4K (6%)  ctrl+p commands    \u2022 OpenCode 1.18.31'
+  case "$cwd_wrap_styled" in *"${ESC}["*) ;; *) fail "fixture drift: the styled cwd wrap must carry an escape, or the ANSI path is untested" ;; esac
+  assert_screen "opencode styled cwd wrap is furniture not pending text" empty "$CAPS_STYLED" "$cwd_wrap_styled"
 
   left_path=$'┃\n┃  ~/Projects/foo\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
   assert_screen "opencode left-aligned path is pending typed text" pending "$CAPS_STYLED" "$left_path"
@@ -860,11 +873,6 @@ test_opencode_status_below_floor_is_furniture() {
   # hint on the first left-bar row (placeholder_position=0).
   first_idle=$'┃  Ask anything… "Fix a TODO in the codebase"\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n tab agents  ctrl+p commands'
   assert_screen "opencode idle hint on the first left-bar row is empty" empty "$CAPS_STYLED" "$first_idle"
-
-  grok_hint=$'╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯\n Shift+Tab:mode  │  Ctrl+x:shortcuts'
-  assert_screen "grok keybind row immediately under the box is furniture" empty "$CAPS_STYLED" "$grok_hint"
-  grok_stale=$'╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯\nWorking on request...'
-  assert_screen "grok box above unclaimed activity still unknown" unknown "$CAPS_STYLED" "$grok_stale"
 
   out=$(fm_composer_classify_screen "$CAPS_STYLED" "$idle")
   [ "$out" = empty ] || fail "the original idle-empty OpenCode-on-Herdr failure must now read empty, got '$out'"

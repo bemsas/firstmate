@@ -859,22 +859,48 @@ test_exit_refuses_when_composer_holds_pending_text() {
   pass "fm-control exit: pending composer text still refuses, and nothing is typed"
 }
 
-test_exit_refuses_unknown_composer_when_no_agent_pid_is_identified() {
+test_exit_refuses_composerless_pane_when_no_agent_pid_is_identified() {
   local dir out rc
-  dir=$(new_case unknown-nopid)
+  dir=$(new_case nocomposer-nopid)
   add_task "$dir" t1 claude
   alive_as "$dir" claude
-  printf 'some output\nhuman draft text\n' > "$dir/fake/pane"
+  # No container anywhere and a blank cursor row: the classifier proves this
+  # pane holds no composer, so the non-typing stop is allowed to try - and
+  # still refuses, because no pid is established as this task's agent.
+  printf 'some output\n\n' > "$dir/fake/pane"
   out=$(run_control "$dir" t1 exit); rc=$?
-  expect_code 1 "$rc" "exit must refuse an unknown composer when no agent pid is identified"$'\n'"$out"
+  expect_code 1 "$rc" "exit must refuse a composerless pane when no agent pid is identified"$'\n'"$out"
   assert_contains "$out" "not proven empty" \
     "the refusal should name the unproven composer state"
   assert_contains "$out" "no agent process could be identified" \
     "the refusal should say the non-typing stop could not identify a pid"
   [ "$(cat "$dir/fake/command")" = claude ] \
     || fail "an unidentified-pid refusal must leave the agent running"
-  [ -z "$(literals "$dir")" ] || fail "an unknown composer must not be typed into"
-  pass "fm-control exit: unknown composer without an identified pid still refuses"
+  [ -z "$(literals "$dir")" ] || fail "a composerless pane must not be typed into"
+  pass "fm-control exit: a composerless pane without an identified pid still refuses"
+}
+
+test_exit_never_signals_a_draft_it_could_not_place() {
+  local dir out rc
+  dir=$(new_case unknown-draft)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  # Text under the cursor that the classifier cannot place in a container:
+  # content WAS observed, so this is `unknown`, not `no-composer`. Typing would
+  # concatenate onto it and a signal would destroy it, so exit does neither.
+  printf 'some output\nhuman draft text\n' > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "exit must refuse when observed text could not be placed"$'\n'"$out"
+  assert_contains "$out" "not proven free of text" \
+    "the refusal should say the read could not rule out composer text"
+  case "$out" in
+    *"no agent process could be identified"*)
+      fail "an observed draft must never reach the non-typing stop: $out" ;;
+  esac
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "an observed draft must leave the agent running"
+  [ -z "$(literals "$dir")" ] || fail "an unplaceable draft must not be typed into"
+  pass "fm-control exit: observed text that cannot be placed is neither typed into nor signaled"
 }
 
 test_secondmate_control_command_carries_no_marker() {
@@ -955,6 +981,7 @@ test_agent_that_does_not_stop_fails_closed
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
 test_exit_refuses_when_composer_holds_pending_text
-test_exit_refuses_unknown_composer_when_no_agent_pid_is_identified
+test_exit_refuses_composerless_pane_when_no_agent_pid_is_identified
+test_exit_never_signals_a_draft_it_could_not_place
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task
