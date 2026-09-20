@@ -32,8 +32,20 @@ Tmux and Herdr now route captures through `../../../bin/fm-composer-lib.sh`, whi
 `../../../docs/herdr-backend.md` owns the boundary and `../../../tests/fm-backend-herdr.test.sh` covers it.
 
 The "Run Grok Build in a project directory?" picker appears only outside a project, such as home, Desktop, Downloads, or `/tmp`.
-The spawn starts in the isolated git root, so Grok trusts it and needs no key.
+The spawn starts in the isolated git root, so the picker never shows.
 For unavoidable non-project launch, `[hints] project_picker_disabled = true` in `~/.grok/config.toml` suppresses the picker.
+
+## Folder trust
+
+The picker is not the trust gate, and the isolated git root is not automatically trusted.
+An untrusted workspace raises "Do you trust the contents of this directory?" / "Grok Build may run or modify contents in this directory, posing security risks", which needs a `y` this control plane cannot send, so the pane wedges and exit refuses.
+`bin/fm-spawn.sh` therefore pre-registers the grant through `../../../bin/fm-grok-trust.sh` before every crewmate or scout launch and REFUSES the launch when that fails, because no post-launch gate can answer this dialog.
+
+Grok keys the grant on the repository's MAIN worktree root, not on the directory the pane starts in, so registering a worktree path writes a key Grok never reads.
+One grant therefore covers every worktree and subdirectory of that repository, and it covers MCP, LSP, hooks, project instructions and project skills together until removed.
+The store is `${GROK_HOME:-$HOME/.grok}/trusted_folders.toml`, mode 0600, one `[folders."<abs path>"]` table per root with `trusted` and `decided_at`.
+`../../../docs/verification/grok-folder-trust.md` owns the evidence and `../../../tests/fm-grok-trust.test.sh` owns the regression coverage.
+A grok SECONDMATE home is not pre-registered and can still meet the dialog.
 
 ## Composer
 
@@ -49,7 +61,8 @@ The shared classifier locates the full box and all content rows, so border curso
 ## Worker turn-end hook
 
 Grok fires `Stop` each turn.
-Project hooks require folder trust in `~/.grok/trusted_folders.toml`, which Firstmate does not edit; global `~/.grok/hooks/` is always trusted.
+Project hooks require folder trust in `~/.grok/trusted_folders.toml`; global `~/.grok/hooks/` is always trusted and is what the spawn installs.
+The spawn does register folder trust (see Folder trust above), but the hook stays global regardless: the grant is repository-wide, so relying on it for hook loading would tie turn-end signalling to a trust entry a captain may remove.
 The spawn installs guarded global `fm-turn-end.json` and `fm-turn-end.sh`.
 They act only when workspace `.fm-grok-turnend` matches the registry under `~/.grok/hooks/fm-turn-end.d/`, then touch the task's `state/<id>.turn-ended` through always-set `GROK_WORKSPACE_ROOT`, which equals the worktree.
 This stays outside the worktree, needs no trust grant, and writes only Firstmate files.
