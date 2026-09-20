@@ -94,6 +94,7 @@ start_agent() {  # <cwd> [shell-command to run once the agent exits]
 }
 
 agent_pid() {
+  # shellcheck disable=SC2016 # The $1 expansions belong to the inner bash -c, which receives $ROOT as its own positional.
   env PATH="$SHIM:$PATH" bash -c '
     . "$1/bin/fm-backend.sh"; . "$1/bin/fm-tmux-lib.sh"
     fm_tmux_agent_process fmses:fm-t1' _ "$ROOT"
