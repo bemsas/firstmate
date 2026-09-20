@@ -96,7 +96,7 @@ The OpenCode nudge runs only on `session.created`.
 The watcher-arm and turn-end plugins run later on `session.idle`, and the guard lets the watcher coordinator act first, so the plugins do not race for one lifecycle event.
 
 Grok's guaranteed-loading alternative is a global token-guarded hook like the pattern used by `bin/fm-spawn.sh`.
-That alternative expands trust and writes outside this repository, so Firstmate never installs it or grants folder trust automatically.
+That alternative expands trust and writes outside this repository, so no session-start path installs it or grants folder trust; the one grant Firstmate writes automatically is the grok crewmate and scout spawn's, owned by [`references/harness/grok.md`](../.agents/skills/harness-adapters/references/harness/grok.md).
 
 ## Regression coverage
 
