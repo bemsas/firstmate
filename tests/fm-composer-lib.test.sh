@@ -875,7 +875,7 @@ test_count_and_clip_columns_are_locale_independent() {
 }
 
 test_matrix_opencode_below_floor_and_sidebar() {
-  local bar floor idle wedged typed narrow mismatched blanking hidden past beside pad
+  local bar floor idle wedged typed narrow mismatched blanking hidden past beside pad extracted typed_beside
   # Geometry, in columns, mirroring the live capture: the floor is the
   # composer's own width (63), composer text sits well inside it, and the
   # sidebar starts at column 70 - beyond the floor's right edge, across a gap.
@@ -998,6 +998,29 @@ test_matrix_opencode_below_floor_and_sidebar() {
     empty "$CAPS_STYLED" "$beside"
   assert_screen "opencode idle with the sidebar beside its blank rows on cmux/orca" \
     empty "$CAPS_PLAIN" "$beside"
+
+  # 10. ONE SELECTION, ONE SET OF BYTES. The classifier and the extractor read
+  # the same selected rows, so a bound proven for one must bound the other -
+  # otherwise this pane classifies `empty` while extraction hands its caller the
+  # sidebar text. zellij's delivery check compares `before` + the typed text
+  # against what it reads afterwards, so a `before` carrying panel text can
+  # never match, and the steer is typed and then reported failed: an unsent
+  # draft left in the composer, which is what makes `exit`, `relaunch` and
+  # `stop` all refuse afterwards.
+  extracted=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$beside") \
+    || fail "extraction must succeed on an idle composer beside a sidebar"
+  [ -z "$extracted" ] \
+    || fail "extraction must not hand back the sidebar the bound excludes, got '$extracted'"
+  typed_beside=$(printf '%s\n%s\n%s\n%s\n%s\n%s' \
+    "$(oc_row '  ┃' 'session: fix the parser')" \
+    "$(oc_row '  ┃  please rerun the gate' '/home/u/app:main')" \
+    "$(oc_row '  ┃' '1.2k tokens')" \
+    "$(oc_row '  ┃  Build · Big Pickle OpenCode Zen' '0 tokens')" \
+    "$floor" "$bar")
+  extracted=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$typed_beside") \
+    || fail "extraction must succeed on a typed composer beside a sidebar"
+  [ "$extracted" = 'please rerun the gate' ] \
+    || fail "extraction must return exactly what was typed, got '$extracted'"
   unset -f oc_row
   pass "matrix: opencode's below-floor furniture and side panel are bounded, and typed text still refuses"
 }

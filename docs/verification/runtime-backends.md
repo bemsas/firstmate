@@ -634,6 +634,11 @@ Measured on this worktree against the classifier itself, with the condition in p
 Refusing every bound that empties a row - the simpler rule - was measured too and reads that idle pane `unknown`, which would leave opencode-on-herdr exactly as unstoppable as before; that is why the proof is required rather than the blanking alone.
 The reproduction was not produced by a real opencode render, so it is recorded as an uncovered shape rather than an observed regression; it gets the careful treatment because its consequence is a visible draft read as `empty`, which `exit` would type onto and `stop` would signal away.
 The residual is stated plainly: a composer whose every row really is blank inside the bound also falls back to reading rows whole and refuses, which is the safe direction, and opencode does not render that shape because its `Build · …` footer is drawn inside the composer.
+
+The bound applies to BOTH readers of a selection, not just the classifier.
+`fm_composer_extract_selected_content` clips each selected row to the same proven bound `fm_composer_classify_screen` uses, so one selection cannot yield two different sets of bytes.
+That matters because zellij's delivery check (`fm_backend_zellij_composer_observed_append`) compares the composer's content before a steer plus the typed text against what it reads afterwards: an unclipped `before` carrying sidebar text can never match, so the steer would be typed and then reported `send-failed`, leaving an unsent draft that makes `exit` and `relaunch` refuse as `pending` and `stop` refuse at its content gate.
+Measured on the sidebar fixture: with the extractor unbounded it returns `session: fix the parser Ask anything… "Fix a TODO in the codebase" /home/u/app:main 1.2k tokens` for a pane the classifier calls `empty`; bounded, it returns nothing for that pane and exactly `please rerun the gate` once that text is typed, and the simulated delivery check confirms rather than fails.
 The live guard's cursorless assertion reads the WHOLE pane, because opencode centres its composer on a splash screen and a bottom-anchored window can miss it entirely - that is a capture-window property, not a classification one.
 claude 2.1.277 and opencode 1.18.31 are the harnesses whose cursorless read is established `empty`; kimi 2.0.2 still classifies `unknown` cursorless because it draws its own footer rows below its `╰───╯` composer border, which is the same defect class in the box shape and is not addressed here.
 codex 0.155.1, pi 0.85.1, and muse 1.3.0 could not be verified in that run because an untrusted worktree parks them on a trust dialog, which the strict classifier correctly refuses; grok 1.0.34 read `pending-unproven`.
@@ -657,6 +662,7 @@ ok - fm-control stop: a worktree that loses its single dirty file is reported CH
 ok - fm-control stop: a window that WAS the agent reports its fate unestablished, never preserved or proven gone
 ok - fm-control stop: a worktree whose uncommitted contents were traded is CHANGED, though its entry count is not
 ok - fm-control stop: a file the harness flushed on its way out is not a destroyed worktree
+ok - fm-control stop: a file lost inside an untracked directory is CHANGED, not a collapsed summary
 ok - fm-control stop: a worktree that could not be read is reported unverified, never unchanged
 ok - fm-control stop: a backend that cannot identify the agent process refuses rather than guessing
 ```
@@ -671,7 +677,10 @@ That `missing`, however, is not proof of destruction on tmux, and the verb does 
 The direct-launch case above stages the destroyed-window shape - the stand-in agent is `exec`ed as the pane's own command, so the window dies with it - and requires `stopped-endpoint-unverified` with `endpoint-state=unestablished`: neither the `preserved` a loose read would have claimed, nor a `gone` this backend cannot prove.
 The other cases keep covering the real fleet shape, where `bin/backends/tmux.sh` creates the window with no command and the shell genuinely outlives the agent.
 
-The worktree postcondition asserts that nothing the worktree held before the signal was destroyed or altered, not that it is byte-identical: it compares `HEAD` plus the `git status --porcelain` text, never a summary derived from it, and requires every entry present before to still be present after with the same status.
+The worktree postcondition asserts that nothing the worktree held before the signal was destroyed or altered, not that it is byte-identical: it compares `HEAD` plus the `git status --porcelain --untracked-files=all` text, never a summary derived from it, and requires every entry present before to still be present after with the same status.
+`--untracked-files=all` is load-bearing rather than incidental: git's default untracked mode collapses a whole untracked directory to one `dir/` entry, so a worker drafting into a not-yet-added `notes/` could lose a file inside it while both fingerprints still read `?? notes/` - the same collapsing proxy the postcondition refuses everywhere else, arriving through the porcelain text itself.
+Verified against a real repo: with `notes/plan.md` and `notes/draft.md` untracked, the default mode prints `?? notes/` both before and after `rm notes/draft.md`, while `-uall` prints the two files and then one.
+Ignored paths stay excluded either way, and `worktree_brief` bounds what a refusal quotes, so the longer listing cannot bury the sentence.
 The cases above stage all three shapes: an agent that trades one untracked file for another leaves every count identical while the work is gone; an agent that leaves its worktree unreadable gives a constant that compares equal to itself; and an agent that only ADDS a file on its way out has destroyed nothing.
 The first two require the verb to refuse - `worktree-state=CHANGED` and `worktree-state=unverified` - while the third must report `worktree-state=intact`, because this verb sends SIGTERM precisely so the harness gets its chance to flush and a postcondition that failed on that flush would turn the design into a reported failed stop.
 Each of those exits retires the task's busy wiring first: the agent is already proven dead or missing by then, so a record that outlived it would leave the task classifying `busy` with no agent behind it.

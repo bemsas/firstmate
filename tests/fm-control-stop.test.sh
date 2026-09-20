@@ -359,6 +359,31 @@ esac
 pass "fm-control stop: a file the harness flushed on its way out is not a destroyed worktree"
 rm -f "$WORK/wt/flushed.log"
 
+# --- 4e0. WORK INSIDE AN UNTRACKED DIRECTORY is entries, not one summary ----
+# Git's default untracked mode collapses a whole untracked directory to a single
+# `dir/` entry, so a worker drafting into a not-yet-added `notes/` can lose a
+# file inside it and both fingerprints still read `?? notes/`. That is the same
+# proxy the postcondition already refuses everywhere else, arriving through the
+# porcelain text itself rather than through a count.
+rm -f "$WORK/wt/dirty.txt"
+mkdir -p "$WORK/wt/notes"
+printf 'plan\n' > "$WORK/wt/notes/plan.md"
+printf 'draft\n' > "$WORK/wt/notes/draft.md"
+[ "$(git -C "$WORK/wt" status --porcelain)" = '?? notes/' ] \
+  || fail "this case needs git to collapse the untracked directory, got: $(git -C "$WORK/wt" status --porcelain)"
+start_agent "$WORK/wt" "rm -f '$WORK/wt/notes/draft.md'; PATH=$WORK/bin:\$PATH opencode 1" \
+  || fail "could not stage an agent that destroys a file inside an untracked directory"
+out=$(run_stop) && fail "stop must not report work destroyed inside an untracked directory as intact, got: $out"
+case "$out" in
+  *worktree-state=CHANGED*) ;;
+  *) fail "stop must report the lost draft as a changed worktree, got: $out" ;;
+esac
+[ ! -e "$WORK/wt/notes/draft.md" ] || fail "this case never actually destroyed the draft"
+[ -e "$WORK/wt/notes/plan.md" ] || fail "this case destroyed more than it meant to"
+pass "fm-control stop: a file lost inside an untracked directory is CHANGED, not a collapsed summary"
+rm -rf "$WORK/wt/notes"
+printf 'uncommitted\n' > "$WORK/wt/dirty.txt"
+
 # --- 4e1. AN ALTERED ENTRY is destroyed work too, not a benign write --------
 # "Every entry present before must still be present after WITH THE SAME STATUS"
 # has two halves, and the cases around this one only pin the first. A tracked

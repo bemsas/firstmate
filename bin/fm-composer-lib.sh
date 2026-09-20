@@ -1526,6 +1526,9 @@ EOF
   row=$FM_COMPOSER_SELECTED_FIRST
   while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
+    if [ -n "$FM_COMPOSER_SELECTED_BOUND" ]; then
+      raw=$(printf '%s\n' "$raw" | fm_composer_clip_columns "$FM_COMPOSER_SELECTED_BOUND")
+    fi
     content=$(_fm_composer_row_content "$raw" "$styled")
     placeholder_position=0
     case "$FM_COMPOSER_SELECTED_KIND" in

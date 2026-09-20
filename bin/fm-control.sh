@@ -649,11 +649,19 @@ do_exit() {
 # that deletes one untracked file and writes another leaves every count and
 # every cardinality identical, and the survival claim would be made over work
 # that was destroyed.
+#
+# --untracked-files=all for the same reason. Git's default untracked mode
+# collapses a whole untracked DIRECTORY to one `dir/` entry, so the porcelain
+# TEXT would itself carry that same collapsing summary: a worker drafting into a
+# not-yet-added `notes/` loses a file inside it and both fingerprints still read
+# `?? notes/`. Every untracked file is its own entry here. Ignored paths stay
+# excluded either way, and worktree_brief bounds what a refusal quotes.
 worktree_fingerprint() {  # -> a comparable value for $WT, `absent`, or `unreadable`
   local head status
   [ -n "$WT" ] && [ -d "$WT" ] || { printf 'absent'; return 0; }
   head=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || head=no-head
-  status=$(git -C "$WT" status --porcelain 2>/dev/null) || { printf 'unreadable'; return 0; }
+  status=$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null) \
+    || { printf 'unreadable'; return 0; }
   printf '%s\n%s' "$head" "$status"
 }
 
