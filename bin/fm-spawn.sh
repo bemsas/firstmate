@@ -319,7 +319,14 @@
 # unhonoured record or a store the pane did not read - never as a delivery
 # drop.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
-# plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# plus a gitignored .fm-grok-turnend worktree pointer and a state token. A fresh
+# repository would park it on a directory-security dialog that needs a `y` this
+# control plane cannot send, so the spawn pre-registers folder trust through
+# bin/fm-grok-trust.sh and REFUSES the launch when that fails, the claude shape:
+# unlike agy's dialog there is no post-launch gate able to answer this one.
+# grok keys that trust on the repository's MAIN worktree root rather than the
+# launch directory, so one grant covers every worktree of the project; that
+# helper's header owns the evidence and the consequences. crewmate/scout only.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
 # log; muse, gemini, and agy are crewmate/scout only and are refused for --secondmate.
@@ -3836,6 +3843,24 @@ kimi)
     KIMI_TRUST_PREREGISTERED=1
   fi
   ;;
+grok*)
+  # grok gates a workspace it has not trusted behind a directory-security dialog
+  # that needs a `y`, which this control plane cannot send, so the pane wedges
+  # and even exit refuses. A failed registration therefore stops the spawn the
+  # way claude's does rather than warning like agy's: there is no post-launch
+  # gate that can answer this one. bin/fm-grok-trust.sh owns the scope test and
+  # every refusal, and its header owns the one fact that makes this different
+  # from the other three stores - grok keys folder trust on the repository's
+  # MAIN worktree root, so the grant covers this worktree by covering the
+  # project, and registering the worktree path alone would do nothing.
+  # crewmate/scout only, like agy: a grok secondmate home is not pre-registered.
+  if [ "$KIND" != secondmate ]; then
+    if ! "$FM_ROOT/bin/fm-grok-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
+      echo "error: could not pre-register Grok folder trust for $WT; refusing to launch a grok worker that would wedge on the directory-security dialog; inspect window $T" >&2
+      exit 1
+    fi
+  fi
+  ;;
 esac
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
@@ -4140,10 +4165,13 @@ EOF
     # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
     # clean equivalent of codex's notify= and pi's turn_end. But grok only loads
     # PROJECT hooks (<worktree>/.grok/hooks/, <worktree>/.claude/settings.local.json)
-    # after the folder is granted hook-trust, which is not automatic and which
-    # firstmate cannot establish at launch without editing grok's own managed
-    # trust store (a high-blast-radius write). GLOBAL hooks in ~/.grok/hooks/ are
-    # always trusted and load on first launch with no gate. So the turn-end hook
+    # after the folder is granted hook-trust, which is not automatic. The launch
+    # now does pre-register that trust (bin/fm-grok-trust.sh, above), but the
+    # hook deliberately stays global anyway: the grant is repository-wide and a
+    # captain may remove it, so binding turn-end signalling to it would make the
+    # supervision signal depend on a store entry outside this task's control.
+    # GLOBAL hooks in ~/.grok/hooks/ are always trusted and load on first launch
+    # with no gate at all. So the turn-end hook
     # lives OUTSIDE the worktree as a single firstmate-owned global hook that is a
     # guarded no-op for every non-firstmate grok session: it fires only when the
     # current workspace holds a .fm-grok-turnend token pointer that matches the
