@@ -882,6 +882,35 @@ test_status_row_is_furniture_only_under_a_left_bar_floor() {
   pass "fm_composer_classify_screen: the status-row exemption is scoped to the left-bar floor"
 }
 
+test_classifier_and_extractor_agree_on_the_left_bar_idle_hint() {
+  # The zellij send path reads the SAME capture twice: once through
+  # fm_backend_zellij_composer_state (the classifier) to decide whether it may
+  # type, and once through fm_composer_extract_selected_content to prove what
+  # it typed landed. A screen the classifier calls empty while the extractor
+  # reports the idle hint as user content makes that proof fail, and the worker
+  # this change was written to stop cannot be stopped on zellij.
+  local screen verdict extracted
+  # Herdr's and zellij's 20-row tail can drop the leading blank bar, leaving the
+  # hint on the run's first row.
+  screen=$'┃  Ask anything… "Fix a TODO in the codebase"\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n tab agents  ctrl+p commands'
+  verdict=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" "$screen")
+  [ "$verdict" = empty ] \
+    || fail "the idle hint on the first left-bar row must classify empty, got '$verdict'"
+  extracted=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ -z "$extracted" ] \
+    || fail "the same screen must extract no user content, got '$extracted'"
+  # And the divergence must not be bought by dropping real drafts: a typed line
+  # in the same position stays pending AND stays extractable.
+  screen=$'┃  please stop\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n tab agents  ctrl+p commands'
+  verdict=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" "$screen")
+  [ "$verdict" = pending ] \
+    || fail "a typed draft on the first left-bar row must stay pending, got '$verdict'"
+  extracted=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$extracted" = 'please stop' ] \
+    || fail "a typed draft must remain extractable user content, got '$extracted'"
+  pass "fm_composer_classify_screen/extract_selected_content: one rule for the left-bar idle hint"
+}
+
 test_bottom_most_candidate_wins() {
   # The one ranking rule: the live composer is bottom-anchored, so a stale
   # decorative box (codex's startup banner) can never outrank the real row
@@ -997,6 +1026,7 @@ test_cursorless_bare_wrap_region_classifies
 test_cursorless_container_rejects_contiguous_lower_activity
 test_opencode_status_below_floor_is_furniture
 test_status_row_is_furniture_only_under_a_left_bar_floor
+test_classifier_and_extractor_agree_on_the_left_bar_idle_hint
 test_bottom_most_candidate_wins
 test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width

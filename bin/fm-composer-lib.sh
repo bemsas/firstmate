@@ -1202,6 +1202,17 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_OMP_STATUS_RE:-$FM_COMPOSER_OMP_STATUS_RE_DEFAULT}" sensitive
 }
 
+# _fm_composer_leftbar_is_idle_hint: 0 when <plain-row> is OpenCode's idle hint
+# (FM_COMPOSER_LEFTBAR_IDLE_RE_DEFAULT above). The PLAIN row is the signal:
+# OpenCode renders the hint dim and the rotating suggestion bright, so ghost
+# stripping leaves only the quote. Both left-bar walkers - the classifier and
+# the content extractor - consult this one rule, on the FIRST non-blank
+# left-bar content row only, so one screen cannot read empty to one of them
+# and pending to the other.
+_fm_composer_leftbar_is_idle_hint() {  # <plain-row>
+  fm_composer_idle_matches "$1" "${FM_COMPOSER_LEFTBAR_IDLE_RE:-$FM_COMPOSER_LEFTBAR_IDLE_RE_DEFAULT}" insensitive
+}
+
 # _fm_composer_row_is_opencode_status: 0 when the trimmed row is OpenCode's
 # status chrome (FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT above). Consulted only
 # as the row immediately BELOW a proven left-bar floor - the one layout the
@@ -1295,7 +1306,7 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 # can prove it real, unknown otherwise.
 _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
   local screen=$1 styled=$2 first=$3 last=$4
-  local row raw content plain_content pending_seen=0 footer_re leading_blank=1 placeholder_position=0
+  local row raw content plain_content pending_seen=0 footer_re leading_blank=1 placeholder_position=0 first_content=0
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   row=$first
   while [ "$row" -le "$last" ]; do
@@ -1311,21 +1322,20 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
     fm_composer_normalize_trim_var content
     fm_composer_normalize_trim_var plain_content
     if [ -z "$content" ]; then row=$((row + 1)); continue; fi
-    if [ "$leading_blank" = 1 ] && [ "$row" -gt "$first" ]; then
+    first_content=$leading_blank
+    if [ "$first_content" = 1 ] && [ "$row" -gt "$first" ]; then
       placeholder_position=1
     else
       placeholder_position=0
     fi
     leading_blank=0
-    # The rotating quoted suggestion after OpenCode's idle hint is often
-    # bright while the hint itself is dim. Ghost stripping then leaves only
-    # the quote, which is not the idle pattern. The plain row is the
-    # styling-independent signal. The left-bar-specific pattern is
-    # end-anchored and is consulted on every content row, because a 20-row
-    # ANSI tail can drop the leading blank `┃` that would otherwise mark
-    # placeholder position.
-    if fm_composer_idle_matches "$plain_content" "${FM_COMPOSER_LEFTBAR_IDLE_RE:-$FM_COMPOSER_LEFTBAR_IDLE_RE_DEFAULT}" insensitive \
-       || fm_composer_idle_matches "$content" "${FM_COMPOSER_LEFTBAR_IDLE_RE:-$FM_COMPOSER_LEFTBAR_IDLE_RE_DEFAULT}" insensitive; then
+    # The idle hint normally sits at placeholder position, but Herdr's 20-row
+    # ANSI tail can drop the leading blank `┃` and leave it on the run's
+    # first row, where placeholder position is 0. The first non-blank content
+    # row is the one position that covers both; every later row is ordinary
+    # content and takes the pending path.
+    if [ "$first_content" = 1 ] \
+       && _fm_composer_leftbar_is_idle_hint "$plain_content"; then
       row=$((row + 1)); continue
     fi
     if [ "$placeholder_position" = 1 ] \
@@ -1556,8 +1566,8 @@ _fm_composer_select_cursorless() {
 }
 
 fm_composer_extract_selected_content() {  # <caps> <screen>
-  local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
-  local leading_blank=1 placeholder_position=0 prompt_is_shell=0
+  local caps=$1 screen=$2 styled=0 kv plain row raw content plain_content glyph joined='' footer_re prompt_row=-1
+  local leading_blank=1 placeholder_position=0 prompt_is_shell=0 first_content=0
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
     [ "$kv" = styled=1 ] && styled=1
@@ -1572,6 +1582,8 @@ EOF
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
     placeholder_position=0
+    first_content=0
+    plain_content=
     case "$FM_COMPOSER_SELECTED_KIND" in
       bare)
         if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \
@@ -1580,14 +1592,18 @@ EOF
         fi
         ;;
       leftbar)
+        plain_content=$(_fm_composer_row_content "$raw" 0)
+        case "$plain_content" in '┃'*) plain_content=${plain_content#┃} ;; esac
+        fm_composer_normalize_trim_var plain_content
         case "$content" in '┃'*) content=${content#┃} ;; esac
         fm_composer_normalize_trim_var content
         if [ -z "$content" ]; then
           :
-        elif [ "$leading_blank" = 1 ] && [ "$row" -gt "$FM_COMPOSER_SELECTED_FIRST" ]; then
-          placeholder_position=1
-          leading_blank=0
         else
+          first_content=$leading_blank
+          if [ "$first_content" = 1 ] && [ "$row" -gt "$FM_COMPOSER_SELECTED_FIRST" ]; then
+            placeholder_position=1
+          fi
           leading_blank=0
         fi
         ;;
@@ -1615,6 +1631,9 @@ EOF
     # such styling proof, so their structurally fixed positions remain the two
     # idle-regex exceptions here.
     if [ -z "$content" ] \
+       || { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
+            && [ "$first_content" = 1 ] \
+            && _fm_composer_leftbar_is_idle_hint "$plain_content"; } \
        || { { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
               || { [ "$FM_COMPOSER_SELECTED_KIND" = box ] && [ "$prompt_is_shell" = 1 ]; }; } \
             && [ "$placeholder_position" = 1 ] \

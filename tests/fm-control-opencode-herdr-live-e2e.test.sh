@@ -89,21 +89,21 @@ fm_backend_herdr_send_text_line "$TARGET" "$OPENCODE_Q" \
   || fail "could not launch OpenCode in the lab pane"
 
 OC_VERSION=$(opencode --version 2>/dev/null | head -1 || printf 'version-unknown')
+# Nothing is ever sent to this pane before the verdict is read. A screen this
+# guard cannot classify fails loudly; it is never keyed at in the hope of
+# clearing something, which is the behaviour the change under test exists to
+# prevent.
 verdict=
+screen=
 i=0
 budget=${FM_CONTROL_OPENCODE_HERDR_LIVE_POLLS:-45}
-dismissed=0
 while [ "$i" -lt "$budget" ]; do
   verdict=$(fm_backend_herdr_composer_state "$TARGET")
-  [ "$verdict" = empty ] && break
-  i=$((i + 1))
-  if [ "$dismissed" -eq 0 ] && [ "$i" -ge $((budget / 3)) ]; then
+  if [ "$verdict" = empty ]; then
     screen=$(fm_backend_herdr_capture "$TARGET" 40 2>/dev/null || true)
-    if ! printf '%s\n' "$screen" | grep -qi 'trust'; then
-      fm_backend_herdr_send_key "$TARGET" Escape >/dev/null 2>&1 || true
-    fi
-    dismissed=1
+    break
   fi
+  i=$((i + 1))
   sleep 1
 done
 
@@ -112,7 +112,23 @@ if [ "$verdict" != empty ]; then
   fm_backend_herdr_capture "$TARGET" 20 2>/dev/null | sed 's/^/#   /' >&2
   fail "opencode ($OC_VERSION) on herdr: idle composer classified '${verdict:-unreadable}', expected empty (the original unknown refusal)"
 fi
-pass "opencode ($OC_VERSION) on herdr: idle empty composer classifies empty"
+
+# `empty` alone proves nothing: a bare shell prompt using an agent glyph reads
+# empty too. The verdict counts only if the screen behind it is the layout this
+# regression is about - OpenCode's `╹▀` left-bar floor with its status row
+# directly under it, the two facts the classifier change rests on.
+FLOOR_SEEN=no
+STATUS_SEEN=no
+printf '%s\n' "$screen" | grep -qF '╹▀' && FLOOR_SEEN=yes
+printf '%s\n' "$screen" | grep -qF 'ctrl+p commands' && STATUS_SEEN=yes
+printf '# opencode layout behind the empty verdict: floor=%s status-row=%s\n' \
+  "$FLOOR_SEEN" "$STATUS_SEEN"
+if [ "$FLOOR_SEEN" != yes ] || [ "$STATUS_SEEN" != yes ]; then
+  printf '# OpenCode pane tail (verdict=empty but layout unproven):\n' >&2
+  printf '%s\n' "$screen" | tail -n 20 | sed 's/^/#   /' >&2
+  fail "opencode ($OC_VERSION) on herdr: composer read empty without OpenCode's left-bar floor and status row on screen, so this run did not exercise the regression"
+fi
+pass "opencode ($OC_VERSION) on herdr: idle empty composer classifies empty under the ╹▀ floor and its status row"
 
 # Register the live process so the recovery-grade classifier can attribute
 # the pane. OpenCode's TUI is up (composer empty); report-agent plus
