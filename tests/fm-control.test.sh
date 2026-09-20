@@ -597,6 +597,37 @@ test_verb_allowlist_is_closed() {
   pass "fm-control: the verb list is closed - no raw keys, arbitrary text, or clear verb"
 }
 
+# The refusal above is where a supervisor DISCOVERS the verbs - the stuck-worker
+# path this plane exists to serve reaches it by guessing a name. So the listing
+# and the allowlist have to name the same set: a verb advertised and then
+# rejected is unusable, and a verb accepted but never advertised is invisible to
+# the operator who needs it most. Each probe runs in its own case dir because
+# some of these verbs really do act.
+test_advertised_verbs_are_exactly_the_accepted_verbs() {
+  local dir out advertised verb probe
+  dir=$(new_case verblist)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 restart)
+  advertised=$(printf '%s\n' "$out" | sed -n 's/^  \([a-z][a-z-]*\)$/\1/p')
+  [ -n "$advertised" ] || fail "the unknown-verb refusal advertised no verbs at all"
+  for verb in $advertised; do
+    dir=$(new_case "verblist-$verb")
+    add_task "$dir" t1 claude
+    alive_as "$dir" claude
+    probe=$(run_control "$dir" t1 "$verb")
+    case "$probe" in
+      *"is not a control verb"*)
+        fail "the refusal advertises '$verb', which the plane then rejects as unknown" ;;
+    esac
+  done
+  for verb in interrupt exit stop relaunch; do
+    printf '%s\n' "$advertised" | grep -qx "$verb" \
+      || fail "the plane accepts '$verb' but the refusal never advertises it"
+  done
+  pass "fm-control: the advertised verb listing and the accepted verb set are the same set"
+}
+
 test_resume_is_refused_with_its_reason() {
   local dir out rc
   dir=$(new_case resume)
@@ -634,15 +665,23 @@ test_already_stopped_exit_is_idempotent() {
   pass "fm-control exit: an already-stopped agent is idempotent success with no bytes sent"
 }
 
-test_missing_endpoint_refuses() {
+test_missing_tmux_endpoint_refuses_rather_than_claiming_a_stop() {
   local dir out rc
   dir=$(new_case gone)
   add_task "$dir" t1 claude
   : > "$dir/fake/windows"
   out=$(run_control "$dir" t1 exit); rc=$?
-  expect_code 1 "$rc" "a missing endpoint should refuse"
-  assert_contains "$out" "recorded endpoint is gone" "the refusal should name the missing endpoint"
-  pass "fm-control exit: a vanished endpoint refuses instead of silently succeeding"
+  # `missing` on tmux is not a finding about the endpoint. A task record carries
+  # no socket identity for it, and any inventory describes only the tmux server
+  # this process addresses, so a window that is merely on a server this seat
+  # cannot reach is indistinguishable from one that was destroyed. exit refuses
+  # rather than claim a stop it cannot see, and sends nothing to an address it
+  # cannot trust. Reclaim of a destroyed endpoint is Herdr-only
+  # (docs/agent-control.md "Reclaiming a task whose endpoint is gone").
+  expect_code 1 "$rc" "a tmux endpoint whose absence cannot be proven must refuse"
+  assert_not_contains "$out" "endpoint-gone" "exit must not report a stop it could not prove"
+  [ -z "$(literals "$dir")" ] || fail "nothing may be sent into an endpoint exit cannot trust"
+  pass "fm-control exit: an unprovable tmux endpoint refuses instead of claiming the agent stopped"
 }
 
 test_interrupt_refuses_when_no_agent_runs() {
@@ -897,10 +936,11 @@ test_record_bound_to_another_task_is_refused
 test_remote_secondmate_is_refused_by_placement
 test_interrupt_and_exit_lock_before_task_state_resolution
 test_verb_allowlist_is_closed
+test_advertised_verbs_are_exactly_the_accepted_verbs
 test_resume_is_refused_with_its_reason
 test_relaunch_only_flags_are_rejected_on_other_verbs
 test_already_stopped_exit_is_idempotent
-test_missing_endpoint_refuses
+test_missing_tmux_endpoint_refuses_rather_than_claiming_a_stop
 test_interrupt_refuses_when_no_agent_runs
 test_ambiguous_endpoint_refuses
 test_busy_agent_is_interrupted_before_the_exit_command
