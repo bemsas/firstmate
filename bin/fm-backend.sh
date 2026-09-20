@@ -184,6 +184,117 @@ fm_backend_detect_cmux_fallback() {
   return 1
 }
 
+# --- agent process identity -------------------------------------------------
+#
+# The NON-TYPING stop path (bin/fm-control.sh `stop`) signals a process, so the
+# only thing standing between it and someone else's work is proof that the pid
+# it resolved really is this task's agent. These helpers exist so that proof is
+# made from facts the kernel owns - the process table and the process's own
+# working directory - rather than from anything a harness renders.
+#
+# Nothing here ever resolves a process GROUP or a negative pid: a group is
+# exactly the thing that can contain processes this task does not own.
+
+# fm_backend_process_alive: 0 when <pid> names a live process. Signal 0 tests
+# existence and permission without delivering anything.
+fm_backend_process_alive() {  # <pid>
+  case "${1-}" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$1" -gt 1 ] || return 1
+  kill -0 "$1" 2>/dev/null
+}
+
+# fm_backend_process_comm: print <pid>'s executable name, with any directory
+# part and login-shell `-` prefix removed. Empty output is a failure.
+fm_backend_process_comm() {  # <pid>
+  case "${1-}" in ''|*[!0-9]*) return 1 ;; esac
+  local comm
+  comm=$(ps -p "$1" -o comm= 2>/dev/null) || return 1
+  comm=${comm%%$'\n'*}
+  comm=${comm#"${comm%%[![:space:]]*}"}
+  comm=${comm%"${comm##*[![:space:]]}"}
+  comm=${comm#-}
+  comm=${comm##*/}
+  [ -n "$comm" ] || return 1
+  printf '%s' "$comm"
+}
+
+# fm_backend_process_cwd: print <pid>'s CURRENT WORKING DIRECTORY, which is the
+# fact that ties a process to one task's worktree. Linux answers from procfs;
+# elsewhere lsof is the portable reader. A host that can do neither returns
+# failure, and the caller must refuse rather than signal an unproven pid.
+fm_backend_process_cwd() {  # <pid>
+  case "${1-}" in ''|*[!0-9]*) return 1 ;; esac
+  local cwd
+  if [ -r "/proc/$1/cwd" ] && cwd=$(readlink "/proc/$1/cwd" 2>/dev/null) && [ -n "$cwd" ]; then
+    printf '%s' "$cwd"
+    return 0
+  fi
+  command -v lsof >/dev/null 2>&1 || return 1
+  cwd=$(lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || return 1
+  [ -n "$cwd" ] || return 1
+  printf '%s' "$cwd"
+}
+
+# fm_backend_process_is_shell: 0 when <pid> is a recognized interactive shell.
+# A pane sitting at its prompt has no agent to stop, and signalling the shell
+# would take the endpoint down with it - the one thing the stop path promises
+# to preserve.
+fm_backend_process_is_shell() {  # <pid>
+  local comm
+  comm=$(fm_backend_process_comm "$1") || return 1
+  case "$comm" in sh|bash|zsh|dash|ksh|fish) return 0 ;; esac
+  return 1
+}
+
+# fm_backend_process_is_ancestor_of_self: 0 when <pid> is this process or one of
+# its ancestors. Signalling one would stop the very command doing the stopping,
+# so it is refused rather than attempted.
+fm_backend_process_is_ancestor_of_self() {  # <pid>
+  local want=$1 pid=$$ hops=0 ppid
+  case "$want" in ''|*[!0-9]*) return 1 ;; esac
+  while [ "$hops" -lt 64 ]; do
+    [ "$pid" != "$want" ] || return 0
+    ppid=$(ps -p "$pid" -o ppid= 2>/dev/null) || return 1
+    ppid=$(printf '%s' "$ppid" | tr -d '[:space:]')
+    case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$ppid" -gt 1 ] || return 1
+    pid=$ppid
+    hops=$((hops + 1))
+  done
+  return 1
+}
+
+# fm_backend_composer_no_content_observed: 0 only when this backend can read
+# <target> and establishes that no composer content was observed there. A
+# backend with no reader, or a capture that fails, answers NO - an unreadable
+# pane is not a pane proven to hold nothing.
+fm_backend_composer_no_content_observed() {  # <backend> <target>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_tmux_composer_no_content_observed "$@" ;;
+    herdr) fm_backend_herdr_composer_no_content_observed "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_backend_agent_process: print the pid of the FOREGROUND process at
+# <target>, which is the agent when one is running there. Prints nothing and
+# fails when the backend cannot answer from process facts, when the pane holds
+# only its shell, or when the answer is ambiguous - every one of which the stop
+# path turns into a refusal.
+fm_backend_agent_process() {  # <backend> <target> -> pid
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_tmux_agent_process "$@" ;;
+    herdr) fm_backend_herdr_agent_process "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_detect_cmux_app_pid: the running cmux app's pid, resolved by
 # bundle id via lsappinfo (`"pid"=<n>`), or failure when lsappinfo is missing,
 # errors, or the app is not running (lsappinfo prints nothing, exit 0).

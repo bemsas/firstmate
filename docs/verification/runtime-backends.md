@@ -580,7 +580,7 @@ Observed output:
 ```text
 ok - claude (2.1.227 (Claude Code)): real idle composer classifies empty
 ok - codex (codex-cli 0.146.0): real idle composer classifies empty
-ok - opencode (1.14.46): real idle composer classifies empty
+ok - opencode (1.14.46): real idle composer classifies empty   # superseded for 1.18.31; see below
 ok - pi (0.84.0): real idle composer classifies empty
 ok - grok (grok 1.0.0 (3cd0d0cbcebe)): real idle composer classifies empty
 # harness absent, not verified here: kimi
@@ -594,6 +594,62 @@ All six installed harnesses' real idle composers reached a proven `empty` (Claud
 The strict blank-row posture held live (a blank shell row deferred injection), and a zellij pane changing for reasons unrelated to submission never confirmed a delivery, replacing the retired content-diff heuristic's false positive.
 Kimi was not installed on the verification machine; its bordered shape is pinned by the portable byte-capture regressions in `tests/fm-composer-lib.test.sh`, which also carry the other five adapters' capability profiles for every harness under both a UTF-8 locale and `LC_ALL=C`.
 This guard is the refresh command after an upgrade to any matrix-covered harness; rerun it and update the versions above rather than trusting this table across releases.
+### opencode 1.18.31: furniture below the composer floor, and a panel beside it
+
+On 2026-09-20 every cursorless composer read of opencode 1.18.31 returned `unknown`, idle or busy, so `bin/fm-control.sh exit` and `relaunch` refused for every opencode worker on herdr, zellij, cmux, and orca - the refusal was correct and the verdict was wrong.
+The cause was established from the real rendered pane rather than inferred, and it is two independent defects.
+
+opencode draws a status/hint bar BELOW its composer's `╹▀…` floor: `tab agents  ctrl+p commands` when idle, a spinner and status line while busy.
+The cursorless selection requires the row below the composer to be blank or an edge row, so that bar discarded the whole left-bar selection and the verdict fell through to `unknown`.
+At a wide pane opencode also draws its context sidebar on the composer's OWN rows, which read as typed text and made the verdict `pending` instead - this one reaches the cursor-anchored tmux path too, so a wedged opencode worker on tmux was equally unstoppable.
+A bottom-anchored 20-row capture additionally clips the composer's leading blank row on herdr, leaving the idle placeholder on the selection's first row where position alone reads it as typed input.
+
+Measured on the live pane, the floor spans columns 2-155 while composer text sits at columns 5-30 and the sidebar at columns 160-191, so the floor's own rendered width bounds the composer in both axes and is the anchor the fix uses.
+The placeholder is drawn at `38;2;128;128;128` and real typed text at `38;2;238;238;238`, which is the second, independent signal required at the capture boundary.
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
+tests/fm-composer-lib.test.sh
+```
+
+Verified the same day against real opencode 1.18.31 in an isolated Herdr lab session (`bin/fm-herdr-lab.sh`), reproducing the reported failure first and then the fix, with the live `default` session untouched:
+
+```text
+composer state        : empty   [pre-fix this was 'unknown']
+agent state           : alive
+resolved agent pid    : 2583811 (opencode)
+no-content-observed   : yes
+stopped pid=2583811 comm=opencode signal=TERM endpoint=preserved worktree=unchanged lt1 harness=opencode backend=herdr
+  PASS agent process gone
+  PASS herdr pane preserved
+```
+
+Typed text still refuses on every path (`pending`), a floor too narrow to be its composer's own border still refuses contiguous activity below it, and a capture with no styling to read keeps the strict position rule rather than gaining a cheaper verdict.
+The live guard's cursorless assertion reads the WHOLE pane, because opencode centres its composer on a splash screen and a bottom-anchored window can miss it entirely - that is a capture-window property, not a classification one.
+claude 2.1.277 and opencode 1.18.31 are the harnesses whose cursorless read is established `empty`; kimi 2.0.2 still classifies `unknown` cursorless because it draws its own footer rows below its `╰───╯` composer border, which is the same defect class in the box shape and is not addressed here.
+codex 0.155.1, pi 0.85.1, and muse 1.3.0 could not be verified in that run because an untrusted worktree parks them on a trust dialog, which the strict classifier correctly refuses; grok 1.0.34 read `pending-unproven`.
+
+### The non-typing stop path
+
+`bin/fm-control.sh <task-id> stop` signals the agent process instead of typing, for the worker whose screen cannot be classified at all.
+Verified on 2026-09-20 against real processes on a real private tmux server and, end to end, against real opencode 1.18.31 in the isolated Herdr lab above.
+
+```sh
+tests/fm-control-stop.test.sh
+```
+
+```text
+ok - fm-control stop: the resolved pid is the pane's foreground agent, not its shell
+ok - fm-control stop: an agent outside the recorded worktree refuses and is left running
+ok - fm-control stop: the agent stops while its endpoint, shell, and uncommitted work survive
+ok - fm-control stop: an already-stopped task is idempotent and never signals the shell
+ok - fm-control stop: an observed draft refuses, and neither the draft nor the agent is touched
+ok - fm-control stop: a backend that cannot identify the agent process refuses rather than guessing
+```
+
+tmux creates a task window with no command and types the launch line into the shell, so the agent is the shell's foreground job and the window survives the agent; a pane whose agent was launched as the pane command itself reports `stopped-endpoint-gone` rather than an unqualified success.
+Removing the content gate makes the draft case signal the agent away silently, which is what that case pins.
+
 The 2026-08-23 steering-inbox doorbell run observed grok 1.0.5's idle composer classifying `unknown` (and sometimes pending-family), never `empty`.
 Issue #3436's recorded idle capture reproduced the cause on 2026-09-14: Grok 1.0.5 renders the titled bottom border three columns wider than its aligned top and content rows, so the cursorless Herdr profile rejected the otherwise complete box as ambiguous.
 The classifier now accepts only that exact three-column overhang (`FM_COMPOSER_GROK_TITLE_OVERHANG` in `bin/fm-composer-lib.sh`) carrying a typed `Grok <model> (<effort>)` title; the portable regressions feed the real capture through both the shared Herdr capability profile and `fm_backend_herdr_composer_state`, and prove idle is `empty`, typed content is `pending`, and an unrecognized oversized title remains `unknown`.

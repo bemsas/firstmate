@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# tests/fm-control-stop.test.sh - the NON-TYPING stop path (bin/fm-control.sh
+# `stop`) against REAL processes on a REAL private tmux server.
+#
+# `exit` types the harness's exit command, so it must refuse whenever the
+# composer is not proven empty. A worker whose screen cannot be classified is
+# then unreachable by every verb, which is how a wedged agent stays pinned to
+# the fleet: unresponsive, unstoppable, costing a supervision turn every few
+# minutes. `stop` signals the agent PROCESS instead, so nothing is typed and
+# nothing can concatenate - and what replaces the composer guard is a proof of
+# process identity. That proof is what this suite pins.
+#
+# Real processes, no harness: a stand-in executable named for a verified
+# harness is what the backend's own foreground classifier calls an agent, so
+# these cases exercise the real resolution, the real signal, and the real
+# postconditions without launching a vendor CLI or spending a token. The pane
+# is a shell with the process as its foreground job, which is exactly how
+# bin/backends/tmux.sh creates a task window (no command, launch typed in).
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib.sh
+. "$ROOT/tests/lib.sh"
+
+command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
+REAL_TMUX=$(command -v tmux)
+SOCKET="fm-stop-$$"
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-stop.XXXXXX")
+
+cleanup() {
+  "$REAL_TMUX" -L "$SOCKET" kill-server 2>/dev/null || true
+  [ -z "${WORK:-}" ] || rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+SHIM="$WORK/shim"
+mkdir -p "$SHIM" "$WORK/home/state" "$WORK/home/data/t1" "$WORK/bin"
+cat > "$SHIM/tmux" <<SH
+#!/usr/bin/env bash
+exec "$REAL_TMUX" -L "$SOCKET" "\$@"
+SH
+chmod +x "$SHIM/tmux"
+
+# The stand-in agent: a REAL binary, copied rather than scripted so its process
+# name is genuinely `opencode` - the backend's foreground classifier reads the
+# process name, and a shell script would present as its interpreter and be
+# classified (correctly) as a shell. `sleep` is the whole behaviour needed: run
+# until signalled, and die on SIGTERM as any ordinary process does.
+SLEEP_BIN=$(command -v sleep) || { echo "skip: sleep not found"; exit 0; }
+cp "$SLEEP_BIN" "$WORK/bin/opencode" || { echo "skip: cannot stage a stand-in agent"; exit 0; }
+chmod +x "$WORK/bin/opencode"
+
+fm_git_worktree "$WORK/proj" "$WORK/wt" stop-branch
+printf 'uncommitted\n' > "$WORK/wt/dirty.txt"
+
+write_meta() {  # <worktree>
+  {
+    echo "window=fmses:fm-t1"
+    echo "endpoint_task_id=t1"
+    echo "worktree=$1"
+    echo "project=$WORK/proj"
+    echo "harness=opencode"
+    echo "kind=ship"
+    echo "mode=no-mistakes"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+  } > "$WORK/home/state/t1.meta"
+}
+write_meta "$WORK/wt"
+printf '# brief\n' > "$WORK/home/data/t1/brief.md"
+
+run_stop() { env PATH="$SHIM:$PATH" FM_HOME="$WORK/home" bash "$ROOT/bin/fm-control.sh" t1 stop 2>&1; }
+
+start_agent() {  # <cwd>
+  "$REAL_TMUX" -L "$SOCKET" kill-window -t fmses:fm-t1 2>/dev/null || true
+  "$REAL_TMUX" -L "$SOCKET" new-window -d -t fmses: -n fm-t1 -c "$1" >/dev/null
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t fmses:fm-t1 "PATH=$WORK/bin:\$PATH opencode 600" Enter
+  # Wait until the pane's FOREGROUND is the stand-in rather than the shell that
+  # is about to launch it; the resolver reports whichever is in front, and it is
+  # the caller's not-a-shell proof that tells them apart.
+  local i=0 pid shell_pid
+  shell_pid=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t fmses:fm-t1 '#{pane_pid}')
+  while [ "$i" -lt 150 ]; do
+    pid=$(agent_pid 2>/dev/null || true)
+    case "$pid" in
+      ''|*[!0-9]*) ;;
+      "$shell_pid") ;;
+      *) return 0 ;;
+    esac
+    sleep 0.1; i=$((i + 1))
+  done
+  return 1
+}
+
+agent_pid() {
+  env PATH="$SHIM:$PATH" bash -c '
+    . "$1/bin/fm-backend.sh"; . "$1/bin/fm-tmux-lib.sh"
+    fm_tmux_agent_process fmses:fm-t1' _ "$ROOT"
+}
+
+"$REAL_TMUX" -L "$SOCKET" new-session -d -s fmses -x 120 -y 40 -c "$WORK/wt"
+
+# --- 1. the resolved pid is the AGENT, never the pane's own shell -----------
+start_agent "$WORK/wt" || fail "stand-in agent never reached the pane's foreground"
+PID=$(agent_pid) || fail "the agent process could not be resolved from a real pane"
+SHELL_PID=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t fmses:fm-t1 '#{pane_pid}')
+[ "$PID" != "$SHELL_PID" ] || fail "resolution returned the pane's shell ($SHELL_PID), not its agent"
+pass "fm-control stop: the resolved pid is the pane's foreground agent, not its shell"
+
+# --- 2. THE GUARD. A process outside the task's worktree is never signalled --
+# The worktree binding is what ties a pid to THIS task; without it `stop` would
+# be signalling whatever happened to be in a pane.
+write_meta "$WORK/elsewhere"
+mkdir -p "$WORK/elsewhere"
+out=$(run_stop) && fail "stop must refuse an agent working outside the recorded worktree, got: $out"
+case "$out" in
+  *"not the task's recorded worktree"*) ;;
+  *) fail "stop's worktree refusal must name the mismatch, got: $out" ;;
+esac
+kill -0 "$PID" 2>/dev/null || fail "stop signalled a process it had just refused to claim"
+pass "fm-control stop: an agent outside the recorded worktree refuses and is left running"
+write_meta "$WORK/wt"
+
+# --- 3. the stop itself, with every postcondition proven --------------------
+HEAD_BEFORE=$(git -C "$WORK/wt" rev-parse HEAD)
+out=$(run_stop) || fail "stop failed against a real agent: $out"
+case "$out" in
+  "stopped pid=$PID "*) ;;
+  *) fail "stop must report the exact pid it signalled, got: $out" ;;
+esac
+case "$out" in *"endpoint=preserved"*) ;; *) fail "stop must report the endpoint preserved, got: $out" ;; esac
+i=0
+while kill -0 "$PID" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+! kill -0 "$PID" 2>/dev/null || fail "the agent process survived a reported stop"
+"$REAL_TMUX" -L "$SOCKET" list-windows -t fmses -F '#{window_name}' | grep -qx fm-t1 \
+  || fail "stop destroyed the endpoint it promised to preserve"
+kill -0 "$SHELL_PID" 2>/dev/null || fail "stop killed the pane's shell, not just its agent"
+[ "$(git -C "$WORK/wt" rev-parse HEAD)" = "$HEAD_BEFORE" ] || fail "stop moved the worktree's HEAD"
+[ "$(cat "$WORK/wt/dirty.txt")" = uncommitted ] || fail "stop did not preserve uncommitted work"
+pass "fm-control stop: the agent stops while its endpoint, shell, and uncommitted work survive"
+
+# --- 4. idempotent: a pane holding only its shell is already stopped --------
+out=$(run_stop) || fail "stop on an already-stopped task must succeed, got: $out"
+case "$out" in
+  already-stopped*) ;;
+  *) fail "stop must be idempotent on an already-stopped task, got: $out" ;;
+esac
+kill -0 "$SHELL_PID" 2>/dev/null || fail "an already-stopped stop killed the pane's shell"
+pass "fm-control stop: an already-stopped task is idempotent and never signals the shell"
+
+# --- 4b. THE CONTENT GATE. A visible draft is never signalled away ----------
+# A signal destroys whatever the composer holds, so the stop path is reachable
+# only where the classifier positively establishes that nothing was observed.
+# Here the pane genuinely shows a left-bar composer holding an unsent draft
+# while the stand-in agent runs in front of it: something WAS observed, so the
+# only correct outcome is a refusal that leaves both the draft and the process
+# exactly where they are.
+start_agent_with_draft() {
+  "$REAL_TMUX" -L "$SOCKET" kill-window -t fmses:fm-t1 2>/dev/null || true
+  "$REAL_TMUX" -L "$SOCKET" new-window -d -t fmses: -n fm-t1 -c "$WORK/wt" >/dev/null
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t fmses:fm-t1 \
+    "printf '  \\u2503\\n  \\u2503  a draft the human has not sent yet\\n  \\u2503\\n  \\u2503  Build \\u00b7 m p\\n  \\u2579\\u2580\\u2580\\u2580\\u2580\\u2580\\u2580\\u2580\\u2580\\u2580\\u2580\\u2580\\n'" Enter
+  sleep 1
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t fmses:fm-t1 "PATH=$WORK/bin:\$PATH opencode 600" Enter
+  local i=0 pid shell_pid
+  shell_pid=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t fmses:fm-t1 '#{pane_pid}')
+  while [ "$i" -lt 150 ]; do
+    pid=$(agent_pid 2>/dev/null || true)
+    case "$pid" in
+      ''|*[!0-9]*) ;;
+      "$shell_pid") ;;
+      *) return 0 ;;
+    esac
+    sleep 0.1; i=$((i + 1))
+  done
+  return 1
+}
+start_agent_with_draft || fail "could not stage a pane showing an unsent draft"
+DRAFT_PID=$(agent_pid) || fail "the agent process could not be resolved with a draft on screen"
+out=$(run_stop) && fail "stop must refuse while the composer shows content, got: $out"
+printf '%s\n' "$out" | grep -q 'not established to be free of content' \
+  || fail "the refusal must name the content gate, got: $out"
+kill -0 "$DRAFT_PID" 2>/dev/null || fail "stop signalled an agent whose composer still held a draft"
+"$REAL_TMUX" -L "$SOCKET" capture-pane -p -t fmses:fm-t1 | grep -q 'a draft the human has not sent yet' \
+  || fail "the draft did not survive the refusal"
+pass "fm-control stop: an observed draft refuses, and neither the draft nor the agent is touched"
+
+# --- 5. a backend that cannot name a pane's process refuses, never guesses --
+sed 's|^window=.*|window=zjses:fm-t1|' "$WORK/home/state/t1.meta" > "$WORK/home/state/t1.meta.new"
+{ cat "$WORK/home/state/t1.meta.new"; echo "backend=zellij"; } > "$WORK/home/state/t1.meta"
+out=$(run_stop) && fail "stop must refuse a backend with no process-identity surface, got: $out"
+printf '%s\n' "$out" | grep -qi 'refus\|error' || fail "the refusal must say so plainly, got: $out"
+pass "fm-control stop: a backend that cannot identify the agent process refuses rather than guessing"
+
+printf 'ok - fm-control stop: real-process identity, signal, postconditions, and refusals\n'

@@ -836,3 +836,105 @@ test_queued_enter_verdict_does_not_convert_other_states() {
 test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
+
+# --- opencode 1.18.31: furniture below the floor, sidebar beside it ----------
+# Captured live on 2026-09-20 against real opencode 1.18.31 (see
+# docs/verification/runtime-backends.md). opencode draws a status/hint bar
+# BELOW its composer's `╹▀…` floor, and once a session has history at a wide
+# pane it draws a context sidebar on the composer's OWN rows. Each defeated the
+# cursorless read on its own: the bar discarded the whole left-bar selection
+# (`unknown`), and the sidebar read as typed text (`pending`). Together they
+# meant no opencode worker on a cursorless backend - herdr, zellij, cmux, orca -
+# could be stopped through bin/fm-control.sh at all, idle or wedged.
+
+test_count_and_clip_columns_are_locale_independent() {
+  local out
+  out=$(printf '%s\n' '  ┃  Build · x' | fm_composer_count_columns)
+  [ "$out" = 14 ] || fail "count_columns must count characters, not bytes, got '$out'"
+  out=$(printf '%s\n' '  ┃  Build · x' | LC_ALL=C fm_composer_count_columns)
+  [ "$out" = 14 ] || fail "count_columns under LC_ALL=C must agree, got '$out'"
+  out=$(printf '%s\n' "${ESC}[38;2;1;2;3mab${ESC}[0m" | fm_composer_count_columns)
+  [ "$out" = 2 ] || fail "ANSI sequences occupy no columns, got '$out'"
+  # A clip that lands in whitespace separates a panel...
+  out=$(printf '%s\n' 'abc     xyz' | fm_composer_clip_columns 5)
+  [ "$out" = 'abc  ' ] || fail "a clip landing in whitespace must cut, got '$out'"
+  # ...but a clip that would SPLIT a run returns the row whole, because deleting
+  # part of what the composer holds is the one error that can manufacture a
+  # false `empty` and let a caller type onto existing text.
+  out=$(printf '%s\n' 'abcdefgh' | fm_composer_clip_columns 5)
+  [ "$out" = 'abcdefgh' ] || fail "a clip splitting text must return the row whole, got '$out'"
+  out=$(printf '%s\n' '  ┃  Build · x' | fm_composer_clip_columns 7)
+  [ "$out" = '  ┃  Build · x' ] || fail "clip must not split a word, got '$out'"
+  # A bound landing ON a multibyte glyph is a split too, counted in characters.
+  out=$(printf '%s\n' '  ┃  Build · x' | fm_composer_clip_columns 2)
+  [ "$out" = '  ┃  Build · x' ] || fail "clip must not split at a multibyte glyph, got '$out'"
+  # ...and a bound landing in whitespace passes earlier multibyte glyphs intact.
+  out=$(printf '%s\n' '  ┃  Build · x' | fm_composer_clip_columns 4)
+  [ "$out" = '  ┃ ' ] || fail "clip must keep multibyte glyphs intact, got '$out'"
+  pass "fm_composer_count_columns/clip_columns: character-exact, ANSI-transparent, never split a run"
+}
+
+test_matrix_opencode_below_floor_and_sidebar() {
+  local bar floor idle wedged typed narrow pad
+  # Geometry, in columns, mirroring the live capture: the floor is the
+  # composer's own width (63), composer text sits well inside it, and the
+  # sidebar starts at column 70 - beyond the floor's right edge, across a gap.
+  oc_row() {  # <left-bar content> [sidebar]
+    local content=$1 side=${2:-} cols
+    cols=$(printf '%s\n' "$content" | fm_composer_count_columns)
+    while [ "$cols" -lt 69 ]; do content="$content "; cols=$((cols + 1)); done
+    [ -n "$side" ] || { printf '%s' "$1"; return 0; }
+    printf '%s%s' "$content" "$side"
+  }
+  pad='                                                            ' # 60
+  floor="  ╹${pad// /▀}"
+  bar='             tab agents  ctrl+p commands'
+
+  # 1. The reported failure, idle: every row empty, a hint bar below the floor.
+  idle=$(printf '%s\n%s\n%s\n%s\n%s\n%s' \
+    '  ┃' \
+    "$(oc_row '  ┃  Ask anything… "Fix a TODO in the codebase"' '/home/u/app:main')" \
+    '  ┃' \
+    "$(oc_row '  ┃  Build · Big Pickle OpenCode Zen' '0 tokens')" \
+    "$floor" "$bar")
+  assert_screen "opencode idle below-floor bar on herdr"     empty "$CAPS_STYLED"      "$idle"
+  assert_screen "opencode idle below-floor bar on zellij"    empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "opencode idle below-floor bar on cmux/orca" empty "$CAPS_PLAIN"       "$idle"
+
+  # 2. The wedged worker the incident was reported for: a spinner/status line
+  # below the floor while the composer itself holds nothing.
+  wedged=$(printf '%s\n%s\n%s\n%s\n%s' \
+    '  ┃' '  ┃' \
+    "$(oc_row '  ┃  Build · Big Pickle OpenCode Zen' '/home/u/app:main')" \
+    "$floor" \
+    '   ⬝⬝⬝⬝ Cannot connect to API… [retrying in 16s attempt #4]        esc interrupt    • OpenCode 1.18.31')
+  assert_screen "opencode wedged below-floor status on herdr"     empty "$CAPS_STYLED"      "$wedged"
+  assert_screen "opencode wedged below-floor status on cmux/orca" empty "$CAPS_PLAIN"       "$wedged"
+
+  # 3. THE GUARD. Real typed text still refuses, with the same furniture and
+  # sidebar present. This is what must fail if the fix is ever loosened into
+  # "probably empty": typing onto existing text is the concatenation hazard the
+  # refusal exists to prevent.
+  typed=$(printf '%s\n%s\n%s\n%s\n%s' \
+    '  ┃' \
+    "$(oc_row '  ┃  refactor the parser please' '/home/u/app:main')" \
+    "$(oc_row '  ┃  Build · Big Pickle OpenCode Zen' '0 tokens')" \
+    "$floor" "$bar")
+  assert_screen "opencode typed text still refuses on herdr"  pending "$CAPS_STYLED" "$typed"
+  assert_screen "opencode typed text still refuses on zellij" pending "$CAPS_STYLED_NOID" "$typed"
+  # Without styling a left-bar row carrying text degrades to unknown, never empty.
+  assert_screen "opencode typed text on cmux/orca stays unproven" unknown "$CAPS_PLAIN" "$typed"
+
+  # 4. THE OTHER GUARD. A floor too narrow to be this composer's border is a
+  # mismatched or stale shape, so contiguous activity below it still discards
+  # the selection. Without this the below-floor allowance would swallow the
+  # cursorless staleness rule whole.
+  narrow=$(printf '%s\n%s\n%s\n%s' \
+    '  ┃' '  ┃  Build · Big Pickle OpenCode Zen' '  ╹▀▀▀' 'Working on request...')
+  assert_screen "opencode narrow floor above activity stays unknown" unknown "$CAPS_STYLED" "$narrow"
+  unset -f oc_row
+  pass "matrix: opencode's below-floor furniture and side panel are bounded, and typed text still refuses"
+}
+
+test_count_and_clip_columns_are_locale_independent
+test_matrix_opencode_below_floor_and_sidebar

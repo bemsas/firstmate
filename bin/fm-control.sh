@@ -4,6 +4,7 @@
 #
 # Usage: fm-control.sh <task-id> interrupt
 #        fm-control.sh <task-id> exit
+#        fm-control.sh <task-id> stop
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
@@ -45,6 +46,33 @@
 #              endpoint, so this verb cannot tell a destroyed window from one on
 #              a tmux server it cannot address, and it will not claim a stop it
 #              cannot see.
+#   stop       Stop the agent WITHOUT typing anything, by signalling the agent
+#              process. Same promise as `exit` - the endpoint, worktree, and
+#              every uncommitted change survive - for the case `exit` cannot
+#              serve: a worker whose screen cannot be classified, which `exit`
+#              must refuse because it would be typing onto text it cannot rule
+#              out. Nothing is typed here, so that hazard does not exist; what
+#              replaces the composer guard is a proof of process IDENTITY. The
+#              pid must be the FOREGROUND process of this task's own recorded
+#              endpoint, must not be that pane's shell, must be working in the
+#              task's recorded worktree, and must not be this process or an
+#              ancestor of it. Any proof that fails refuses and names itself.
+#              A process GROUP is never signalled, only a single proven pid.
+#              A signal also destroys whatever the composer holds, so this verb
+#              additionally requires the classifier to POSITIVELY establish that
+#              no content was observed: the composer read and proven empty, or
+#              no composer present in the capture at all. Every state where
+#              something WAS observed and its emptiness was not proven refuses,
+#              including a verdict that degraded to `unknown` after content was
+#              seen. There is no flag that overrides this.
+#              SIGTERM only: SIGKILL would deny the harness its chance to flush
+#              uncommitted work, so an agent that does not stop is reported
+#              unconfirmed rather than escalated. Postcondition: the backend's
+#              recovery-grade classifier reports the agent gone, the endpoint
+#              still exists, and the worktree's HEAD and dirty-file count are
+#              unchanged. Already-stopped is success (idempotent). Requires a
+#              backend that can name a pane's foreground process from process
+#              facts (tmux, herdr); others refuse rather than guess a pid.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME worktree - and the same endpoint whenever that endpoint
 #              still exists - on the same or a newly chosen
@@ -77,8 +105,8 @@
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
 #
-# Teardown and discard are NOT verbs here and never will be. `exit` stops an
-# agent and preserves everything else; removing a worktree, killing an
+# Teardown and discard are NOT verbs here and never will be. `exit` and `stop`
+# stop an agent and preserve everything else; removing a worktree, killing an
 # endpoint, or discarding work stays with bin/fm-teardown.sh, which owns the
 # landed-work test.
 #
@@ -102,7 +130,9 @@
 #     is refused rather than guessed at.
 #   - A backend that cannot deliver the harness's interrupt key is refused
 #     (Orca's terminal API has no Escape).
-#   - `exit` and `relaunch` require a backend with a recovery-grade agent-state
+#   - `stop` signals a process, so it refuses unless every identity proof above
+#     holds; an unidentifiable agent is reported as such, never signalled at.
+#   - `exit`, `stop`, and `relaunch` require a backend with a recovery-grade agent-state
 #     classifier (tmux, herdr), because without one the "the agent stopped"
 #     postcondition cannot be proven. zellij, orca, and cmux are refused rather
 #     than reported as successful blind.
@@ -541,10 +571,10 @@ do_exit() {
   case "$composer_state" in
     empty) ;;
     pending)
-      die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Clear or submit the pending text, then retry '$VERB'"
+      die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Clear or submit the pending text, then retry '$VERB' - or use 'stop', which signals the agent process and never types"
       ;;
     *)
-      die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
+      die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB' - or use 'stop', which signals the agent process and never types, for a worker whose screen cannot be read at all"
       ;;
   esac
   # The submit verdict is NOT the postcondition here: a successful exit command
@@ -564,6 +594,125 @@ do_exit() {
   # orphaned generation survives the agent that produced it.
   retire_busy_incarnation
   printf 'stopped'
+}
+
+# --- the non-typing stop ----------------------------------------------------
+#
+# `exit` types the harness's exit command, so it must refuse whenever the
+# composer is not PROVEN empty: typing onto text the agent already holds is the
+# concatenation hazard that guard exists for, and nothing may weaken it. The
+# cost of getting that right is that a worker whose screen cannot be classified
+# at all becomes unreachable by every supported verb - unresponsive,
+# unstoppable, and costing a supervision turn every few minutes until someone
+# goes around the control plane by hand.
+#
+# `stop` is the supported way out, and it does not touch the composer at all.
+# It signals the agent PROCESS, so the composer guard's rationale does not
+# apply: nothing is typed, so nothing can concatenate onto anything. What takes
+# that guard's place is a proof of IDENTITY, because a signal delivered to the
+# wrong process is a worse failure than a refusal:
+#
+#   1. the pid is the FOREGROUND process of THIS task's own recorded endpoint -
+#      the binding firstmate made when it spawned the task, not a search;
+#   2. it is not that pane's shell, so the pane really is running an agent;
+#   3. its working directory is the task's recorded worktree; and
+#   4. it is neither this process nor any ancestor of it.
+#
+# Every one must hold. Nothing is ever sent to a process GROUP or a negative
+# pid - a group is exactly the thing that can contain processes this task does
+# not own - and a failed proof refuses while naming which one failed.
+#
+# SIGTERM only, deliberately: SIGKILL would deny the harness the chance to
+# flush, and this verb promises to preserve uncommitted work. The postcondition
+# is the agent's own recorded state reaching `dead`, never the signal's exit
+# status, and the endpoint and worktree are re-proved afterwards so this can
+# never report a stop that destroyed what it promised to keep.
+
+worktree_fingerprint() {  # -> a comparable string for $WT, or `unreadable`
+  local head status
+  [ -n "$WT" ] && [ -d "$WT" ] || { printf 'absent'; return 0; }
+  head=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || head=no-head
+  status=$(git -C "$WT" status --porcelain 2>/dev/null) || { printf 'unreadable'; return 0; }
+  printf '%s %s' "$head" "$(printf '%s' "$status" | wc -l | tr -d '[:space:]')"
+}
+
+do_stop() {
+  local state absence pid comm cwd before after waited
+  require_state_verified_backend stop
+  state=$(agent_state)
+  case "$state" in
+    dead)
+      printf 'already-stopped'
+      return 0
+      ;;
+    alive) ;;
+    missing)
+      absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T")
+      case "${absence%%$'\t'*}" in
+        gone) printf 'endpoint-gone'; return 0 ;;
+        dead) printf 'already-stopped'; return 0 ;;
+        alive) ;;
+        *) die "task $ID's endpoint $T reads 'missing', but ${absence#*$'\t'}; stop will not signal a process at an address it cannot trust" ;;
+      esac
+      ;;
+    *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to signal a process at an unattributed endpoint" ;;
+  esac
+
+  pid=$(fm_backend_agent_process "$BACKEND" "$T" 2>/dev/null) || pid=''
+  [ -n "$pid" ] || die "task $ID's agent process could not be identified from its recorded endpoint $T on $BACKEND; stop refuses to signal a process it cannot prove is this task's agent. Use 'relaunch' if the endpoint itself is the problem"
+  fm_backend_process_alive "$pid" \
+    || die "task $ID resolved agent pid $pid, but no such live process exists; refusing to signal it"
+  ! fm_backend_process_is_shell "$pid" \
+    || die "task $ID's endpoint $T has a shell ($(fm_backend_process_comm "$pid")) in the foreground, not an agent; signalling it would take the endpoint down, which stop exists to preserve"
+  ! fm_backend_process_is_ancestor_of_self "$pid" \
+    || die "task $ID resolved agent pid $pid, which is this process or one of its ancestors; refusing to signal it"
+  [ -n "$WT" ] \
+    || die "task $ID records no worktree, so stop cannot confirm pid $pid belongs to this task; refusing to signal it"
+  cwd=$(fm_backend_process_cwd "$pid") \
+    || die "task $ID's agent pid $pid has no readable working directory on this host, so its identity cannot be confirmed; refusing to signal it"
+  [ "$cwd" = "$WT" ] \
+    || die "task $ID's agent pid $pid is working in '$cwd', not the task's recorded worktree '$WT'; refusing to signal a process this task cannot claim"
+
+  # THE CONTENT GATE. A signal destroys whatever the composer is holding, so
+  # this path is reachable only where the classifier POSITIVELY establishes
+  # that no content was observed - the composer read and proven to hold
+  # nothing, or no composer present in the capture at all. It is deliberately
+  # not "the verdict is not empty and not pending": that inverted test would
+  # admit every state where a draft WAS seen and then lost its proof, and
+  # signalling there would discard unsent text without ever refusing.
+  # fm_composer_no_content_observed owns the distinction.
+  fm_backend_composer_no_content_observed "$BACKEND" "$T" \
+    || die "task $ID's composer was not established to be free of content, so stopping it could discard text the agent is holding; refusing to signal. Read the pane and clear or submit what is there, then use '$VERB' or 'exit'"
+
+  comm=$(fm_backend_process_comm "$pid" 2>/dev/null) || comm=unknown
+  before=$(worktree_fingerprint)
+  kill -TERM "$pid" 2>/dev/null \
+    || die "task $ID's agent pid $pid ($comm) could not be signalled; it may belong to another user"
+  # `missing` is accepted as a settled outcome here, not just `dead`: when the
+  # agent was launched AS the pane's own command, its exit takes the pane with
+  # it, and the classifier then reads the endpoint as missing rather than as a
+  # pane holding no agent. That is a real, correctly-reported result - reporting
+  # it as "did not stop" would be false, since the process is demonstrably gone.
+  if ! waited=$(wait_agent_state "$EXIT_WAIT" dead missing); then
+    die "stop-delivered $ID pid=$pid comm=$comm signal=TERM agent-state=$waited stop=unconfirmed; the agent did not stop within ${EXIT_WAIT}s. No further signal was sent, because SIGKILL would deny the harness its chance to flush uncommitted work"
+  fi
+  # The endpoint SHOULD have survived: that is this verb's promise. Where it did
+  # not, say so plainly instead of reporting an unqualified success.
+  state=$(fm_backend_target_exists "$BACKEND" "$T" 2>/dev/null && printf 'present' || printf 'absent')
+  if [ "$state" != present ]; then
+    after=$(worktree_fingerprint)
+    [ "$after" = "$before" ] \
+      || die "stop-delivered $ID pid=$pid comm=$comm signal=TERM agent=stopped worktree=CHANGED before='$before' after='$after'"
+    retire_busy_incarnation
+    printf 'stopped-endpoint-gone pid=%s comm=%s signal=TERM endpoint=did-not-survive worktree=unchanged' \
+      "$pid" "$comm"
+    return 0
+  fi
+  after=$(worktree_fingerprint)
+  [ "$after" = "$before" ] \
+    || die "stop-delivered $ID pid=$pid comm=$comm signal=TERM agent=stopped worktree=CHANGED before='$before' after='$after'; the agent stopped but its worktree did not come through unchanged"
+  retire_busy_incarnation
+  printf 'stopped pid=%s comm=%s signal=TERM endpoint=preserved worktree=unchanged' "$pid" "$comm"
 }
 
 # --- transactional relaunch -------------------------------------------------
@@ -970,6 +1119,10 @@ case "$VERB" in
     ;;
   exit)
     result=$(do_exit)
+    echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
+    ;;
+  stop)
+    result=$(do_stop)
     echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
     ;;
   relaunch)
