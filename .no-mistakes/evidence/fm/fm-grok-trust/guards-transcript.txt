@@ -1,0 +1,67 @@
+
+=== A. an unrelated grant, a user comment, and a declined folder already in the store ===
+$ fm-grok-trust.sh <worktree> <project>
+trusted: <tmp>/a/project (covers worktree <tmp>/a/wt)
+exit=0
+--- store after (original bytes are an exact prefix; new grant appended) ---
+# a comment the captain wrote
+[folders."/home/captain/other-project"]
+trusted = true
+decided_at = 1700000000
+
+[folders."/home/captain/declined-project"]
+trusted = false
+decided_at = 1700000001
+
+[folders."<tmp>/a/project"]
+trusted = true
+decided_at = 1789876786
+[ok] every pre-existing byte preserved
+
+=== B. re-running the same registration is a no-op (decided_at unchanged) ===
+trusted: <tmp>/a/project (covers worktree <tmp>/a/wt)
+exit=0
+[ok] store byte-identical after re-run
+
+=== C. a folder the captain explicitly DECLINED is refused, never flipped ===
+"<tmp>/c/project" is recorded in <tmp>/c/gh/trusted_folders.toml as not trusted; refusing to override a folder that was deliberately declined
+error: refusing to pre-register Grok trust: could not record trust for '<tmp>/c/project' in '<tmp>/c/gh/trusted_folders.toml'
+exit=1
+--- store unchanged ---
+[folders."<tmp>/c/project"]
+trusted = false
+decided_at = 1700000002
+
+=== D. a store that is not valid TOML is refused, never rewritten ===
+<tmp>/d/gh/trusted_folders.toml is not valid TOML (Expected '=' after a key in a key/value pair (at line 3, column 6)); refusing to rewrite it
+error: refusing to pre-register Grok trust: could not record trust for '<tmp>/d/project' in '<tmp>/d/gh/trusted_folders.toml'
+exit=1
+--- store unchanged ---
+[folders."/kept"]
+trusted = true
+this is not toml ===
+
+=== E. out-of-scope launch directories are refused ===
+$ ... <primary checkout> <project>
+error: refusing to pre-register Grok trust: '<tmp>/e/project' is a primary checkout, not an isolated worktree
+exit=1
+$ ... <worktree of an unrelated project> <project>
+error: refusing to pre-register Grok trust: '<tmp>/e4/wt' is not a worktree of project '<tmp>/e3/project'
+exit=1
+$ ... <$HOME as the worktree>
+error: refusing to pre-register Grok trust: '<tmp>/e5/wt' is the home directory, not a task worktree
+exit=1
+$ GROK_HOME=relative/path ...
+error: refusing to pre-register Grok trust: GROK_HOME 'relative/grok' is a relative path, so the store the worker reads cannot be guaranteed to be the one written here; set it to an absolute path
+exit=1
+--- no store was created for any refused call ---
+<tmp>/e3/gh:
+
+<tmp>/e6/gh:
+
+=== F. bin/fm-spawn.sh REFUSES the launch when trust cannot be recorded ===
+exit=1
+<tmp>/spawn-refuse/gh/trusted_folders.toml is not valid TOML (Expected '=' after a key in a key/value pair (at line 3, column 6)); refusing to rewrite it
+error: refusing to pre-register Grok trust: could not record trust for '<tmp>/spawn-refuse/project' in '<tmp>/spawn-refuse/gh/trusted_folders.toml'
+error: could not pre-register Grok folder trust for <tmp>/spawn-refuse/wt; refusing to launch a grok worker that would wedge on the directory-security dialog; inspect window firstmate:fm-grokrefuse
+[ok] no launch command was ever sent - no grok worker was started into the dialog

@@ -1,0 +1,12 @@
+### grok --secondmate spawn, trust store deliberately unparseable
+exit=0
+warning: secondmate nomistakes-n1 sync skipped before launch: primary default-branch commit cannot be resolved
+fm-config-inherit: warning: skipped crew-harness for <tmp>/sm/fm-homes/nomistakes-n1/config: destination does not allow inherited item (not gitignored or guard failed)
+spawned nomistakes-n1 harness=grok kind=secondmate mode=secondmate yolo=off window=firstmate:fm-nomistakes-n1 worktree=<tmp>/sm/fm-homes/nomistakes-n1
+[ok] the secondmate launch still went out - the new crewmate/scout trust gate does not touch it
+grok
+--always-approve
+store left as it was (never rewritten):
+[folders."/kept"]
+trusted = true
+this is not toml ===

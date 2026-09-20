@@ -1,0 +1,16 @@
+### 1. real spawn: bin/fm-spawn.sh ... --harness grok (launch stubbed, helper real)
+exit=0
+warning: /tmp/fm-grok-chain.EC7ddF/chain/home/data/grokchain/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+spawned grokchain harness=grok kind=ship mode=no-mistakes yolo=off window=firstmate:fm-grokchain worktree=/tmp/fm-grok-chain.EC7ddF/chain/wt
+
+### 2. trust store the spawn wrote ($GROK_HOME/trusted_folders.toml)
+[folders."/tmp/fm-grok-chain.EC7ddF/chain/project"]
+trusted = true
+decided_at = 1789876773
+mode=600 owner=bemsas
+
+### 3. launch command the spawn emitted
+grok
+--always-approve
+launch-brief
+'/tmp/fm-grok-chain.EC7ddF/chain/home/data/grokchain/launch-brief.md')"

@@ -1,0 +1,7 @@
+$ bin/fm-grok-trust.sh "$WT" "$PROJ"
+trusted: /tmp/fm-grok-ev.vmShid/project (covers worktree /tmp/fm-grok-ev.vmShid/wt)
+
+$ cat $GROK_HOME/trusted_folders.toml
+[folders."/tmp/fm-grok-ev.vmShid/project"]
+trusted = true
+decided_at = 1789876737
