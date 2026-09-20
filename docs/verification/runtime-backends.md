@@ -621,7 +621,7 @@ composer state        : empty   [pre-fix this was 'unknown']
 agent state           : alive
 resolved agent pid    : 2583811 (opencode)
 no-content-observed   : yes
-stopped pid=2583811 comm=opencode signal=TERM endpoint-state=preserved worktree-state=intact lt1 harness=opencode backend=herdr endpoint=default:%3 worktree=/Users/f/wt/lt1
+stopped pid=2583811 comm=opencode signal=TERM endpoint-state=preserved worktree-state=entries-preserved lt1 harness=opencode backend=herdr endpoint=default:%3 worktree=/Users/f/wt/lt1
   PASS agent process gone
   PASS herdr pane preserved
 ```
@@ -677,12 +677,15 @@ That `missing`, however, is not proof of destruction on tmux, and the verb does 
 The direct-launch case above stages the destroyed-window shape - the stand-in agent is `exec`ed as the pane's own command, so the window dies with it - and requires `stopped-endpoint-unverified` with `endpoint-state=unestablished`: neither the `preserved` a loose read would have claimed, nor a `gone` this backend cannot prove.
 The other cases keep covering the real fleet shape, where `bin/backends/tmux.sh` creates the window with no command and the shell genuinely outlives the agent.
 
-The worktree postcondition asserts that nothing the worktree held before the signal was destroyed or altered, not that it is byte-identical: it compares `HEAD` plus the `git status --porcelain --untracked-files=all` text, never a summary derived from it, and requires every entry present before to still be present after with the same status.
+The worktree postcondition asserts that the entry set and its statuses were preserved, and nothing more: it compares `HEAD` plus the `git status --porcelain --untracked-files=all` text, never a summary derived from it, and requires every entry present before to still be present after with the same status letters.
 `--untracked-files=all` is load-bearing rather than incidental: git's default untracked mode collapses a whole untracked directory to one `dir/` entry, so a worker drafting into a not-yet-added `notes/` could lose a file inside it while both fingerprints still read `?? notes/` - the same collapsing proxy the postcondition refuses everywhere else, arriving through the porcelain text itself.
 Verified against a real repo: with `notes/plan.md` and `notes/draft.md` untracked, the default mode prints `?? notes/` both before and after `rm notes/draft.md`, while `-uall` prints the two files and then one.
 Ignored paths stay excluded either way, and `worktree_brief` bounds what a refusal quotes, so the longer listing cannot bury the sentence.
 The cases above stage all three shapes: an agent that trades one untracked file for another leaves every count identical while the work is gone; an agent that leaves its worktree unreadable gives a constant that compares equal to itself; and an agent that only ADDS a file on its way out has destroyed nothing.
-The first two require the verb to refuse - `worktree-state=CHANGED` and `worktree-state=unverified` - while the third must report `worktree-state=intact`, because this verb sends SIGTERM precisely so the harness gets its chance to flush and a postcondition that failed on that flush would turn the design into a reported failed stop.
+The first two require the verb to refuse - `worktree-state=CHANGED` and `worktree-state=unverified` - while the third must report `worktree-state=entries-preserved`, because this verb sends SIGTERM precisely so the harness gets its chance to flush and a postcondition that failed on that flush would turn the design into a reported failed stop.
+The token claims what a porcelain read proves and no more: the entry set and its status letters were preserved.
+It is not a content guarantee, and a further case pins that boundary honestly - a tracked file the agent had already modified, truncated to zero bytes during shutdown, keeps its ` M <path>` entry on both sides, so the verb completes and reports `entries-preserved` over contents that are gone.
+Proving content survival would mean hashing every dirty path on every stop; this check does not do that and the wording no longer implies it.
 Each of those exits retires the task's busy wiring first: the agent is already proven dead or missing by then, so a record that outlived it would leave the task classifying `busy` with no agent behind it.
 
 `stop`'s own outcome keys are `endpoint-state=` and `worktree-state=`, distinct from the `endpoint=` address and `worktree=` path the shared result line carries, so one line never uses a key for two meanings.

@@ -71,12 +71,15 @@
 #              recovery-grade classifier reports the agent gone, and the
 #              endpoint's and the worktree's fates are each reported as what
 #              could be ESTABLISHED about them - the endpoint preserved, proven
-#              gone, or unestablished; the worktree intact, changed, or
-#              unverified. Intact means NOTHING THAT WAS THERE WAS DESTROYED OR
-#              ALTERED, not that the worktree is byte-identical: the harness is
-#              given SIGTERM so it can flush, so what it writes on the way out
-#              destroys nothing. "I could not check" is never reported as "I
-#              checked and it is gone".
+#              gone, or unestablished; the worktree entries-preserved, changed,
+#              or unverified. Entries-preserved means every `git status`
+#              ENTRY the worktree held is still there with the same status
+#              letters, which is all a porcelain read proves. It is NOT a
+#              content guarantee: an entry that was already dirty keeps those
+#              same letters when its contents change, so a file rewritten or
+#              truncated under an unchanged status is not covered. This verb
+#              signals a process and never touches the worktree itself. "I
+#              could not check" is never reported as "I checked and it is gone".
 #              Already-stopped is success (idempotent). Requires a
 #              backend that can name a pane's foreground process from process
 #              facts (tmux, herdr); others refuse rather than guess a pid.
@@ -684,13 +687,19 @@ worktree_entries() {  # <fingerprint>
 # so `unreadable` is its own answer rather than a constant that compares equal
 # to itself and licenses the survival claim.
 #
-# THE POSTCONDITION ASSERTS THAT NOTHING WHICH WAS THERE HAS BEEN DESTROYED OR
-# ALTERED - not that the worktree is byte-identical. This verb promises the
-# worktree and every uncommitted change SURVIVE, and it chose SIGTERM precisely
-# so the harness gets its chance to flush; a harness that then writes a
-# transcript or a crash file, or an unsignalled child that writes a build
-# artifact, has destroyed nothing. So every porcelain entry present BEFORE must
-# still be present AFTER with the same status, while a pure addition passes.
+# THE POSTCONDITION ASSERTS THAT THE ENTRY SET AND ITS STATUSES WERE PRESERVED,
+# and nothing more. Every porcelain entry present BEFORE must still be present
+# AFTER with the same status letters; a pure addition passes, because this verb
+# chose SIGTERM precisely so the harness gets its chance to flush and a
+# transcript or a crash file written on the way out destroys nothing.
+#
+# WHAT THIS DOES NOT COVER, stated plainly because the status letters look like
+# more proof than they are: an entry that was ALREADY dirty keeps the same
+# letters when its CONTENT changes. A tracked file the agent had modified,
+# truncated or rewritten mid-flush as the signal lands, reads ` M <path>` on
+# both sides and compares equal. Proving content survival would mean hashing
+# every dirty path on every stop; this check does not do that and does not claim
+# it. The verb signals a process and never touches the worktree itself.
 worktree_outcome() {  # <before> <after> -> unchanged|changed|unverified
   local entry after_entries
   if [ "$1" = unreadable ] || [ "$2" = unreadable ]; then
@@ -871,14 +880,14 @@ do_stop() {
   esac
   case "$endpoint" in
     preserved)
-      printf 'stopped pid=%s comm=%s signal=TERM endpoint-state=preserved worktree-state=intact' "$pid" "$comm"
+      printf 'stopped pid=%s comm=%s signal=TERM endpoint-state=preserved worktree-state=entries-preserved' "$pid" "$comm"
       ;;
     did-not-survive)
-      printf 'stopped-endpoint-gone pid=%s comm=%s signal=TERM endpoint-state=did-not-survive worktree-state=intact' \
+      printf 'stopped-endpoint-gone pid=%s comm=%s signal=TERM endpoint-state=did-not-survive worktree-state=entries-preserved' \
         "$pid" "$comm"
       ;;
     *)
-      printf 'stopped-endpoint-unverified pid=%s comm=%s signal=TERM endpoint-state=unestablished worktree-state=intact' \
+      printf 'stopped-endpoint-unverified pid=%s comm=%s signal=TERM endpoint-state=unestablished worktree-state=entries-preserved' \
         "$pid" "$comm"
       ;;
   esac

@@ -203,7 +203,7 @@ kill -0 "$DRAFT_PID" 2>/dev/null || fail "stop signalled an agent whose composer
 pass "fm-control stop: an observed draft refuses, and neither the draft nor the agent is touched"
 
 # --- 4c. THE WORKTREE POSTCONDITION discriminates ONE destroyed dirty file --
-# `stop` reports `worktree-state=intact`, so that claim has to be able to FAIL for
+# `stop` reports `worktree-state=entries-preserved`, so that claim has to be able to FAIL for
 # the smallest real loss there is: the single uncommitted file a shutting-down
 # harness discards. A dirty-entry count that cannot tell 0 from 1 reports that
 # loss as unchanged, which is a wrong label emitted without erroring.
@@ -222,7 +222,7 @@ case "$out" in
   *) fail "stop must report the destroyed dirty file as a changed worktree, got: $out" ;;
 esac
 [ ! -e "$WORK/wt/dirty.txt" ] || fail "this case never actually discarded the worktree's only dirty file"
-pass "fm-control stop: a worktree that loses its single dirty file is reported CHANGED, never unchanged"
+pass "fm-control stop: a worktree that loses its single dirty file is reported CHANGED, never preserved"
 printf 'uncommitted\n' > "$WORK/wt/dirty.txt"
 
 # --- 4d. THE ENDPOINT POSTCONDITION is established, not sampled -------------
@@ -290,7 +290,7 @@ fi
 # A shutting-down harness that removes one untracked file it owns and writes
 # another - a session lock traded for a crash log - leaves the entry count, and
 # every other summary derived from the status, exactly as it was. Uncommitted
-# work is gone and `worktree-state=intact` would be claimed over it.
+# work is gone and `worktree-state=entries-preserved` would be claimed over it.
 [ -e "$WORK/wt/dirty.txt" ] || printf 'uncommitted\n' > "$WORK/wt/dirty.txt"
 rm -f "$WORK/wt/crash.log"
 # Enough dirty entries that the refusal would bury its own sentence under two
@@ -350,7 +350,7 @@ start_agent "$WORK/wt" ": > '$WORK/wt/flushed.log'; PATH=$WORK/bin:\$PATH openco
   || fail "could not stage an agent that flushes a new file as it stops"
 out=$(run_stop) || fail "stop must succeed when the harness only ADDED a file, got: $out"
 case "$out" in
-  *worktree-state=intact*) ;;
+  *worktree-state=entries-preserved*) ;;
   *) fail "a pure addition must report the worktree intact, got: $out" ;;
 esac
 [ -e "$WORK/wt/flushed.log" ] || fail "this case never actually flushed a new file"
@@ -396,7 +396,7 @@ git -C "$WORK/wt" add README.md
   || fail "this case needs README.md staged-modified, got: $(git -C "$WORK/wt" status --porcelain -- README.md)"
 start_agent "$WORK/wt" "git -C '$WORK/wt' reset -q -- README.md; PATH=$WORK/bin:\$PATH opencode 1" \
   || fail "could not stage an agent that alters an entry's status as it stops"
-out=$(run_stop) && fail "stop must not report an altered entry as intact, got: $out"
+out=$(run_stop) && fail "stop must not report an altered entry as preserved, got: $out"
 case "$out" in
   *worktree-state=CHANGED*) ;;
   *) fail "stop must report an entry whose status changed as a changed worktree, got: $out" ;;
@@ -404,6 +404,34 @@ esac
 [ "$(git -C "$WORK/wt" status --porcelain -- README.md)" = " M README.md" ] \
   || fail "this case never actually altered the entry's status"
 pass "fm-control stop: an entry whose status changed is CHANGED, though the path is still there"
+git -C "$WORK/wt" checkout -q -- README.md
+
+# --- 4e1b. WHERE THE CHECK STOPS, said out loud ----------------------------
+# The porcelain entry of an ALREADY-dirty file does not move when its contents
+# change: ` M README.md` before, ` M README.md` after, whatever happened to the
+# bytes. So this is the boundary of what the comparison can prove, and the verb
+# has to report that boundary rather than a guarantee it never earned. The
+# assertion below is deliberately NOT that the file survived - it did not - but
+# that the verb completes and names what it actually checked.
+printf 'edited by the agent\n' >> "$WORK/wt/README.md"
+BEFORE_ENTRY=$(git -C "$WORK/wt" status --porcelain -- README.md)
+[ "$BEFORE_ENTRY" = " M README.md" ] \
+  || fail "this case needs README.md dirty-unstaged, got: $BEFORE_ENTRY"
+start_agent "$WORK/wt" ": > '$WORK/wt/README.md'; PATH=$WORK/bin:\$PATH opencode 1" \
+  || fail "could not stage an agent that destroys a dirty file's contents as it stops"
+out=$(run_stop) || fail "stop must complete when every entry kept its status, got: $out"
+case "$out" in
+  *worktree-state=entries-preserved*) ;;
+  *) fail "stop must name what it checked - the entry set and its statuses, got: $out" ;;
+esac
+case "$out" in
+  *worktree-state=intact*) fail "stop must not claim an intact worktree it cannot prove, got: $out" ;;
+esac
+[ "$(git -C "$WORK/wt" status --porcelain -- README.md)" = "$BEFORE_ENTRY" ] \
+  || fail "this case needs the porcelain entry identical on both sides, or it proves nothing"
+[ ! -s "$WORK/wt/README.md" ] \
+  || fail "this case never actually destroyed the file's contents"
+pass "fm-control stop: a preserved entry set is reported as exactly that, not as intact contents"
 git -C "$WORK/wt" checkout -q -- README.md
 
 # --- 4e3. THE SAME RULE ON A CLEAN WORKTREE, which is the headline case -----
@@ -420,11 +448,11 @@ start_agent "$WORK/wt" ": > '$WORK/wt/flushed.log'; PATH=$WORK/bin:\$PATH openco
   || fail "could not stage an agent that flushes a new file into a clean worktree"
 out=$(run_stop) || fail "stop must succeed when a CLEAN worktree only gained a file, got: $out"
 case "$out" in
-  *worktree-state=intact*) ;;
+  *worktree-state=entries-preserved*) ;;
   *) fail "a pure addition to a clean worktree must report the worktree intact, got: $out" ;;
 esac
 [ -e "$WORK/wt/flushed.log" ] || fail "this case never actually flushed a new file"
-pass "fm-control stop: a clean worktree that only gained a flushed file is intact, not destroyed"
+pass "fm-control stop: a clean worktree that only gained a flushed file keeps its entry set"
 rm -f "$WORK/wt/flushed.log"
 printf 'uncommitted\n' > "$WORK/wt/dirty.txt"
 
@@ -466,11 +494,11 @@ case "$out" in
   *) fail "stop must say the worktree could not be verified, got: $out" ;;
 esac
 case "$out" in
-  *worktree-state=intact*) fail "stop claimed an intact worktree it never read, got: $out" ;;
+  *worktree-state=entries-preserved*) fail "stop claimed preserved entries it never read, got: $out" ;;
 esac
 printf '%s\n' "$GITFILE" > "$WORK/wt/.git"
 git -C "$WORK/wt" status --porcelain >/dev/null 2>&1 || fail "the worktree was not restored for the cases that follow"
-pass "fm-control stop: a worktree that could not be read is reported unverified, never unchanged"
+pass "fm-control stop: a worktree that could not be read is reported unverified, never preserved"
 
 # --- 5. a backend that cannot name a pane's process refuses, never guesses --
 sed 's|^window=.*|window=zjses:fm-t1|' "$WORK/home/state/t1.meta" > "$WORK/home/state/t1.meta.new"
