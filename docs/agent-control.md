@@ -79,7 +79,7 @@ The endpoint postcondition is established, not sampled, and it reports three dif
 A terminal whose window *was* the agent tears that window down after the process exits, so a single read taken the moment the agent state settles can still see a window that is already going away.
 `stop` therefore reads the endpoint on every poll across a settle window (`FM_CONTROL_STOP_SETTLE`, 2s) before concluding anything:
 
-| Result | `endpoint=` | What it means, and nothing more |
+| Result | `endpoint-state=` | What it means, and nothing more |
 | --- | --- | --- |
 | `stopped` | `preserved` | The endpoint was there and held no agent on every read across the window. The promise was kept. |
 | `stopped-endpoint-gone` | `did-not-survive` | The endpoint's absence was **proven**, by the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) `exit` and `relaunch` use. Only Herdr can supply that proof. |
@@ -88,9 +88,14 @@ A terminal whose window *was* the agent tears that window down after the process
 The third result is the ordinary one on tmux, not an error: a task record carries no socket identity for its endpoint, so a window that is simply not on the server this seat addresses cannot be told from a destroyed one.
 "I could not check" is never reported as "I checked and it is gone", because a spurious `gone` sends the next supervisor hunting for work that is sitting safely where it was left.
 
-The worktree postcondition is reported the same way.
-It compares `HEAD` plus the `git status --porcelain` **text** - not a count or any other summary derived from it, because a shutdown that deletes one untracked file and writes another leaves every such summary identical while the work is gone.
-A worktree that could not be read at all is reported as `worktree=unverified`, never as `worktree=unchanged`.
+The worktree postcondition is reported the same way, as `worktree-state=`.
+
+What it asserts is that **nothing the worktree held before the signal was destroyed or altered** - not that the worktree is byte-identical.
+`stop` sends SIGTERM precisely so the harness gets its chance to flush, so a transcript, a crash file, or a build artifact written on the way out destroys nothing and reports `intact`.
+It compares `HEAD` plus the `git status --porcelain` **text** - not a count or any other summary derived from it, because a shutdown that deletes one untracked file and writes another leaves every such summary identical while the work is gone - and requires every entry present before to still be present after with the same status.
+An entry that vanished or changed status reports `changed` and fails the verb; a worktree that could not be read at all reports `unverified`, never `intact`.
+
+`stop`'s own outcome keys are `endpoint-state=` and `worktree-state=` so they cannot be confused with the `endpoint=` address and `worktree=` path every verb's result line carries.
 
 **Teardown and discard are not verbs and will not become verbs.**
 `exit` and `stop` stop an agent and preserve everything else.

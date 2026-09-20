@@ -875,7 +875,7 @@ test_count_and_clip_columns_are_locale_independent() {
 }
 
 test_matrix_opencode_below_floor_and_sidebar() {
-  local bar floor idle wedged typed narrow mismatched blanking unaligned pad
+  local bar floor idle wedged typed narrow mismatched blanking hidden past beside pad
   # Geometry, in columns, mirroring the live capture: the floor is the
   # composer's own width (63), composer text sits well inside it, and the
   # sidebar starts at column 70 - beyond the floor's right edge, across a gap.
@@ -958,20 +958,46 @@ test_matrix_opencode_below_floor_and_sidebar() {
   assert_screen "opencode floor that blanks its own rows keeps the draft on tmux" \
     pending "$CAPS_TMUX" "$blanking" 1
 
-  # 7. THE ALIGNMENT GUARD. A floor indented differently from the bar it is
-  # supposed to close belongs to some other box, so its width is not this
-  # composer's bound. Both glyphs come from the same renderer, so equal columns
-  # is a real invariant rather than a tolerance. Here the stray floor's span
-  # clears the footer (so content inside the bound exists) and cuts cleanly in
-  # the gap before the draft (so nothing is split), and it still deletes the
-  # draft - which only the column match rejects.
-  unaligned=$(printf '%s\n%s\n%s\n%s' \
+  # 7. A ROW BLANKED WHILE ANOTHER ROW SUPPLIES THE IN-BOUND PROOF. The bound
+  # clears the footer, so the composer-wide "something is inside the bound"
+  # test is satisfied by that row alone, and it still cuts cleanly in the gap
+  # before the draft and deletes it. Nothing on this screen shows the
+  # composer's own text and a panel side by side, so nothing explains the
+  # deleted run as anything but the composer's own input.
+  hidden=$(printf '%s\n%s\n%s\n%s' \
     '  ┃' "  ┃$(printf '%*s' 14 '')draft text here" '  ┃  Build · x' \
     '     ╹▀▀▀▀▀▀▀▀▀▀')
-  assert_screen "opencode misaligned floor is not this composer's bound" \
-    pending "$CAPS_STYLED" "$unaligned"
-  assert_screen "opencode misaligned floor is not this composer's bound on tmux" \
-    pending "$CAPS_TMUX" "$unaligned" 1
+  assert_screen "opencode bound that deletes a row keeps the draft" \
+    pending "$CAPS_STYLED" "$hidden"
+  assert_screen "opencode bound that deletes a row keeps the draft on tmux" \
+    pending "$CAPS_TMUX" "$hidden" 1
+
+  # 8. THE SAME SHAPE AT THE COMPOSER'S OWN INDENT, which is the reviewer's
+  # reproduction: the footer sits inside the bound and supplies the in-bound
+  # proof, while the draft row's entire content lies past it and clips away.
+  past=$(printf '%s\n%s\n%s' \
+    " ┃$(printf '%*s' 15 '')the draft" ' ┃ Build · x' ' ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀')
+  assert_screen "opencode draft entirely past the bound is never empty" \
+    pending "$CAPS_STYLED" "$past"
+  assert_screen "opencode draft entirely past the bound is never empty on tmux" \
+    pending "$CAPS_TMUX" "$past" 0
+
+  # 9. AND THE CASE THAT MUST NOT REGRESS WITH IT. A real sidebar runs beside
+  # the composer's BLANK rows too, so those rows carry panel text and nothing
+  # else, and clipping them to blank is correct. What licenses it is the rows
+  # that show the composer's own text and the panel side by side: refusing
+  # every bound that empties a row would read this idle pane as `unknown` and
+  # leave opencode-on-herdr exactly as unstoppable as before.
+  beside=$(printf '%s\n%s\n%s\n%s\n%s\n%s' \
+    "$(oc_row '  ┃' 'session: fix the parser')" \
+    "$(oc_row '  ┃  Ask anything… "Fix a TODO in the codebase"' '/home/u/app:main')" \
+    "$(oc_row '  ┃' '1.2k tokens')" \
+    "$(oc_row '  ┃  Build · Big Pickle OpenCode Zen' '0 tokens')" \
+    "$floor" "$bar")
+  assert_screen "opencode idle with the sidebar beside its blank rows" \
+    empty "$CAPS_STYLED" "$beside"
+  assert_screen "opencode idle with the sidebar beside its blank rows on cmux/orca" \
+    empty "$CAPS_PLAIN" "$beside"
   unset -f oc_row
   pass "matrix: opencode's below-floor furniture and side panel are bounded, and typed text still refuses"
 }

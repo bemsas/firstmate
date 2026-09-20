@@ -621,16 +621,18 @@ composer state        : empty   [pre-fix this was 'unknown']
 agent state           : alive
 resolved agent pid    : 2583811 (opencode)
 no-content-observed   : yes
-stopped pid=2583811 comm=opencode signal=TERM endpoint=preserved worktree=unchanged lt1 harness=opencode backend=herdr
+stopped pid=2583811 comm=opencode signal=TERM endpoint-state=preserved worktree-state=intact lt1 harness=opencode backend=herdr endpoint=default:%3 worktree=/Users/f/wt/lt1
   PASS agent process gone
   PASS herdr pane preserved
 ```
 
 Typed text still refuses on every path (`pending`), a floor too narrow to be its composer's own border still refuses contiguous activity below it - on the cursor-anchored read as well as the cursorless one, because the width clip is where bytes are deleted - and a composer whose leading blank row is outside the capture keeps the strict position rule rather than gaining a cheaper verdict.
-A floor is accepted as the composer's bound only when it also opens in the same column as the `┃` of every row it closes, and only when at least one of those rows still carries content inside that bound.
-Both are structural properties of the same renderer rather than tolerances, and each rejects a floor that the other admits: the column match rejects a floor belonging to some other box, and the in-bound test rejects a span that would blank every row it covers and report a composer holding a draft as `empty`.
-The column match held on every real capture available at the time: herdr idle 24/24 rows, wedged-with-sidebar 3/3, typed draft 3/3, and a full tmux pane 64/64.
-Neither case was reproduced from a real opencode render, so both are recorded as uncovered shapes rather than observed regressions; they get the careful treatment because their consequence is a visible draft read as `empty`, which `exit` would type onto and `stop` would signal away.
+A floor is accepted as the composer's bound only when no row's text runs across it, when at least one row still carries content inside it, and - when the clip would DELETE a row's entire content - when some other row shows the composer's own text and further content past the bound SIDE BY SIDE.
+That last condition is what separates the two shapes a fit test alone cannot tell apart, and it is the one the reviewer's reproduction exposed: ` ┃`+15 spaces+`the draft` over ` ┃ Build · x` under a 16-column floor cuts cleanly in the gap, so nothing overflows, the footer row alone satisfies the in-bound test, and the draft is erased - classifying `empty` a capture that visibly holds it.
+The side-by-side condition refuses that bound (nothing on the screen shows a panel at all) while leaving the sidebar case intact, where a real panel runs beside the composer's blank rows and those rows carry panel text and nothing else.
+Measured on this worktree against the classifier itself, with the condition in place: reviewer reproduction `pending`, real herdr idle `empty`, the same idle with the sidebar also beside its blank rows `empty`, wedged-with-sidebar `empty`, typed draft `pending`, auth-failure screen `empty`.
+Refusing every bound that empties a row - the simpler rule - was measured too and reads that idle pane `unknown`, which would leave opencode-on-herdr exactly as unstoppable as before; that is why the proof is required rather than the blanking alone.
+The reproduction was not produced by a real opencode render, so it is recorded as an uncovered shape rather than an observed regression; it gets the careful treatment because its consequence is a visible draft read as `empty`, which `exit` would type onto and `stop` would signal away.
 The residual is stated plainly: a composer whose every row really is blank inside the bound also falls back to reading rows whole and refuses, which is the safe direction, and opencode does not render that shape because its `Build · …` footer is drawn inside the composer.
 The live guard's cursorless assertion reads the WHOLE pane, because opencode centres its composer on a splash screen and a bottom-anchored window can miss it entirely - that is a capture-window property, not a classification one.
 claude 2.1.277 and opencode 1.18.31 are the harnesses whose cursorless read is established `empty`; kimi 2.0.2 still classifies `unknown` cursorless because it draws its own footer rows below its `╰───╯` composer border, which is the same defect class in the box shape and is not addressed here.
@@ -654,6 +656,7 @@ ok - fm-control stop: an observed draft refuses, and neither the draft nor the a
 ok - fm-control stop: a worktree that loses its single dirty file is reported CHANGED, never unchanged
 ok - fm-control stop: a window that WAS the agent reports its fate unestablished, never preserved or proven gone
 ok - fm-control stop: a worktree whose uncommitted contents were traded is CHANGED, though its entry count is not
+ok - fm-control stop: a file the harness flushed on its way out is not a destroyed worktree
 ok - fm-control stop: a worktree that could not be read is reported unverified, never unchanged
 ok - fm-control stop: a backend that cannot identify the agent process refuses rather than guessing
 ```
@@ -665,12 +668,15 @@ The endpoint postcondition reads the recovery-grade agent-state classifier, repe
 Measured on 2026-09-20 against a real private tmux server: after the window holding a directly-launched agent is gone, `tmux display-message -p -t '<session>:<window>' '#{pane_id}'` still exits 0 and answers for the session's CURRENT window, so that read cannot tell a preserved endpoint from a destroyed one and reported `endpoint=preserved` for a window that no longer existed.
 `fm_backend_agent_state` classified the same endpoint `missing` from its exact session inventory throughout.
 That `missing`, however, is not proof of destruction on tmux, and the verb does not report it as one: a task record carries no socket identity for its endpoint, so absence is routed through the control plane's single absence owner (`fm_control_endpoint_absence_verdict`), which returns `unproven` for tmux and can return a proven `gone` only for Herdr.
-The direct-launch case above stages the destroyed-window shape - the stand-in agent is `exec`ed as the pane's own command, so the window dies with it - and requires `stopped-endpoint-unverified` with `endpoint=unestablished`: neither the `preserved` a loose read would have claimed, nor a `gone` this backend cannot prove.
+The direct-launch case above stages the destroyed-window shape - the stand-in agent is `exec`ed as the pane's own command, so the window dies with it - and requires `stopped-endpoint-unverified` with `endpoint-state=unestablished`: neither the `preserved` a loose read would have claimed, nor a `gone` this backend cannot prove.
 The other cases keep covering the real fleet shape, where `bin/backends/tmux.sh` creates the window with no command and the shell genuinely outlives the agent.
 
-The worktree postcondition compares `HEAD` plus the `git status --porcelain` text, never a summary derived from it.
-The two cases above stage the shapes a summary cannot see: an agent that trades one untracked file for another leaves every count identical while the work is gone, and an agent that leaves its worktree unreadable gives a constant that compares equal to itself.
-Both require the verb to refuse - `worktree=CHANGED` and `worktree=unverified` respectively - rather than print `worktree=unchanged`.
+The worktree postcondition asserts that nothing the worktree held before the signal was destroyed or altered, not that it is byte-identical: it compares `HEAD` plus the `git status --porcelain` text, never a summary derived from it, and requires every entry present before to still be present after with the same status.
+The cases above stage all three shapes: an agent that trades one untracked file for another leaves every count identical while the work is gone; an agent that leaves its worktree unreadable gives a constant that compares equal to itself; and an agent that only ADDS a file on its way out has destroyed nothing.
+The first two require the verb to refuse - `worktree-state=CHANGED` and `worktree-state=unverified` - while the third must report `worktree-state=intact`, because this verb sends SIGTERM precisely so the harness gets its chance to flush and a postcondition that failed on that flush would turn the design into a reported failed stop.
+Each of those exits retires the task's busy wiring first: the agent is already proven dead or missing by then, so a record that outlived it would leave the task classifying `busy` with no agent behind it.
+
+`stop`'s own outcome keys are `endpoint-state=` and `worktree-state=`, distinct from the `endpoint=` address and `worktree=` path the shared result line carries, so one line never uses a key for two meanings.
 
 The not-a-shell proof classifies through `fm_agent_process_classify_name`, the fleet's single owner of process-name identity, rather than a list of its own; `tests/fm-backend.test.sh` stages a real process for each of the ten shells that owner recognizes and requires every one to be proven a shell, so a host whose pane shell is `ash`, `mksh`, `tcsh`, or `csh` is protected exactly as `bash` and `zsh` are.
 

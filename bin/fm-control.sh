@@ -71,9 +71,12 @@
 #              recovery-grade classifier reports the agent gone, and the
 #              endpoint's and the worktree's fates are each reported as what
 #              could be ESTABLISHED about them - the endpoint preserved, proven
-#              gone, or unestablished; the worktree (HEAD plus its porcelain
-#              status text) unchanged, changed, or unverified. "I could not
-#              check" is never reported as "I checked and it is gone".
+#              gone, or unestablished; the worktree intact, changed, or
+#              unverified. Intact means NOTHING THAT WAS THERE WAS DESTROYED OR
+#              ALTERED, not that the worktree is byte-identical: the harness is
+#              given SIGTERM so it can flush, so what it writes on the way out
+#              destroys nothing. "I could not check" is never reported as "I
+#              checked and it is gone".
 #              Already-stopped is success (idempotent). Requires a
 #              backend that can name a pane's foreground process from process
 #              facts (tmux, herdr); others refuse rather than guess a pid.
@@ -642,9 +645,9 @@ do_exit() {
 # comparable value - HEAD plus the porcelain status TEXT.
 #
 # The text itself, never a summary derived from it. Any derived summary answers
-# a narrower question than "is this worktree as I left it": a shutdown that
-# deletes one untracked file and writes another leaves every count and every
-# cardinality identical, and `worktree=unchanged` would be claimed over work
+# a narrower question than "did every uncommitted change survive": a shutdown
+# that deletes one untracked file and writes another leaves every count and
+# every cardinality identical, and the survival claim would be made over work
 # that was destroyed.
 worktree_fingerprint() {  # -> a comparable value for $WT, `absent`, or `unreadable`
   local head status
@@ -655,22 +658,55 @@ worktree_fingerprint() {  # -> a comparable value for $WT, `absent`, or `unreada
 }
 
 # worktree_outcome: what can be ESTABLISHED about $WT between two fingerprints.
-# A worktree that could not be read is not a worktree that came through
-# unchanged, so `unreadable` is its own answer rather than a constant that
-# compares equal to itself and licenses the `unchanged` claim.
+# A worktree that could not be read is not a worktree that came through intact,
+# so `unreadable` is its own answer rather than a constant that compares equal
+# to itself and licenses the survival claim.
+#
+# THE POSTCONDITION ASSERTS THAT NOTHING WHICH WAS THERE HAS BEEN DESTROYED OR
+# ALTERED - not that the worktree is byte-identical. This verb promises the
+# worktree and every uncommitted change SURVIVE, and it chose SIGTERM precisely
+# so the harness gets its chance to flush; a harness that then writes a
+# transcript or a crash file, or an unsignalled child that writes a build
+# artifact, has destroyed nothing. So every porcelain entry present BEFORE must
+# still be present AFTER with the same status, while a pure addition passes.
 worktree_outcome() {  # <before> <after> -> unchanged|changed|unverified
+  local entry after_entries
   if [ "$1" = unreadable ] || [ "$2" = unreadable ]; then
     printf 'unverified'
-  elif [ "$1" = "$2" ]; then
-    printf 'unchanged'
-  else
-    printf 'changed'
+    return 0
   fi
+  if [ "$1" = "$2" ]; then
+    printf 'unchanged'
+    return 0
+  fi
+  # HEAD is the fingerprint's first line; the porcelain entries are the rest.
+  [ "${1%%$'\n'*}" = "${2%%$'\n'*}" ] || { printf 'changed'; return 0; }
+  after_entries=$'\n'"${2#*$'\n'}"$'\n'
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    case "$after_entries" in
+      *$'\n'"$entry"$'\n'*) ;;
+      *) printf 'changed'; return 0 ;;
+    esac
+  done <<EOF
+${1#*$'\n'}
+EOF
+  printf 'unchanged'
 }
 
-# worktree_brief: a fingerprint folded onto one line, for a refusal message.
+# worktree_brief: a fingerprint folded onto one line for a refusal message, and
+# BOUNDED - an interrupted build can leave a porcelain listing long enough to
+# bury the sentence the operator actually needs. The diagnostic value is in
+# which entries differ, not in reprinting all of them.
 worktree_brief() {  # <fingerprint>
-  printf '%s' "$1" | tr '\n' '|'
+  local shown=6 total rest
+  total=$(printf '%s' "$1" | grep -c '') || total=0
+  rest=$((total - shown))
+  if [ "$rest" -gt 0 ]; then
+    printf '%s(+%s more)' "$(printf '%s' "$1" | head -n "$shown" | tr '\n' '|')" "$rest"
+  else
+    printf '%s' "$(printf '%s' "$1" | tr '\n' '|')"
+  fi
 }
 
 # endpoint_outcome: which of THREE different facts about $T this verb can
@@ -783,26 +819,31 @@ do_stop() {
   # the outcome that would have been convenient.
   endpoint=$(endpoint_outcome)
   after=$(worktree_fingerprint)
+  # The agent is already proven dead or missing, so the incarnation is over
+  # whatever the worktree comparison says. Retire its busy wiring before any
+  # exit from here, or a stop that reports a changed or unverified worktree
+  # leaves the task classifying `busy` with no agent behind it - the very state
+  # this verb exists to clear.
+  retire_busy_incarnation
   case "$(worktree_outcome "$before" "$after")" in
     unchanged) ;;
     changed)
-      die "stop-delivered $ID pid=$pid comm=$comm signal=TERM agent=stopped endpoint=$endpoint worktree=CHANGED before='$(worktree_brief "$before")' after='$(worktree_brief "$after")'; the agent stopped but its worktree did not come through unchanged"
+      die "stop-delivered $ID pid=$pid comm=$comm signal=TERM agent=stopped endpoint-state=$endpoint worktree-state=CHANGED before='$(worktree_brief "$before")' after='$(worktree_brief "$after")'; the agent stopped but something the worktree held before it did not survive"
       ;;
     *)
-      die "stop-delivered $ID pid=$pid comm=$comm signal=TERM agent=stopped endpoint=$endpoint worktree=unverified; the agent stopped, but '$WT' could not be read, so nothing is claimed about what it still holds"
+      die "stop-delivered $ID pid=$pid comm=$comm signal=TERM agent=stopped endpoint-state=$endpoint worktree-state=unverified; the agent stopped, but '$WT' could not be read, so nothing is claimed about what it still holds"
       ;;
   esac
-  retire_busy_incarnation
   case "$endpoint" in
     preserved)
-      printf 'stopped pid=%s comm=%s signal=TERM endpoint=preserved worktree=unchanged' "$pid" "$comm"
+      printf 'stopped pid=%s comm=%s signal=TERM endpoint-state=preserved worktree-state=intact' "$pid" "$comm"
       ;;
     did-not-survive)
-      printf 'stopped-endpoint-gone pid=%s comm=%s signal=TERM endpoint=did-not-survive worktree=unchanged' \
+      printf 'stopped-endpoint-gone pid=%s comm=%s signal=TERM endpoint-state=did-not-survive worktree-state=intact' \
         "$pid" "$comm"
       ;;
     *)
-      printf 'stopped-endpoint-unverified pid=%s comm=%s signal=TERM endpoint=unestablished worktree=unchanged' \
+      printf 'stopped-endpoint-unverified pid=%s comm=%s signal=TERM endpoint-state=unestablished worktree-state=intact' \
         "$pid" "$comm"
       ;;
   esac

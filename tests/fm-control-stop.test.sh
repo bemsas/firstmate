@@ -129,7 +129,23 @@ case "$out" in
   "stopped pid=$PID "*) ;;
   *) fail "stop must report the exact pid it signalled, got: $out" ;;
 esac
-case "$out" in *"endpoint=preserved"*) ;; *) fail "stop must report the endpoint preserved, got: $out" ;; esac
+case "$out" in *"endpoint-state=preserved"*) ;; *) fail "stop must report the endpoint preserved, got: $out" ;; esac
+# The result line is written for a firstmate agent to read, so each key on it
+# has to mean one thing. The verb's own OUTCOMES are endpoint-state=/
+# worktree-state=; the shared trailing pair carries the endpoint ADDRESS and the
+# worktree PATH, and a supervisor needs both.
+[ "$(printf '%s' "$out" | grep -o 'endpoint=' | grep -c '')" = 1 ] \
+  || fail "the result line must carry exactly one endpoint= (the address), got: $out"
+[ "$(printf '%s' "$out" | grep -o 'worktree=' | grep -c '')" = 1 ] \
+  || fail "the result line must carry exactly one worktree= (the path), got: $out"
+case "$out" in
+  *"endpoint=fmses:fm-t1"*) ;;
+  *) fail "the result line must still carry the endpoint address, got: $out" ;;
+esac
+case "$out" in
+  *"worktree=$WORK/wt"*) ;;
+  *) fail "the result line must still carry the worktree path, got: $out" ;;
+esac
 i=0
 while kill -0 "$PID" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
 ! kill -0 "$PID" 2>/dev/null || fail "the agent process survived a reported stop"
@@ -187,7 +203,7 @@ kill -0 "$DRAFT_PID" 2>/dev/null || fail "stop signalled an agent whose composer
 pass "fm-control stop: an observed draft refuses, and neither the draft nor the agent is touched"
 
 # --- 4c. THE WORKTREE POSTCONDITION discriminates ONE destroyed dirty file --
-# `stop` reports `worktree=unchanged`, so that claim has to be able to FAIL for
+# `stop` reports `worktree-state=intact`, so that claim has to be able to FAIL for
 # the smallest real loss there is: the single uncommitted file a shutting-down
 # harness discards. A dirty-entry count that cannot tell 0 from 1 reports that
 # loss as unchanged, which is a wrong label emitted without erroring.
@@ -202,7 +218,7 @@ start_agent "$WORK/wt" "rm -f '$WORK/wt/dirty.txt'; PATH=$WORK/bin:\$PATH openco
   || fail "could not stage an agent that discards uncommitted work as it stops"
 out=$(run_stop) && fail "stop must not report a worktree that lost its only dirty file as unchanged, got: $out"
 case "$out" in
-  *worktree=CHANGED*) ;;
+  *worktree-state=CHANGED*) ;;
   *) fail "stop must report the destroyed dirty file as a changed worktree, got: $out" ;;
 esac
 [ ! -e "$WORK/wt/dirty.txt" ] || fail "this case never actually discarded the worktree's only dirty file"
@@ -256,12 +272,12 @@ if [ "${DIRECT_LAUNCH:-}" != skip ]; then
     *) fail "stop must report a tmux endpoint's fate as unestablished, got: $out" ;;
   esac
   case "$out" in
-    *endpoint=unestablished*) ;;
+    *endpoint-state=unestablished*) ;;
     *) fail "stop must name the endpoint outcome it established, got: $out" ;;
   esac
   case "$out" in
-    *endpoint=preserved*) fail "stop claimed a survival it could not establish, got: $out" ;;
-    *endpoint=did-not-survive*) fail "stop claimed a destruction tmux cannot prove, got: $out" ;;
+    *endpoint-state=preserved*) fail "stop claimed a survival it could not establish, got: $out" ;;
+    *endpoint-state=did-not-survive*) fail "stop claimed a destruction tmux cannot prove, got: $out" ;;
   esac
   "$REAL_TMUX" -L "$SOCKET" list-windows -t fmses -F '#{window_name}' | grep -qx fm-t1 \
     && fail "the direct-launch window outlived the stop"
@@ -274,24 +290,74 @@ fi
 # A shutting-down harness that removes one untracked file it owns and writes
 # another - a session lock traded for a crash log - leaves the entry count, and
 # every other summary derived from the status, exactly as it was. Uncommitted
-# work is gone and `worktree=unchanged` would be claimed over it.
+# work is gone and `worktree-state=intact` would be claimed over it.
 [ -e "$WORK/wt/dirty.txt" ] || printf 'uncommitted\n' > "$WORK/wt/dirty.txt"
 rm -f "$WORK/wt/crash.log"
+# Enough dirty entries that the refusal would bury its own sentence under two
+# full porcelain listings if the fingerprints it quotes were not bounded.
+for n in 1 2 3 4 5 6 7; do printf 'noise\n' > "$WORK/wt/noise$n.txt"; done
 BEFORE_COUNT=$(git -C "$WORK/wt" status --porcelain | grep -c '')
+[ "$BEFORE_COUNT" -gt 6 ] || fail "this case needs more dirty entries than the refusal quotes"
 start_agent "$WORK/wt" "rm -f '$WORK/wt/dirty.txt'; : > '$WORK/wt/crash.log'; PATH=$WORK/bin:\$PATH opencode 1" \
   || fail "could not stage an agent that trades one uncommitted file for another"
+# The agent is proven stopped before the worktree is ever compared, so the
+# incarnation is over whatever that comparison says. A busy record that outlives
+# it keeps the task classifying `busy` with no agent behind it - the pings-
+# forever state this verb exists to clear.
+bash "$ROOT/bin/fm-busy-event.sh" arm "$WORK/home/state" t1 >/dev/null 2>&1 \
+  || fail "could not arm a busy incarnation for the failing-postcondition case"
+[ -f "$WORK/home/state/t1.busy-state" ] || fail "arming did not write a busy record"
 out=$(run_stop) && fail "stop must not report a worktree whose uncommitted contents were traded as unchanged, got: $out"
 case "$out" in
-  *worktree=CHANGED*) ;;
+  *worktree-state=CHANGED*) ;;
   *) fail "stop must report the traded file as a changed worktree, got: $out" ;;
 esac
+[ ! -e "$WORK/home/state/t1.busy-state" ] \
+  || fail "a stop that reported a changed worktree left the task recorded busy with no agent behind it"
+[ ! -e "$WORK/home/state/t1.busy-gen" ] \
+  || fail "a stop that reported a changed worktree left an orphaned busy generation"
 [ ! -e "$WORK/wt/dirty.txt" ] || fail "this case never actually removed the original uncommitted file"
 [ -e "$WORK/wt/crash.log" ] || fail "this case never actually wrote the replacement file"
 [ "$(git -C "$WORK/wt" status --porcelain | grep -c '')" = "$BEFORE_COUNT" ] \
   || fail "this case must leave the dirty-entry count identical, or it proves nothing about content"
+# The refusal quotes both fingerprints, so each must be bounded rather than
+# reprinting the whole listing and pushing the sentence that follows it off the
+# end of the line.
+case "$out" in
+  *'(+'*' more)'*) ;;
+  *) fail "the refusal must bound the fingerprints it quotes, got: $out" ;;
+esac
+case "$out" in
+  *"noise7.txt"*) fail "the refusal reprinted the whole porcelain listing, got: $out" ;;
+esac
+case "$out" in
+  *"did not survive"*) ;;
+  *) fail "the refusal's own sentence must survive the fingerprints it quotes, got: $out" ;;
+esac
 pass "fm-control stop: a worktree whose uncommitted contents were traded is CHANGED, though its entry count is not"
-rm -f "$WORK/wt/crash.log"
+rm -f "$WORK/wt/crash.log" "$WORK/wt"/noise*.txt
 printf 'uncommitted\n' > "$WORK/wt/dirty.txt"
+
+# --- 4e2. A PURE ADDITION DESTROYS NOTHING, so the stop succeeds ------------
+# This verb sends SIGTERM precisely so the harness gets its chance to flush. A
+# harness that writes a transcript or a crash file on the way out, or an
+# unsignalled child that drops a build artifact, has destroyed nothing - and a
+# postcondition that failed on it would turn the verb's own design into a
+# reported failed stop.
+[ -e "$WORK/wt/dirty.txt" ] || printf 'uncommitted\n' > "$WORK/wt/dirty.txt"
+rm -f "$WORK/wt/flushed.log"
+start_agent "$WORK/wt" ": > '$WORK/wt/flushed.log'; PATH=$WORK/bin:\$PATH opencode 1" \
+  || fail "could not stage an agent that flushes a new file as it stops"
+out=$(run_stop) || fail "stop must succeed when the harness only ADDED a file, got: $out"
+case "$out" in
+  *worktree-state=intact*) ;;
+  *) fail "a pure addition must report the worktree intact, got: $out" ;;
+esac
+[ -e "$WORK/wt/flushed.log" ] || fail "this case never actually flushed a new file"
+[ "$(cat "$WORK/wt/dirty.txt")" = uncommitted ] \
+  || fail "the uncommitted work this case was protecting did not survive"
+pass "fm-control stop: a file the harness flushed on its way out is not a destroyed worktree"
+rm -f "$WORK/wt/flushed.log"
 
 # --- 4f. A WORKTREE THAT COULD NOT BE READ is not a worktree left alone -----
 # Reading nothing is not evidence of nothing changing. If the postcondition
@@ -301,11 +367,11 @@ start_agent "$WORK/wt" "rm -f '$WORK/wt/.git'; PATH=$WORK/bin:\$PATH opencode 1"
   || fail "could not stage an agent that leaves its worktree unreadable"
 out=$(run_stop) && fail "stop must not claim anything about a worktree it could not read, got: $out"
 case "$out" in
-  *worktree=unverified*) ;;
+  *worktree-state=unverified*) ;;
   *) fail "stop must say the worktree could not be verified, got: $out" ;;
 esac
 case "$out" in
-  *worktree=unchanged*) fail "stop claimed an unchanged worktree it never read, got: $out" ;;
+  *worktree-state=intact*) fail "stop claimed an intact worktree it never read, got: $out" ;;
 esac
 printf '%s\n' "$GITFILE" > "$WORK/wt/.git"
 git -C "$WORK/wt" status --porcelain >/dev/null 2>&1 || fail "the worktree was not restored for the cases that follow"

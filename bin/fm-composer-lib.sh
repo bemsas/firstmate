@@ -1324,22 +1324,14 @@ _fm_composer_leftbar_floor_row() {  # <trimmed-row>
   [ -z "${blocks//▀/}" ]
 }
 
-# _fm_composer_row_glyph_indent_var: set <varname> to the display column at
-# which <plain-row> opens with <glyph>, and fail when the glyph is absent or
-# anything but whitespace precedes it. The prefix is whitespace only, so once
-# Unicode spaces are normalized its character count IS its column count and no
-# subprocess is needed.
-_fm_composer_row_glyph_indent_var() {  # <varname> <plain-row> <glyph>
-  local __fmgi_name=$1 __fmgi_row=$2 __fmgi_glyph=$3 __fmgi_prefix
-  fm_composer_normalize_spaces_var __fmgi_row
-  case "$__fmgi_row" in
-    *"$__fmgi_glyph"*) __fmgi_prefix=${__fmgi_row%%"$__fmgi_glyph"*} ;;
-    *) return 1 ;;
-  esac
-  case "$__fmgi_prefix" in
-    *[![:space:]]*) return 1 ;;
-  esac
-  printf -v "$__fmgi_name" '%s' "${#__fmgi_prefix}"
+# _fm_composer_leftbar_row_content_var: reduce <plain-row> in place to the text
+# a left-bar row actually carries - trimmed, with its opening `┃` removed.
+_fm_composer_leftbar_row_content_var() {  # <varname> <plain-row>
+  local __fmrc_name=$1 __fmrc_text=$2
+  fm_composer_normalize_trim_var __fmrc_text
+  case "$__fmrc_text" in '┃'*) __fmrc_text=${__fmrc_text#┃} ;; esac
+  fm_composer_normalize_trim_var __fmrc_text
+  printf -v "$__fmrc_name" '%s' "$__fmrc_text"
 }
 
 # _fm_composer_leftbar_bound: THE one owner of the composer's right edge. Print
@@ -1349,18 +1341,23 @@ _fm_composer_row_glyph_indent_var() {  # <varname> <plain-row> <glyph>
 # floor row, because it has to be an absolute column in the captured row rather
 # than a width relative to the floor's own indent.
 #
-# Three properties must hold, and each rejects a different wrong floor:
+# Two properties must hold, and each rejects a different wrong floor:
 #
-#   SHAPE      - the row below is `╹▀…`, the composer's own closing glyph.
-#   ALIGNMENT  - that floor's `╹` sits in the same column as the `┃` of every
-#                row it closes. Both glyphs come from the same renderer, so a
-#                floor at a different indent belongs to some other box.
-#   FIT        - no row's text runs across the bound (the clip refuses to split
-#                a run, so such a row comes back whole and overflows), AND at
-#                least one row still carries content INSIDE the bound. A floor
-#                whose span blanks every row it covers is not describing this
-#                composer at all: trusting it would delete a visible draft and
-#                report the composer `empty`.
+#   SHAPE - the row below is `╹▀…`, the composer's own closing glyph.
+#   FIT   - the bound describes THIS composer. Three things establish that, and
+#           all of them are about what the clip would do to the rows the floor
+#           closes:
+#             - no row's text runs across the bound (the clip refuses to split a
+#               run, so such a row comes back whole and overflows);
+#             - at least one row still carries content INSIDE the bound, so the
+#               span is not blanking the whole composer; and
+#             - if the clip would DELETE a row's entire content, some other row
+#               must show the composer's own text and more content past the
+#               bound SIDE BY SIDE. That is what proves a panel is drawn beside
+#               this composer and that the deleted run belongs to it. Without
+#               that proof the deleted run has no other explanation than the
+#               composer's own text, and a bound that would erase a visible
+#               draft is refused.
 #
 # Any failure means there is no proven bound, and the caller reads rows whole -
 # which can only defer, never claim a false `empty`. The residual is stated
@@ -1370,28 +1367,30 @@ _fm_composer_row_glyph_indent_var() {  # <varname> <plain-row> <glyph>
 # inside the composer.
 _fm_composer_leftbar_bound() {  # <plain-screen> <first> <last> -> width
   local plain=$1 first=$2 last=$3
-  local raw trimmed width floor_col bar_col row clipped cols inbound=0
+  local raw trimmed width row clipped whole cols inbound=0 blanked=0 panel=0
   raw=$(_fm_composer_screen_row "$((last + 1))" "$plain")
   trimmed=$raw
   fm_composer_normalize_trim_var trimmed
   _fm_composer_leftbar_floor_row "$trimmed" || return 1
-  _fm_composer_row_glyph_indent_var floor_col "$raw" '╹' || return 1
   width=$(printf '%s\n' "${raw%"${raw##*[![:space:]]}"}" | fm_composer_count_columns)
   row=$first
   while [ "$row" -le "$last" ]; do
     raw=$(_fm_composer_screen_row "$row" "$plain")
-    _fm_composer_row_glyph_indent_var bar_col "$raw" '┃' || return 1
-    [ "$bar_col" = "$floor_col" ] || return 1
+    _fm_composer_leftbar_row_content_var whole "$raw"
     clipped=$(printf '%s\n' "$raw" | fm_composer_clip_columns "$width")
     cols=$(printf '%s\n' "${clipped%"${clipped##*[![:space:]]}"}" | fm_composer_count_columns)
     [ "$cols" -le "$width" ] || return 1
-    fm_composer_normalize_trim_var clipped
-    case "$clipped" in '┃'*) clipped=${clipped#┃} ;; esac
-    fm_composer_normalize_trim_var clipped
-    [ -z "$clipped" ] || inbound=1
+    _fm_composer_leftbar_row_content_var clipped "$clipped"
+    if [ -n "$clipped" ]; then
+      inbound=1
+      [ "$clipped" = "$whole" ] || panel=1
+    elif [ -n "$whole" ]; then
+      blanked=1
+    fi
     row=$((row + 1))
   done
   [ "$inbound" = 1 ] || return 1
+  [ "$blanked" = 0 ] || [ "$panel" = 1 ] || return 1
   printf '%s' "$width"
 }
 
