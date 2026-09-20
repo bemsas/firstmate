@@ -28,10 +28,7 @@
 #              state is never rewritten as proof of the action.
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
 #              every uncommitted change. Interrupts first when the task reads
-#              busy, then submits the harness's exit command when the composer
-#              is proven empty. When the classifier proves the screen holds no
-#              composer at all, it signals each identified agent pid instead of
-#              typing; every verdict in between refuses. Postcondition:
+#              busy, then submits the harness's exit command. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent). An endpoint that reads
 #              `missing` is put through the control plane's per-backend absence
@@ -113,14 +110,6 @@
 #     classified state acts.
 #   - A composer that visibly holds pending text refuses before an exit command
 #     is typed, so existing text is preserved instead of being concatenated.
-#   - When the classifier reports `no-composer` - its positive reading that the
-#     capture was read and holds nothing that could be a draft - `exit` stops
-#     the identified agent process without typing. That path still refuses when
-#     it cannot name a pid that the recovery-grade classifier established as
-#     this task's agent, and it never signals a process group. `unknown` and
-#     `pending-unproven` either saw content they could not prove or read
-#     nothing at all, so they refuse both the typed exit command and the
-#     signal.
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
@@ -481,34 +470,6 @@ retire_busy_incarnation() {
   fi
 }
 
-# stop_agent_by_signal: TERM each pid the recovery-grade classifier named as
-# this task's agent, without typing into the composer. Refuses when the backend
-# cannot read the pane, when it names no pid, or when any line of the list is
-# not a digit-only process id - so a process group (a leading minus) is never
-# signaled. The pane is read once; a pid that exits between that read and the
-# kill below is the ordinary race every signal carries, and `kill` failing on
-# it is not an error here.
-stop_agent_by_signal() {
-  local pids_raw pid
-  pids_raw=$(fm_backend_agent_pids "$BACKEND" "$T" "$LABEL" 2>/dev/null) || return 1
-  [ -n "$pids_raw" ] || return 1
-  while IFS= read -r pid; do
-    [ -n "$pid" ] || continue
-    case "$pid" in
-      *[!0-9]*|0) die "task $ID's agent pid list contained '$pid', which is not a process id; refusing to signal anything" ;;
-    esac
-  done <<EOF
-$pids_raw
-EOF
-  while IFS= read -r pid; do
-    [ -n "$pid" ] || continue
-    kill -s TERM "$pid" 2>/dev/null || true
-  done <<EOF
-$pids_raw
-EOF
-  return 0
-}
-
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
@@ -582,33 +543,8 @@ do_exit() {
     pending)
       die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Clear or submit the pending text, then retry '$VERB'"
       ;;
-    no-composer)
-      # The classifier read this capture and established that nothing on it
-      # could be a draft, so there is nothing a stop could destroy. Typing is
-      # still refused - there is nowhere to type - and the non-typing stop
-      # signals the identified agent process instead. Refuse rather than guess
-      # when no pid is established as this task's agent.
-      if ! stop_agent_by_signal; then
-        die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text, and no agent process could be identified to stop without typing. Clear the composer, then retry '$VERB'"
-      fi
-      state=$(wait_agent_state "$EXIT_WAIT" dead) || {
-        die "exit-delivered $ID interrupt=$interrupt_result exit-command=not-typed agent-state=$state exit=unconfirmed; the identified agent process was signaled but did not stop within ${EXIT_WAIT}s"
-      }
-      fm_backend_target_exists "$BACKEND" "$T" "$LABEL" \
-        || die "task $ID's recorded endpoint disappeared after its agent process was signaled; the endpoint this verb preserves did not survive"
-      [ -z "$WT" ] || [ -d "$WT" ] \
-        || die "task $ID's recorded worktree $WT is missing after its agent process was signaled"
-      retire_busy_incarnation
-      printf 'stopped'
-      return 0
-      ;;
     *)
-      # `unknown` and `pending-unproven` are the verdicts where content was
-      # observed and could not be proven, or where nothing was read at all.
-      # Typing would concatenate onto text that may be there and a signal would
-      # destroy it, so both refuse; only a capture the classifier proved holds
-      # nothing draft-shaped reaches the non-typing stop.
-      die "task $ID's composer state is '$composer_state', not proven empty and not proven free of text; refusing to type the $cmd exit command because it could concatenate onto existing text, and refusing to stop the agent by signal because that would discard text this read could not rule out. Clear the composer, then retry '$VERB'"
+      die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
       ;;
   esac
   # The submit verdict is NOT the postcondition here: a successful exit command

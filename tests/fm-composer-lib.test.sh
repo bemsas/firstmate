@@ -573,8 +573,7 @@ test_matrix_codex_idle_starfield_furniture() {
   assert_screen "wrapped typed row with a middle dot on herdr" pending "$CAPS_STYLED" $'transcript line\n\n› deploy\nfix · tests before pushing'
   assert_screen "wrapped typed row with a middle dot on tmux" pending "$CAPS_TMUX" $'transcript line\n\n› deploy\nfix · tests before pushing' 3
   # (iv) the footer or a starfield row alone, with no bare glyph above, gains
-  # no new verdict: no container proof at all and a transcript row that could be
-  # anything - not empty, not pending, and nothing a caller may type into.
+  # no new verdict: still no container proof.
   assert_screen "codex footer alone on herdr" unknown "$CAPS_STYLED" $'transcript line\n\n'"$footer"
   assert_screen "codex footer alone on tmux" unknown "$CAPS_TMUX" $'transcript line\n\n'"$footer" 2
   assert_screen "starfield row alone on herdr" unknown "$CAPS_STYLED" $'transcript line\n\n'"$below"
@@ -715,39 +714,22 @@ test_strict_blank_row_divergence() {
   # permissive posture has silently returned and away-mode injection would
   # again type escalations into unproven panes.
   local out
-  # Permissive read this blank cursor row as empty = safe to inject. The rows
-  # above the cursor are ordinary text, so the capture is not content-free and
-  # the verdict is the refusal, never injectable and never signal-eligible.
+  # Permissive read this blank cursor row as empty = safe to inject.
   out=$(fm_composer_classify_screen "$CAPS_TMUX" $'some output\nmore output\n' 2)
-  [ "$out" = unknown ] || fail "a blank cursor row over visible text must be unknown (was permissive empty), got '$out'"
+  [ "$out" = unknown ] || fail "a blank unidentified cursor row must be unknown (was permissive empty), got '$out'"
   # A dead shell's prompt row.
   out=$(fm_composer_classify_screen "$CAPS_TMUX" $'output\n$ ' 1)
   [ "$out" = unknown ] || fail "a dead-shell prompt row must be unknown, got '$out'"
   # A bare busy-footer row is not a composer container.
   out=$(fm_composer_classify_screen "$CAPS_TMUX" $'Working...' 0)
   [ "$out" = unknown ] || fail "a bare busy-footer row must be unknown (was permissive empty), got '$out'"
-  # An unidentified free-text row carries no container proof either, and it must
-  # stay `unknown`: text WAS observed, and a caller that destroys state on
-  # `no-composer` would destroy it. The same bytes must answer the same way with
-  # and without a cursor, or a cursorless backend gets a weaker guarantee than a
-  # cursor-anchored one.
+  # An unidentified free-text cursor row carries no container proof either.
   out=$(fm_composer_classify_screen "$CAPS_TMUX" $'output\nhuman draft text' 1)
   [ "$out" = unknown ] || fail "an unidentified text row must be unknown under strict, got '$out'"
-  out=$(fm_composer_classify_screen "$CAPS_STYLED" $'output\nhuman draft text')
-  [ "$out" = unknown ] || fail "the same text must be unknown on a cursorless capture, got '$out'"
-  # An empty body and an all-blank body are reads that did not happen, not
-  # findings about a screen.
+  # A blank screen with no cursor capability.
   out=$(fm_composer_classify_screen "$CAPS_PLAIN" $'\n\n')
   [ "$out" = unknown ] || fail "a blank screen must be unknown, got '$out'"
-  out=$(fm_composer_classify_screen "$CAPS_STYLED" "")
-  [ "$out" = unknown ] || fail "an empty capture body must be unknown, got '$out'"
-  # The one positive reading: the capture was read, and every non-blank row on
-  # it is harness furniture, so nothing on it could be a draft.
-  out=$(fm_composer_classify_screen "$CAPS_STYLED" $'\n  ctrl+p commands\n\n')
-  [ "$out" = no-composer ] || fail "a chrome-only capture must be no-composer, got '$out'"
-  out=$(fm_composer_classify_screen "$CAPS_TMUX" $'\n  ctrl+p commands\n\n' 0)
-  [ "$out" = no-composer ] || fail "a chrome-only capture must be no-composer with a cursor too, got '$out'"
-  pass "strict posture: only a chrome-only capture reads no-composer; text, blanks and an absent read all refuse"
+  pass "strict posture: blank and unidentified rows are unknown, never injectable empty"
 }
 
 test_bare_wrap_region_classifies() {
@@ -881,6 +863,25 @@ test_opencode_status_below_floor_is_furniture() {
   pass "fm_composer_classify_screen: OpenCode status under the floor is furniture; pending drafts still pending"
 }
 
+test_status_row_is_furniture_only_under_a_left_bar_floor() {
+  # The exemption is scoped to the one layout the live record covers: OpenCode's
+  # keybind row under its `╹▀` floor. Every other container keeps the
+  # unclaimed-activity rule it had, so a status row directly under a BOX still
+  # proves that box stale, and omp's status row is furniture only where it
+  # always was - bounding a bare composer's wrap region, never exempting a
+  # container.
+  local box_below_opencode box_below_omp bare_below_omp
+  box_below_opencode=$'╭────────────╮\n│ ❯          │\n╰────────────╯\n ctrl+p commands'
+  assert_screen "a box above opencode's status row is still stale" unknown "$CAPS_STYLED" "$box_below_opencode"
+  box_below_omp=$'╭────────────╮\n│ ❯          │\n╰────────────╯\n π  · Kimi K3 · ~/proj · ◫ 4.0%/40K ⟲'
+  assert_screen "a box above omp's status row is still stale" unknown "$CAPS_STYLED" "$box_below_omp"
+  # omp's own verified layout is untouched: its status row still bounds the
+  # bare composer above it rather than reading as typed input.
+  bare_below_omp=$'transcript line\n\n❯'"$NBSP"$'\n π  · Kimi K3 · ~/proj · ◫ 4.0%/40K ⟲'
+  assert_screen "omp status still bounds a bare composer" empty "$CAPS_STYLED" "$bare_below_omp"
+  pass "fm_composer_classify_screen: the status-row exemption is scoped to the left-bar floor"
+}
+
 test_bottom_most_candidate_wins() {
   # The one ranking rule: the live composer is bottom-anchored, so a stale
   # decorative box (codex's startup banner) can never outrank the real row
@@ -995,6 +996,7 @@ test_lower_dead_shell_invalidates_cursorless_candidate
 test_cursorless_bare_wrap_region_classifies
 test_cursorless_container_rejects_contiguous_lower_activity
 test_opencode_status_below_floor_is_furniture
+test_status_row_is_furniture_only_under_a_left_bar_floor
 test_bottom_most_candidate_wins
 test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width

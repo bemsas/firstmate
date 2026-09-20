@@ -45,14 +45,7 @@ An interrupt is not complete until the composer is empty.
 muse is the one verified adapter that restores the cancelled prompt back into its composer as real text, so its interrupt key is followed by a Ctrl+U clear; without it the next submitted line - including this plane's own exit command - would concatenate onto the restored prompt and submit both as one line.
 The clear is refused before anything is sent when the recorded backend cannot deliver it.
 
-`exit` reads the composer's state before typing the exit command.
-An `empty` verdict types the harness's exit command.
-A `pending` verdict refuses by naming the pending text, and `pending-unproven` and `unknown` - the verdicts where the classifier observed composer content it could not prove - refuse too, without typing and without signaling.
-Text that was observed is therefore never concatenated onto and never discarded by a signal.
-The one remaining verdict, `no-composer`, is the classifier's positive reading of the capture: the read happened (the body holds at least one non-blank row), no container of any shape is on it, and every non-blank row is harness furniture the classifier recognizes - so nothing that could be a draft was read, on every backend alike, with or without a cursor.
-An empty body, an all-blank body, and a body holding any other text all read `unknown` and refuse.
-That one verdict stops the agent by signaling each pid the recovery-grade classifier established as this task's agent.
-The non-typing stop refuses rather than guessing when no such pid can be named, and it never signals a process group.
+`exit` reads the composer's state before typing the exit command and requires the exact `empty` verdict; a `pending` verdict refuses by naming the pending text, and any other verdict (`unknown`, `pending-unproven`, or an unreadable read) refuses as not proven empty, matching the fail-safe contract every other consumer that can overwrite composer input follows.
 
 **Teardown and discard are not verbs and will not become verbs.**
 `exit` stops an agent and preserves everything else.

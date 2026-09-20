@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bin/fm-composer-lib.sh - the ONE fleet-wide owner of composer classification:
 # every shape a verified harness draws, every glyph, every container proof, and
-# the empty|pending|pending-unproven|no-composer|unknown verdict, shared by every
+# the empty|pending|pending-unproven|unknown verdict, shared by every
 # session-provider adapter (tmux via bin/fm-tmux-lib.sh, and
 # bin/backends/{herdr,orca,cmux,zellij}.sh) and by fm-spawn.sh's kimi
 # launch-readiness check.
@@ -739,29 +739,13 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 #   [identity]   "<agent>\t<status>" from the backend's native identity probe,
 #                or `probe-absent` when the probe found no live identity; only
 #                meaningful when caps carry identity=1.
-# Prints exactly one verdict: empty | pending | pending-unproven | no-composer
-# | unknown, or the internal sentinel `need-identity` when caps declare
-# identity=1, no identity result was supplied, and the verdict depends on it.
-# Adapters answer `need-identity` by running their identity probe once and
-# re-calling with either its result or `probe-absent`; the sentinel never
-# escapes an adapter. Identity stays a lazy second pass so the common non-pi
-# read never pays for the probe.
-#
-# `no-composer` and `unknown` are BOTH "not proven empty" and both refuse every
-# consumer that can overwrite input, but they are not the same finding and a
-# caller that destroys state must not conflate them:
-#   no-composer - the POSITIVE finding that this capture was read and holds
-#                 nothing that could be a draft: at least one non-blank row, no
-#                 container of any shape, and every non-blank row is harness
-#                 furniture this owner recognizes (see
-#                 _fm_composer_unresolved_verdict). No content was observed, so
-#                 no draft can be lost.
-#   unknown     - anything else that is not proven: content was seen, or a
-#                 container was seen and could not be proven, or nothing was
-#                 read at all. Content may be sitting in the pane, so nothing
-#                 may act as though it is empty.
-# `pending-unproven` is the same shape as `unknown` with the pending row
-# already identified: content was observed, the container geometry was not.
+# Prints exactly one verdict: empty | pending | pending-unproven | unknown,
+# or the internal sentinel `need-identity` when caps declare identity=1, no
+# identity result was supplied, and the verdict depends on it. Adapters answer
+# `need-identity` by running their identity probe once and re-calling with
+# either its result or `probe-absent`; the sentinel never escapes an adapter.
+# Identity stays a lazy second pass so the common non-pi read never pays for
+# the probe.
 #
 # Consumers that can overwrite input or confirm delivery must accept only the
 # exact positive proof they require (`empty`), so unrecognized future verdicts
@@ -1220,21 +1204,10 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
 
 # _fm_composer_row_is_opencode_status: 0 when the trimmed row is OpenCode's
 # status chrome (FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT above). Consulted only
-# as the row immediately BELOW a proven left-bar floor (or box), never as
-# composer content.
+# as the row immediately BELOW a proven left-bar floor - the one layout the
+# live record covers - never below a box and never as composer content.
 _fm_composer_row_is_opencode_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_OPENCODE_STATUS_RE:-$FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT}" sensitive
-}
-
-# _fm_composer_row_is_below_container_furniture: 0 when the trimmed row is a
-# harness status line that sits directly under a proven box or left-bar and
-# must not be read as the stale-activity invalidation. Typed composer text
-# never appears here: it lives inside the container, above the floor or
-# bottom border.
-_fm_composer_row_is_below_container_furniture() {  # <trimmed-row>
-  _fm_composer_row_is_omp_status "$1" && return 0
-  _fm_composer_row_is_opencode_status "$1" && return 0
-  return 1
 }
 
 # _fm_composer_row_is_braille_furniture: 0 when the row is non-blank and its
@@ -1371,46 +1344,6 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
   else
     printf 'empty'
   fi
-}
-
-# _fm_composer_unresolved_verdict: the verdict for a screen whose composer this
-# owner could not resolve, split into the two findings a caller that destroys
-# state has to tell apart (see the verdict contract above
-# fm_composer_classify_screen). `no-composer` is a POSITIVE reading of the
-# capture and needs both halves of one:
-#   - the capture holds at least one non-blank row, so a read actually
-#     happened. An empty or all-blank body is the absence of a read (a backend
-#     that answered with nothing, or a pane caught mid-redraw), never a finding
-#     about the screen.
-#   - every non-blank row on it is harness furniture this owner recognizes.
-#     Anything else - transcript, a shell command line, a container this owner
-#     could not resolve - is content that could be a draft.
-# The reading never consults the cursor, so a cursorless backend answers the
-# same question as a cursor-anchored one, and no backend can treat
-# unrecognized-container-plus-visible-text as content-free. Reads the
-# FM_COMPOSER_SCAN_* results of the scan that just ran, so it is only ever
-# called after one.
-_fm_composer_unresolved_verdict() {  # <plain-screen>
-  local plain=$1 row seen=0
-  if [ "$FM_COMPOSER_SCAN_BOX_TOP" -ge 0 ] \
-     || [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -ge 0 ] \
-     || [ "$FM_COMPOSER_SCAN_LEFTBAR_START" -ge 0 ] \
-     || [ "$FM_COMPOSER_SCAN_BARE_ROW" -ge 0 ] \
-     || [ "$FM_COMPOSER_SCAN_SHELL_ROW" -ge 0 ] \
-     || [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -ge 0 ]; then
-    printf 'unknown'
-    return 0
-  fi
-  while IFS= read -r row; do
-    fm_composer_normalize_trim_var row
-    [ -n "$row" ] || continue
-    _fm_composer_row_is_below_container_furniture "$row" || { printf 'unknown'; return 0; }
-    seen=1
-  done <<EOF
-$plain
-EOF
-  [ "$seen" = 1 ] || { printf 'unknown'; return 0; }
-  printf 'no-composer'
 }
 
 _fm_composer_leftbar_floor_row() {  # <trimmed-row>
@@ -1613,7 +1546,8 @@ _fm_composer_select_cursorless() {
     trimmed=$raw
     fm_composer_normalize_trim_var trimmed
     if [ -n "$trimmed" ] && ! fm_composer_row_has_edge "$trimmed" \
-       && ! _fm_composer_row_is_below_container_furniture "$trimmed"; then
+       && ! { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
+              && _fm_composer_row_is_opencode_status "$trimmed"; }; then
       FM_COMPOSER_SELECTED_KIND=
       return 1
     fi
@@ -1765,16 +1699,15 @@ EOF
     fi
     # STRICT: a blank or otherwise unidentified cursor row has no positive
     # container proof. This replaced the permissive blank-cursor-row rule
-    # (captain decision blank-row-injection-posture). It stays a refusal either
-    # way; the split only names whether anything that could be a draft was read.
-    _fm_composer_unresolved_verdict "$plain"
+    # (captain decision blank-row-injection-posture).
+    printf 'unknown'
     return 0
   fi
   # No cursor: the bottom-most shape wins, with the pi-separator staleness
   # rules layered on (a live pi composer pair below the generic candidate
   # proves that candidate stale).
   if ! _fm_composer_select_cursorless "$plain"; then
-    _fm_composer_unresolved_verdict "$plain"
+    printf 'unknown'
     return 0
   fi
   case "$FM_COMPOSER_SELECTED_KIND" in
