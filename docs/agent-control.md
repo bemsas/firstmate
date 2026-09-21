@@ -82,6 +82,8 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 
 A Herdr pane or workspace can be destroyed out from under a live task by churn or a session restart.
 The task's worktree, branch, commits, and uncommitted changes all survive that; only its terminal does not.
+A snapshot restore can also bring the same pane id back with a new shell outside the recorded worktree.
+`bin/fm-backend.sh` closes that pane when the shell was born after the task was recorded, which makes this reclaim path apply, and it does not relax `exit`'s composer refusal or a refusal to signal a process whose cwd is not the recorded worktree.
 
 **Reclaim is Herdr-only.** On tmux, both verbs refuse a `missing` endpoint, leaving it exactly as deadlocked as it was before this mechanism existed - deliberately, and with the reason stated rather than guessed past.
 

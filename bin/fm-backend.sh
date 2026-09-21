@@ -971,6 +971,46 @@ fm_backend_agent_alive() {  # <backend> <target>
   esac
 }
 
+# fm_backend_reconcile_restored_endpoint: close a restored endpoint that is
+# outside its recorded worktree, so relaunch reclaim can adopt a new one.
+# Prints destroyed, in-worktree, unproven, or unsupported.
+# Only Herdr can prove the pane id survived and that the shell was born after
+# the task was recorded. Every other backend prints unsupported and changes
+# nothing. A remote record is unsupported here because its endpoint is on
+# another host. The meta file is never rewritten.
+fm_backend_reconcile_restored_endpoint() {  # <meta-file>
+  local meta=$1 backend target wt spawn remote
+  [ -f "$meta" ] || { printf 'unproven'; return 0; }
+  remote=$(fm_meta_get "$meta" remote_host)
+  [ -z "$remote" ] || { printf 'unsupported'; return 0; }
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(fm_backend_target_of_meta "$meta")
+  wt=$(fm_meta_get "$meta" worktree)
+  spawn=$(fm_meta_get "$meta" spawn_gen)
+  case "$backend" in
+    herdr)
+      fm_backend_source herdr || { printf 'unproven'; return 0; }
+      [ -n "$target" ] || { printf 'unproven'; return 0; }
+      fm_backend_herdr_reconcile_restored_endpoint "$target" "$wt" "$spawn"
+      ;;
+    *) printf 'unsupported' ;;
+  esac
+}
+
+# fm_backend_reconcile_restored_endpoints: every task record under <state-dir>.
+# Prints one task id per endpoint this call closed. Silent when none qualify.
+fm_backend_reconcile_restored_endpoints() {  # <state-dir>
+  local state=$1 meta id verdict
+  [ -d "$state" ] || return 0
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    verdict=$(fm_backend_reconcile_restored_endpoint "$meta") || verdict=unproven
+    [ "$verdict" = destroyed ] || continue
+    printf '%s\n' "$id"
+  done
+}
+
 # --- native event push (backend-extensible) ---------------------------------
 #
 # The watcher's event-wait splice (bin/fm-watch.sh) is backend-agnostic: it asks

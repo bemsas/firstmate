@@ -3313,6 +3313,106 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   done
 }
 
+# fm_backend_herdr_process_start_epoch: unix time when <pid> started, from
+# `ps` etimes, or failure when that process cannot be read.
+# A snapshot restore starts a new shell. The shell created with the task is
+# older than the spawn_gen stamped after it.
+fm_backend_herdr_process_start_epoch() {  # <pid>
+  local pid=$1 etimes now
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  etimes=$(ps -p "$pid" -o etimes= 2>/dev/null) || return 1
+  etimes=${etimes//[[:space:]]/}
+  case "$etimes" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  now=$(date +%s) || return 1
+  printf '%s' "$((now - etimes))"
+}
+
+# fm_backend_herdr_physical_dir: <dir> with symlinks resolved, or failure.
+fm_backend_herdr_physical_dir() {  # <dir>
+  [ -n "${1-}" ] && [ -d "$1" ] || return 1
+  (cd -P -- "$1" 2>/dev/null && pwd -P)
+}
+
+# fm_backend_herdr_spawn_gen_epoch: the leading epoch of a spawn_gen value
+# (`s<epoch>.<pid>.<rand>`), or failure when the value is not that shape.
+fm_backend_herdr_spawn_gen_epoch() {  # <spawn-gen>
+  local spawn=$1 epoch
+  case "$spawn" in
+    s[0-9]*) ;;
+    *) return 1 ;;
+  esac
+  epoch=${spawn#s}
+  epoch=${epoch%%.*}
+  case "$epoch" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s' "$epoch"
+}
+
+# fm_backend_herdr_reconcile_restored_endpoint: one recorded Herdr pane whose
+# live foreground directory is not its recorded worktree.
+# Prints exactly one of:
+#   in-worktree  the foreground directory is the recorded worktree
+#   destroyed    the pane was a post-record shell outside that worktree and
+#                is now gone, so relaunch reclaim applies
+#   unproven     the read could not prove either of those
+#
+# Snapshot restore keeps the pane id and starts a new shell in the cwd Herdr
+# saved at pane creation. That saved cwd is not updated when the shell later
+# enters its worktree, and a resumed agent inherits it. Herdr has no command
+# that moves a pane's cwd without typing into the foreground, and a resumed
+# agent is that foreground, so a cd would be the same typing an exit refusal
+# exists to prevent. The process cwd also cannot be changed from outside, so
+# this path closes the pane instead of pretending the cwd check can pass.
+# The recorded endpoint identity that survives is the pane id. The shell's
+# start time has to be strictly after spawn_gen, which is stamped after the
+# original shell exists, so a live process that merely left its worktree is
+# left running for the control plane to refuse.
+# tmux, zellij, cmux, and orca are not handled here. tmux records no socket
+# identity. zellij's pane cwd does not track the worktree subshell and has
+# no recovery-grade proof the tab is still this record. cmux has no live cwd.
+# orca's endpoint is a worktree id, not a restorable pane cwd.
+fm_backend_herdr_reconcile_restored_endpoint() {  # <target> <worktree> <spawn-gen>
+  local target=$1 wt=$2 spawn=$3 info got foreground wt_real here shell_pid started spawn_epoch
+  fm_backend_herdr_parse_target "$target" || { printf 'unproven'; return 0; }
+  command -v jq >/dev/null 2>&1 || { printf 'unproven'; return 0; }
+  wt_real=$(fm_backend_herdr_physical_dir "$wt") || { printf 'unproven'; return 0; }
+  spawn_epoch=$(fm_backend_herdr_spawn_gen_epoch "$spawn") || { printf 'unproven'; return 0; }
+  fm_backend_herdr_target_ready "$target" || { printf 'unproven'; return 0; }
+  info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) \
+    || { printf 'unproven'; return 0; }
+  got=$(printf '%s' "$info" | jq -r '.result.pane.pane_id // empty' 2>/dev/null) || got=
+  [ "$got" = "$FM_BACKEND_HERDR_PANE" ] || { printf 'unproven'; return 0; }
+  foreground=$(printf '%s' "$info" | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null) || foreground=
+  [ -n "$foreground" ] || { printf 'unproven'; return 0; }
+  here=$(fm_backend_herdr_physical_dir "$foreground") || { printf 'unproven'; return 0; }
+  if [ "$here" = "$wt_real" ]; then
+    printf 'in-worktree'
+    return 0
+  fi
+  info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null) \
+    || { printf 'unproven'; return 0; }
+  printf '%s' "$info" | jq -e --arg pane "$FM_BACKEND_HERDR_PANE" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+  ' >/dev/null 2>&1 || { printf 'unproven'; return 0; }
+  shell_pid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) \
+    || { printf 'unproven'; return 0; }
+  started=$(fm_backend_herdr_process_start_epoch "$shell_pid") || { printf 'unproven'; return 0; }
+  [ "$started" -gt "$spawn_epoch" ] || { printf 'unproven'; return 0; }
+  fm_backend_herdr_kill "$target" || true
+  if fm_backend_herdr_endpoint_confirmed_gone "$target"; then
+    printf 'destroyed'
+  else
+    printf 'unproven'
+  fi
+}
+
 # fm_backend_herdr_kill: remove the task's pane, best-effort (mirrors
 # tmux-kill-window's `|| true` contract). Verified: closing a tab's only pane
 # closes the tab too, so a separate tab close is unnecessary.

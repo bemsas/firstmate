@@ -2306,6 +2306,17 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
+  # A Herdr server can restore panes while this watcher is already running.
+  # Close one that came back outside its recorded worktree before this poll
+  # treats that pane as a live worker. The record is left in place so relaunch
+  # reclaim applies. A pane already in its worktree is not touched.
+  restored_closed=$(fm_backend_reconcile_restored_endpoints "$STATE" 2>/dev/null || true)
+  if [ -n "$restored_closed" ]; then
+    fm_wake_append check restored-endpoint \
+      "check: restored endpoint closed so relaunch can reclaim: $(printf '%s' "$restored_closed" | tr '\n' ' ')" \
+      || exit 1
+  fi
+
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
   fi

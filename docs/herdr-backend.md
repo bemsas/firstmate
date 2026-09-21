@@ -280,6 +280,12 @@ No Herdr-specific copy of that protocol exists.
 ## Restart and liveness behavior
 
 Stopping and restarting a named Herdr server preserves workspace, tab, pane, and label ids, but the underlying harness processes and live agent registrations do not survive.
+Herdr restores each pane in the cwd saved at pane creation.
+That cwd is not updated when the shell later enters its worktree, so a resumed agent comes back outside the recorded worktree.
+`fm_backend_reconcile_restored_endpoint` in `bin/fm-backend.sh` closes that pane when the pane id still matches and the shell was born after `spawn_gen`, and it leaves the task record in place so relaunch reclaim applies.
+A shell that has been alive since the task was recorded is not closed, even when its cwd is elsewhere, so a control-plane refusal of a process this task cannot claim still applies.
+Reconciliation does not change how panes are created.
+tmux, zellij, cmux, and orca are left untouched because none of them can prove a restored pane is still this record.
 A restored same-labeled tab with a missing pane or no registered agent is a husk.
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.

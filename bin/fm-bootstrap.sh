@@ -101,10 +101,10 @@
 #          The `code-root <file>` variant is a detect-only local check that runs
 #          even in a read-only session; detect_code_root_backlog_fork owns what
 #          it reports.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
-#          (backlog_record_reconcile, secondmate_sync,
-#          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
-#          fleet_sync) while still
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
+#          (restored_endpoint_reconcile, backlog_record_reconcile,
+#          secondmate_sync, secondmate_liveness_sweep,
+#          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
@@ -1616,7 +1616,24 @@ if network_phase; then
 fi
 local_phase && detect_local_config
 
+# Close a Herdr endpoint whose shell was recreated outside its recorded
+# worktree before secondmate liveness looks at it, so a restored secondmate
+# reads missing and the existing relaunch path can reclaim it. Ships are
+# closed the same way and are not relaunched here: relaunch still requires
+# its note. Read-only startup skips this with the other mutating sweeps.
+restored_endpoint_reconcile() {
+  local id
+  [ -d "$STATE" ] || return 0
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    echo "BOOTSTRAP_INFO: task $id's restored endpoint was outside its recorded worktree and was closed so a relaunch can reclaim it"
+  done < <(fm_backend_reconcile_restored_endpoints "$STATE")
+}
+
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+  # Before liveness, so a restored secondmate is missing by the time that
+  # sweep decides whether to relaunch it.
+  local_phase && restored_endpoint_reconcile
   # secondmate_sync consumes SECONDMATE_RESPAWNED_IDS from the liveness sweep, so
   # those two always run together in the same phase. Clone refresh does not
   # depend on them, so it starts in the background and overlaps their wall clock.
