@@ -879,6 +879,48 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
   esac
 }
 
+# fm_backend_current_path: the endpoint's current working directory as the
+# backend reports it, or empty when this backend has no such read or the read
+# failed. The single dispatcher for that question, so no caller keeps a private
+# per-backend table of it.
+#
+# What the answer MEANS differs per backend, and that difference is the
+# companion predicate below rather than a caller's assumption. tmux's
+# `pane_current_path` and herdr's `foreground_cwd` follow the process actually
+# running in the endpoint, including into a subshell, so they report where the
+# endpoint IS right now. zellij's `pane_cwd` and cmux's surface cwd are frozen
+# at creation time, and neither exposes a live-process field to read instead
+# (docs/zellij-backend.md "Worktree-path discovery: pane_cwd does not track a
+# subshell"; docs/cmux-backend.md). Orca has no path read at all and answers
+# empty. A frozen value is still the right answer for a caller that only wants
+# to watch a brand-new endpoint settle, which is why it is returned rather than
+# suppressed; a caller that wants to know whether an endpoint MOVED must gate
+# on fm_backend_current_path_is_live first.
+fm_backend_current_path() {  # <backend> <target> [expected-label]
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 0
+  case "$backend" in
+    tmux) fm_backend_tmux_current_path "$1" ;;
+    herdr) fm_backend_herdr_current_path "$1" ;;
+    zellij) fm_backend_zellij_current_path "$@" ;;
+    cmux) fm_backend_cmux_current_path "$@" ;;
+    *) return 0 ;;
+  esac
+}
+
+# fm_backend_current_path_is_live: 0 when <backend>'s current-path read follows
+# the endpoint's live process, so a difference from a recorded worktree is
+# evidence the endpoint moved rather than an artifact of a creation-time field.
+# fm_backend_current_path above owns the per-backend reasoning; this is the
+# predicate a caller gates on before treating a path difference as drift.
+fm_backend_current_path_is_live() {  # <backend>
+  case "$1" in
+    tmux|herdr) return 0 ;;
+  esac
+  return 1
+}
+
 # fm_backend_target_exists: cheap, READ-ONLY existence check - does the
 # recorded TARGET endpoint still exist on BACKEND? Never starts a server or
 # session: for herdr this deliberately queries the pane directly instead of

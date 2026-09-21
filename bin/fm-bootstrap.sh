@@ -22,6 +22,8 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
+#                 "ENDPOINT_REBIND: <id>: <what this home could not reconcile
+#                 about a task endpoint restored out of its recorded local copy>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate home is fast-forwarded, its target is
 #          firstmate's own current default-branch commit. A local worktree uses
@@ -101,9 +103,10 @@
 #          The `code-root <file>` variant is a detect-only local check that runs
 #          even in a read-only session; detect_code_root_backlog_fork owns what
 #          it reports.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
 #          (backlog_record_reconcile, secondmate_sync,
-#          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
+#          secondmate_liveness_sweep, secondmate_handoff_resume,
+#          fm-endpoint-rebind.sh sweep, x_mode_setup,
 #          fleet_sync) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
@@ -1653,6 +1656,16 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
       secondmate_handoff_resume
       fm_timing_record phase handoff-delivery "$__fm_timing_stamp"
     fi
+  fi
+  # Restored-endpoint reconciliation is local: it reads this home's own task
+  # endpoints and, where one was restored out of its recorded local copy,
+  # returns it. bin/fm-endpoint-rebind.sh owns every refusal and the reasoning;
+  # this is the point where a restoration is first observed, because a reboot
+  # ends the session that was supervising.
+  if local_phase && [ -x "$SCRIPT_DIR/fm-endpoint-rebind.sh" ]; then
+    __fm_timing_stamp=$(fm_timing_now_ms)
+    "$SCRIPT_DIR/fm-endpoint-rebind.sh" sweep 2>/dev/null || true
+    fm_timing_record phase endpoint-rebind "$__fm_timing_stamp"
   fi
   # x_mode_setup writes local Relay artifacts only and never leaves the machine.
   local_phase && x_mode_setup

@@ -1461,6 +1461,36 @@ malformed target                     unreadable
 
 The same run drove `bin/fm-spawn.sh --relaunch` against a real Herdr pane whose shell had been moved outside its recorded worktree: the shell was told once to return, ended in the recorded worktree, and the replacement was launched into the SAME pane, leaving one task tab.
 
+### Restored endpoints keep their identity and lose their directory
+
+Verified on 2026-09-21, Herdr 0.9.1, grok 1.0.40, Linux 7.2.5-3-omarchy, boot 09:46:44, against a task whose record was published before that boot (recorded pane `w5:p1R`, recorded worktree `/home/bemsas/.treehouse/firstmate-7bab20/3/firstmate`):
+
+```sh
+herdr --session default pane get w5:p1R
+herdr --session default pane process-info --pane w5:p1R
+```
+
+Observed, trimmed to the fields under test:
+
+```text
+{"result":{"pane":{"agent":"grok","agent_session":{"kind":"id","value":"01a0bfa1-0440-7783-81e4-71e64ce6d610"},
+ "cwd":"/home/bemsas/Projects/firstmate","foreground_cwd":"/home/bemsas/Projects/firstmate",
+ "pane_id":"w5:p1R","tab_id":"w5:t1R","workspace_id":"w5"},"type":"pane_info"}}
+{"result":{"process_info":{"foreground_process_group_id":2359,
+ "foreground_processes":[{"argv":["grok","--resume","01a0bfa1-0440-7783-81e4-71e64ce6d610"],
+ "cwd":"/home/bemsas/Projects/firstmate","name":"grok","pid":2359}],
+ "pane_id":"w5:p1R","shell_pid":1979},"type":"pane_process_info"}}
+```
+
+The recorded workspace, tab, and pane ids all survived the reboot; both directory fields did not, and Herdr had restarted the agent itself with `--resume` against the same `agent_session` id from the restored pane's directory.
+The two control-plane reads for that endpoint on the same host were `fm_backend_agent_state` = `alive` and `fm_backend_composer_state` = `unknown`, which is `exit` refusing correctly on a composer it cannot prove empty.
+This is the empirical basis for treating recorded endpoint identity, never a working directory, as the ownership proof; [`../herdr-backend.md`](../herdr-backend.md) ("Restored endpoints do not keep their working directory") owns the current statement.
+Refresh the portable half of the resulting reconciliation with:
+
+```sh
+bin/fm-test-run.sh tests/fm-endpoint-rebind.test.sh
+```
+
 Herdr 0.8.x is not installed on this host, so protocol-20 coverage is structural plus the adapter fixture exercising both response shapes; it is not a live result.
 Refresh the live half, which fails naming the installed version, with:
 

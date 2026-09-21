@@ -540,6 +540,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-worktree-isolation-lib.sh
+. "$SCRIPT_DIR/fm-worktree-isolation-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -2806,18 +2808,6 @@ fi
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
 BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
-# PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
-# /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
-# Every backend's own current-path read (tmux's pane_current_path, herdr's
-# foreground_cwd, zellij/cmux's active pwd probe against the live shell) can
-# report the OS-level, physically-resolved cwd, so comparing it against a
-# still-symlinked PROJ_ABS can misfire both ways: false-negative (the poll
-# below never notices the pane left the project) or false-positive (the
-# isolation guard refuses a spawn that never actually tangled). Canonicalize
-# once here so every downstream comparison uses the same physical form
-# (docs/herdr-backend.md "Known gaps").
-PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
-
 real_path_or_raw() { # <path>
   local path=$1 real
   if real=$(cd "$path" 2>/dev/null && pwd -P); then
@@ -2836,11 +2826,11 @@ real_path_or_raw() { # <path>
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 
-# True when <path> is an isolated worktree of the spawning project: a real
-# directory that is its own worktree root, is not the spawning project itself,
-# and does not share the project repository's common git dir. SPAWN_WT_TOP is
-# left holding the worktree root the check read, and SPAWN_WT_REASON a short
-# phrase naming why a rejected path failed, both for the refusal messages.
+# The spawn-time face of the shared worktree-isolation predicate
+# (bin/fm-worktree-isolation-lib.sh, which owns what isolation means and why
+# every comparison is physical). SPAWN_WT_TOP is left holding the worktree root
+# the check read, and SPAWN_WT_REASON a short phrase naming why a rejected path
+# failed, both for the refusal messages below.
 #
 # The worktree-discovery poll below reads this same predicate, so it can never
 # adopt a path the guard would then refuse. That matters because a pane's cwd
@@ -2853,54 +2843,11 @@ real_path_or_raw() { # <path>
 SPAWN_WT_TOP=
 SPAWN_WT_REASON=
 spawn_worktree_isolated() { # <path>
-  local path=$1 wt_real wt_top_real wt_git_dir proj_common
-  SPAWN_WT_TOP=
-  SPAWN_WT_REASON=
-  wt_real=
-  if ! wt_real=$(cd "$path" 2>/dev/null && pwd -P); then
-    wt_real=
-  fi
-  if [ -z "$wt_real" ]; then
-    SPAWN_WT_REASON="it is not a readable directory"
-    return 1
-  fi
-  SPAWN_WT_TOP=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null || true)
-  # A path in no repository leaves the toplevel empty, and that empty value must
-  # never reach `cd`: bash before 5.3 accepts `cd ""` as a successful no-op, so
-  # it would resolve to fm-spawn's OWN cwd and report the path as a subdirectory
-  # of whatever checkout firstmate happens to be running from.
-  wt_top_real=
-  if [ -n "$SPAWN_WT_TOP" ] && ! wt_top_real=$(cd "$SPAWN_WT_TOP" 2>/dev/null && pwd -P); then
-    wt_top_real=
-  fi
-  if [ -z "$wt_top_real" ]; then
-    SPAWN_WT_REASON="it is not inside a git worktree"
-    return 1
-  fi
-  if [ "$wt_real" != "$wt_top_real" ]; then
-    SPAWN_WT_REASON="it is a subdirectory of worktree root '$wt_top_real', not a worktree root"
-    return 1
-  fi
-  if [ "$wt_real" = "$PROJ_ABS_REAL" ]; then
-    SPAWN_WT_REASON="it is the spawning project itself"
-    return 1
-  fi
-  # The primary checkout uses the repository's common git dir as its own git
-  # dir. A linked spawning home has a different top-level, but the same common
-  # dir, so comparing only the two working directories cannot protect primary.
-  wt_git_dir=$(git -C "$path" rev-parse --absolute-git-dir 2>/dev/null) &&
-    wt_git_dir=$(cd "$wt_git_dir" 2>/dev/null && pwd -P) || wt_git_dir=
-  proj_common=$(git -C "$PROJ_ABS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
-    proj_common=$(cd "$proj_common" 2>/dev/null && pwd -P) || proj_common=
-  if [ -z "$wt_git_dir" ] || [ -z "$proj_common" ]; then
-    SPAWN_WT_REASON="its git directory could not be resolved"
-    return 1
-  fi
-  if [ "$wt_git_dir" = "$proj_common" ]; then
-    SPAWN_WT_REASON="it is the repository's primary checkout (its git dir is the spawning project's common git dir)"
-    return 1
-  fi
-  return 0
+  local status=0
+  fm_worktree_isolation_check "$1" "$PROJ_ABS" || status=$?
+  SPAWN_WT_TOP=$FM_WORKTREE_ISOLATION_TOP
+  SPAWN_WT_REASON=$FM_WORKTREE_ISOLATION_REASON
+  return "$status"
 }
 
 validate_spawn_worktree() { # <source> <inspect-target>
@@ -3486,12 +3433,7 @@ spawn_send_text_line() { # <target> <text>
   esac
 }
 spawn_current_path() { # <target>
-  case "$BACKEND" in
-  tmux) fm_backend_tmux_current_path "$1" ;;
-  herdr) fm_backend_herdr_current_path "$1" ;;
-  zellij) fm_backend_zellij_current_path "$1" "$W" ;;
-  cmux) fm_backend_cmux_current_path "$1" "$W" ;;
-  esac
+  fm_backend_current_path "$BACKEND" "$1" "$W"
 }
 spawn_send_literal() { # <target> <text>
   case "$BACKEND" in
@@ -3847,10 +3789,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
   # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # The project comparison is physical: spawn_worktree_isolated screens each
-  # read against PROJ_ABS_REAL, not PROJ_ABS, because a symlinked project prefix
-  # would otherwise make the pane's OS-level cwd read differ from PROJ_ABS on
-  # the very first poll, before the pane has actually moved.
+  # The project comparison is physical on both sides, which the shared
+  # isolation predicate owns: a symlinked project prefix would otherwise make
+  # the pane's OS-level cwd read differ from PROJ_ABS on the very first poll,
+  # before the pane has actually moved.
   #
   # A single read that already looks isolated is not proof the pane settled
   # there: on some tmux/WSL setups a brand-new window's pane_current_path

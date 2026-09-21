@@ -130,6 +130,34 @@ The stray pane holds a bare shell - the harness is not delivered until after pub
 That self-heals only when the retry resolves the *same* workspace, which the placement rule above does not guarantee.
 The worktree and the task's records are unaffected either way.
 
+### Reconciling a task whose endpoint was restored somewhere else
+
+A terminal endpoint can be restored by its own runtime after a machine reboot, and a restored endpoint does not come back where it was.
+Measured live on 2026-09-21 (Herdr 0.9.1, boot 09:46:44): the recorded workspace, tab, and pane ids all survived, while the pane's working directory came back as the repository's primary checkout and its foreground process was the harness restarted by Herdr itself ([`docs/herdr-backend.md`](herdr-backend.md) "Restored endpoints do not keep their working directory").
+
+This is the opposite case to the reclaim above, and it has the opposite remedy.
+There the endpoint is gone and the record must rebind to a new one; here the endpoint survived and only its working directory moved, so the record is already correct and the endpoint is what must move back.
+Recording such an endpoint as gone would be a false fact, and acting on it would send the reclaim path off to create a second endpoint for a task whose first one may still be running an agent.
+
+Ownership is therefore never read from a working directory.
+A working directory does not survive a restore; the **recorded endpoint identity** does, and that is what proves the endpoint is the task's - the same identity every verb here binds to through `fm_backend_validate_task_endpoint`.
+Once identity holds, a working directory that does not match the record is drift to repair rather than evidence the endpoint belongs to someone else.
+
+[`bin/fm-endpoint-rebind.sh`](../bin/fm-endpoint-rebind.sh) owns that reconciliation and runs from the session-start sweep, which is where a restoration is first observed: a reboot ends the session that was supervising.
+It says nothing at all when an endpoint is already in its recorded local copy.
+When one is not, it re-runs the spawn-time worktree-isolation predicate ([`bin/fm-worktree-isolation-lib.sh`](../bin/fm-worktree-isolation-lib.sh)) against the endpoint's live path, so an endpoint restored into the primary checkout or a project clone is reported instead of silently sitting outside the isolation contract - the assertion is taken at launch and a restore happens long after it.
+
+What it then does depends on the same agent-state verdict the verbs above use:
+
+- `dead` - the endpoint is agent-free, so it is sent back to the recorded worktree and the move is confirmed by reading its live path back; only a read-back that matches is reported as a rebind.
+- `alive` - a worker is running outside the recorded local copy. It is reported and nothing else: this plane has no authority to end an agent and takes none, so stopping it stays with `exit` and its composer-empty proof.
+- `missing` - reported and left to the reclaim path above, which owns absence; this reconciliation never declares an endpoint gone.
+
+It runs only where a backend can actually answer, which is a property of the backend rather than a policy choice.
+A current-path read frozen at endpoint creation time (zellij, cmux) or absent entirely (orca) cannot tell a moved endpoint from an unmoved one, so drift is never inferred on it; `fm_backend_current_path_is_live` owns that split.
+Without a recovery-grade agent-state classifier the endpoint cannot be proven agent-free, and typing a shell command into one that might hold a live agent is what must not happen.
+Those two gates together leave tmux and Herdr.
+
 ### Failure and rollback
 
 - A refusal **before** the agent is stopped leaves the durable record and the instructions byte-identical.
@@ -181,3 +209,4 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 - `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
 - `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, rollback after a failed launch, and the endpoint-absence proof both verbs share - the Herdr reclaim of a destroyed endpoint, and tmux refusing one it cannot prove absent.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
+- `tests/fm-endpoint-rebind.test.sh` - restored-endpoint reconciliation: silence on an endpoint already in its recorded local copy, the rebind of a drifted agent-free endpoint and its read-back proof, the report-only path for a worker running outside the isolation contract, the per-backend capability refusals, and the two control-plane refusals still firing for their original cases.

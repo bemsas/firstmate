@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, PRESENTATION_UNAVAILABLE, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, NETWORK_CHECKS, HOME_SUMMARY, BACKLOG_RECONCILE, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or reports that an interrupted backlog cleanup may have left an endpoint or local copy, or when a standalone bin/fm-bootstrap.sh or bin/fm-startup-network.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, PRESENTATION_UNAVAILABLE, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, NETWORK_CHECKS, HOME_SUMMARY, BACKLOG_RECONCILE, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, ENDPOINT_REBIND, or FMX - or reports that an interrupted backlog cleanup may have left an endpoint or local copy, or when a standalone bin/fm-bootstrap.sh or bin/fm-startup-network.sh run prints one of those lines.
   A silent bootstrap section, or any other BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -72,5 +72,11 @@ When any diagnostic needs captain attention, report the plain consequence and re
   An unsafe-outbox variant requires path and file-type inspection before any retry.
 - `NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>` - secondmate convergence changed a running home's loaded instructions or inherited config, but the deterministic `fm-send.sh fm-<id>` re-read nudge failed.
   Inspect the reason, keep the pending marker under `state/.secondmate-nudge-pending/` intact, and rerun session start after the endpoint or metadata issue is fixed so bootstrap can retry the exact same marked send on the same local or remote route.
+- `ENDPOINT_REBIND: <id>: <what could not be reconciled>` - a task's terminal endpoint is not in the local copy its record names, and the restored-endpoint reconciliation could not put it back; [`bin/fm-endpoint-rebind.sh`](../../../bin/fm-endpoint-rebind.sh) owns every verdict and refusal below.
+  The endpoint is still provably the task's - identity comes from the durable record, not from where the endpoint happens to sit - so this is never a reason to abandon it or to treat the work as lost.
+  When the line says a worker is RUNNING outside the recorded local copy, that worker is outside the worktree-isolation contract: stop it with `bin/fm-control.sh <id> exit`, then rerun `bin/fm-endpoint-rebind.sh reconcile <id>` so the endpoint returns to the recorded copy and the ordinary control verbs work against it again.
+  Do not type into that worker, signal its process, or relaunch around the refusal; if `exit` itself refuses, report that refusal's own reason rather than working past it.
+  When the line says the endpoint reads `missing`, absence is the reclaim path's to prove, so use `bin/fm-control.sh <id> relaunch`; when it says the endpoint could not be returned, or reads an unclassified state, inspect the endpoint before any control action.
+  Tell the captain in outcome terms - the worker is running in the wrong local copy and must be stopped before it can be released - never by relaying the diagnostic line.
 - `FMX: X mode on ...` / `FMX: X mode off ...` - bootstrap confirmed or removed the local Relay poll artifacts (`docs/configuration.md` "Relay (.env)"); the emitted line still carries Relay's former `X mode` wording.
   Only when a running watcher needs the cadence transition applied immediately, restart the home-scoped watcher through the emitted harness supervision protocol; bootstrap deliberately never restarts the watcher itself.

@@ -284,6 +284,15 @@ A restored same-labeled tab with a missing pane or no registered agent is a husk
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
 
+### Restored endpoints do not keep their working directory
+
+A pane restored after a machine reboot keeps its identity and loses its location.
+Measured live on 2026-09-21, Herdr 0.9.1, boot 09:46:44, against a task recorded before that boot: `pane get` returned the recorded `workspace_id`, `tab_id`, and `pane_id` unchanged, while both `cwd` and `foreground_cwd` read the repository's primary checkout instead of the task's recorded worktree, and `pane process-info` showed the pane's foreground process as `grok --resume <agent_session id>` - Herdr had restarted the agent itself, from the restored pane's directory rather than the task's.
+The `agent_session` id in that argv matched the one `agent get` reports for the pane, so the restored agent carries the task's own conversation while sitting outside its worktree.
+
+So a working directory is never ownership evidence for a Herdr endpoint: the recorded pane identity survives a restore and is what proves an endpoint is a given task's, while a path that does not match the record means the endpoint moved.
+[`bin/fm-endpoint-rebind.sh`](../bin/fm-endpoint-rebind.sh) owns the reconciliation that follows from this, and [`agent-control.md`](agent-control.md) ("Reconciling a task whose endpoint was restored somewhere else") owns how it relates to the reclaim path for an endpoint that genuinely did not survive.
+
 A registration alone never proves an agent.
 Herdr keeps a Pi registration (`agent get` still reports `agent=pi` with its last status) after the Pi process has exited to a plain shell whenever a nested interactive shell sits under the pane's top shell, which is the crew shape `treehouse get` leaves behind (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
 So before a registered agent counts as live, the pane classifier reads `pane process-info` and the real process table through the shared harness-process classifier in `bin/fm-agent-process-lib.sh`, the same rule the tmux adapter proves liveness with: a harness in the foreground process group, or still a descendant of the pane shell, keeps the registration live; a foreground that is nothing but shells with no harness descendant is a `stale-agent` pane, agent-free with that explicit reason; a foreground holding anything else keeps the registration live, but only after the same bounded settle window the idle-shell proof uses, because an idle shell transiently hosts prompt helpers such as starship in its foreground group and the first agent or shell sample in that window decides; an unreadable process view makes the pane `unknown`, trusting neither the registration nor its absence.
