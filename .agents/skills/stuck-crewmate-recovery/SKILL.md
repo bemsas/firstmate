@@ -14,6 +14,8 @@ metadata:
 
 Use this playbook when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or when a direct report is stale, looping, repeatedly confused, asking a question its brief already answers, unresponsive, or when a steer failed to land.
 
+Follow the crew-hosted Lavish board contract in [`docs/configuration.md`](../../../docs/configuration.md#crew-hosted-lavish-review-boards) when recovering a worker that hosts a board.
+
 Interrupt, stop, and relaunch a worker through `bin/fm-control.sh <task-id> interrupt|exit|stop|relaunch`, which resolves the recorded runtime itself, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](../../../docs/agent-control.md)).
 `exit` and `relaunch` type the harness's exit command, so both refuse whenever the worker's composer is not proven empty; `stop` signals the agent process and types nothing, which is what makes it the verb for a worker whose composer cannot be read at all.
 That plane covers workers running in this home; a remotely placed secondmate is refused by name and reconciled through `secondmate-provisioning` instead.
