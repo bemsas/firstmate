@@ -1593,21 +1593,6 @@ EOF
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
 }
 
-# fm_composer_pending_row_equals: 0 when <screen> classifies pending under
-# <caps> and the extracted selected content is exactly <text>. Any other
-# verdict, an unreadable selection, or a content mismatch fails. Callers that
-# recover a stranded own-doorbell compare against that constant line here;
-# this function never types and never weakens a pending verdict.
-fm_composer_pending_row_equals() {  # <caps> <screen> <text> [cursor_row] [identity]
-  local caps=$1 screen=$2 text=$3 cy=${4:-} identity=${5:-} verdict content
-  [ -n "$text" ] || return 1
-  verdict=$(fm_composer_classify_screen "$caps" "$screen" "$cy" "$identity")
-  [ "$verdict" = pending ] || return 1
-  content=$(fm_composer_extract_selected_content "$caps" "$screen") || return 1
-  [ -n "$content" ] \
-    && [ "$(printf '%s' "$content" | tr -d '[:space:]')" = "$(printf '%s' "$text" | tr -d '[:space:]')" ]
-}
-
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
   local styled=0 cursor=0 has_identity=0 kv plain
