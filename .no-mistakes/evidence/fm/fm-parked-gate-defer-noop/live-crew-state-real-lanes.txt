@@ -1,0 +1,10 @@
+# Live: bin/fm-crew-state.sh against real treehouse lanes, real no-mistakes CLI + DB (read-only). FM_CREW_STATE_NO_FORGE=1, window intentionally nonexistent.
+== lane3 (fm/bo8-watch-by-trade)
+BASE : state: unknown · source: run-step · complete same-branch run inventory unreadable; run ids: 01M3AGTBY64QXRZQEK5654H42N; last reported run id: 01M3AGTBY64QXRZQEK5654H42N
+FIXED: state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close) · run: 01M3AGTBY64QXRZQEK5654H42N
+== lane8 (fm/bo8-exclusion-phrase-gap)
+BASE : state: unknown · source: run-step · complete same-branch run inventory unreadable; run ids: 01M3AMQY9MENC5PMFF7BKBQHG4; last reported run id: 01M3AMQY9MENC5PMFF7BKBQHG4
+FIXED: state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close) · run: 01M3AMQY9MENC5PMFF7BKBQHG4
+== lane6 (fm/bo8-jev-fable)
+BASE : state: unknown · source: run-step · complete same-branch run inventory unreadable; run ids: 01M39ZXPPBV85VVBH87TYZBNSE; last reported run id: 01M39ZXPPBV85VVBH87TYZBNSE
+FIXED: state: done · source: run-step · run passed: PR state unknown (forge read skipped) · run: 01M39ZXPPBV85VVBH87TYZBNSE

@@ -1,0 +1,29 @@
+# Live read-only: real no-mistakes v1.75.2 overview + real ~/.no-mistakes/state.sqlite, real treehouse task worktrees
+== worktree=/home/bemsas/.treehouse/basisone-b4b6a9/3/basisone branch=fm/bo8-watch-by-trade
+   overview: count: 10 of 52 total
+   BASE  (aec043c): unknown|complete same-branch run inventory unreadable; run ids: 01M3AGTBY64QXRZQEK5654H42N
+   FIXED (a1cf45f): selected|01M3AGTBY64QXRZQEK5654H42N|running|01M3AGTBY64QXRZQEK5654H42N
+== worktree=/home/bemsas/.treehouse/basisone-b4b6a9/4/basisone branch=fm/bo3-bulk-ingest
+   overview: count: 10 of 52 total
+   BASE  (aec043c): unknown|complete same-branch run inventory unreadable; run ids: 
+   FIXED (a1cf45f): absent
+== worktree=/home/bemsas/.treehouse/basisone-b4b6a9/6/basisone branch=fm/bo8-jev-fable
+   overview: count: 10 of 52 total
+   BASE  (aec043c): unknown|complete same-branch run inventory unreadable; run ids: 01M39ZXPPBV85VVBH87TYZBNSE
+   FIXED (a1cf45f): selected|01M39ZXPPBV85VVBH87TYZBNSE|completed|01M39ZXPPBV85VVBH87TYZBNSE
+== worktree=/home/bemsas/.treehouse/basisone-b4b6a9/7/basisone branch=fm/bo8-jev-astra
+   overview: count: 10 of 52 total
+   BASE  (aec043c): unknown|complete same-branch run inventory unreadable; run ids: 01M39ZBFW0MG2FCR4ZCSRT7052
+   FIXED (a1cf45f): selected|01M39ZBFW0MG2FCR4ZCSRT7052|completed|01M39ZBFW0MG2FCR4ZCSRT7052
+== worktree=/home/bemsas/.treehouse/basisone-b4b6a9/8/basisone branch=fm/bo8-exclusion-phrase-gap
+   overview: count: 10 of 52 total
+   BASE  (aec043c): unknown|complete same-branch run inventory unreadable; run ids: 01M3AMQY9MENC5PMFF7BKBQHG4
+   FIXED (a1cf45f): selected|01M3AMQY9MENC5PMFF7BKBQHG4|running|01M3AMQY9MENC5PMFF7BKBQHG4
+== worktree=/home/bemsas/.treehouse/basisone-b4b6a9/10/basisone branch=fm/bo8-cutter-merged-chapters
+   overview: count: 10 of 52 total
+   BASE  (aec043c): unknown|complete same-branch run inventory unreadable; run ids: 01M3AN97NEGGHBRNM0EDJBRWXD
+   FIXED (a1cf45f): selected|01M3AN97NEGGHBRNM0EDJBRWXD|running|01M3AN97NEGGHBRNM0EDJBRWXD
+== worktree=/home/bemsas/.treehouse/basisone-b4b6a9/11/basisone branch=fm/bo8-route-question-lock
+   overview: count: 10 of 52 total
+   BASE  (aec043c): unknown|complete same-branch run inventory unreadable; run ids: 01M3AN2SQZ4C1CQRFG4S7TK1VM
+   FIXED (a1cf45f): selected|01M3AN2SQZ4C1CQRFG4S7TK1VM|running|01M3AN2SQZ4C1CQRFG4S7TK1VM

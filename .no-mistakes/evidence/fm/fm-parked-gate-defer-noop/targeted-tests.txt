@@ -1,0 +1,2 @@
+ok - a worktree the inventory does not record reads unreadable
+ok - a linked worktree of a project or firstmate home resolves to the recorded canonical repo

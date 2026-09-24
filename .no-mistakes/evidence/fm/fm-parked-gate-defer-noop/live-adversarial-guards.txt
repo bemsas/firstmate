@@ -1,0 +1,7 @@
+# Adversarial (FIXED a1cf45f), real overview for fm/bo8-watch-by-trade from real no-mistakes
+A unrelated repo /tmp/fm-adv/other on same branch, real DB: unknown|complete same-branch run inventory unreadable; run ids: 01M3AGTBY64QXRZQEK5654H42N
+C DB copy with recorded path respelled (trailing slash) - no loose match: unknown|complete same-branch run inventory unreadable; run ids: 01M3AGTBY64QXRZQEK5654H42N
+D DB copy recording the parent dir /projects - no prefix match: unknown|complete same-branch run inventory unreadable; run ids: 01M3AGTBY64QXRZQEK5654H42N
+E canonical main checkout itself, real DB: selected|01M3AGTBY64QXRZQEK5654H42N|running|01M3AGTBY64QXRZQEK5654H42N
+F nonexistent worktree path: unknown|complete same-branch run inventory reader unavailable; run ids: 01M3AGTBY64QXRZQEK5654H42N
+B relative worktree path basisone-b4b6a9/3/basisone (cwd ~/.treehouse) - isabs guard kept: unknown|complete same-branch run inventory unreadable; run ids: 01M3AGTBY64QXRZQEK5654H42N
