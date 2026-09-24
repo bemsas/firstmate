@@ -1,0 +1,45 @@
+
+  master /t/fmgroklab/work                                                                                                                               2.3K / 500K │ [Dashboard]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ : Firstmate instruction waiting: list '/tmp/fmgroklab/state/t1.inbox'/*.msg and, in numeric order, read and act on each, then mv each handled file to '/tmp/fmgroklab/     │
+  │   state/t1.inbox'/handled/.                                                                                                                                                  │
+  ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Grok 4.6 (low) ─╯
+
+  Enter:send  │  Shift+Enter/Alt+Enter:newline  │  Shift+Tab:mode  │  Ctrl+.:shortcuts
+

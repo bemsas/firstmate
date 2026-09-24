@@ -1,0 +1,10 @@
+ok - inbox: a steer is written durably and round-trips byte-exact with a self-describing doorbell
+ok - inbox: a hostile-path doorbell executes as a no-op in bare shells
+ok - inbox: terminal-control paths are rejected without typing
+ok - inbox: the ring skips dead or missing endpoints and still rings live or unclassifiable endpoints
+ok - inbox: the ring submits its own stuck doorbell, skips other pending text, and retries a lost Enter once on both paths
+ok - inbox: a pending composer that is not the own doorbell still skips the ring
+not ok - recovery should send Escape:
+key:Enter
+key:Enter
+rc=1

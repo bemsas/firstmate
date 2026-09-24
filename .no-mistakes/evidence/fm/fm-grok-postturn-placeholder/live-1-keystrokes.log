@@ -1,0 +1,2 @@
+send-keys -t lab:fm-t1 Escape
+send-keys -t lab:fm-t1 Enter

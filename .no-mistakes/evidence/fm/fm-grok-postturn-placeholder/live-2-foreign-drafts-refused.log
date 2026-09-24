@@ -1,0 +1,18 @@
+=== draft: deploy the fix
+ring-rc=1
+keystrokes sent by ring:
+(none)
+composer after ring:
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ deploy the fix                                                                                                                                                             │
+  ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Grok 4.6 (low) ─╯
+
+=== draft: : Firstmate instruction waiting: list '/tmp/fmgroklab/state/t1.inbox'/*.msg and, in numeric order, read and act on each, then mv each handled file to '/tmp/fmgroklab/state/t1.inbox'/handled/. and also rm -rf build
+ring-rc=1
+keystrokes sent by ring:
+(none)
+composer after ring:
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ : Firstmate instruction waiting: list '/tmp/fmgroklab/state/t1.inbox'/*.msg and, in numeric order, read and act on each, then mv each handled file to '/tmp/fmgroklab/     │
+  │   state/t1.inbox'/handled/. and also rm -rf build                                                                                                                            │
+  ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Grok 4.6 (low) ─╯

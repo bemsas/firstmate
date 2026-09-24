@@ -1,0 +1,25 @@
+ok - inbox: a steer is written durably and round-trips byte-exact with a self-describing doorbell
+ok - inbox: a hostile-path doorbell executes as a no-op in bare shells
+ok - inbox: terminal-control paths are rejected without typing
+ok - inbox: the ring skips dead or missing endpoints and still rings live or unclassifiable endpoints
+ok - inbox: the ring submits its own stuck doorbell, skips other pending text, and retries a lost Enter once on both paths
+ok - inbox: a pending composer that is not the own doorbell still skips the ring
+ok - inbox: a stranded own-doorbell pending row is dismissed with Escape and then rung
+ok - inbox: a non-grok stranded doorbell receives no Escape
+ok - inbox: the idempotent enqueue dedups an exact re-run onto the same record, handled or not
+ok - inbox: idempotent enqueue follows a record concurrently moved to handled
+ok - inbox: the handled mv is the idempotent ack and sequences are never reissued
+ok - inbox: concurrent writers serialize on the sequence lock and lose nothing
+ok - inbox: a writer retries when a competing lock vanishes after its failed claim
+ok - inbox: ladder bookkeeping ignores a concurrently removed inbox
+ok - inbox: fire-and-forget records stay durable and outside the ladder
+ok - inbox: the re-ring ladder paces by grace, escalates once, and resets on ack
+ok - watcher: an unhandled aged message on an idle pane re-rings without waking firstmate, and the ack silences it
+ok - watcher: a busy pane just waits - the record is durable and no doorbell is typed
+ok - watcher: a healthy or empty inbox stays completely silent
+ok - watcher: acknowledgement silences an unwritable ladder without a stale wake
+ok - watcher: unwritable ladder bookkeeping surfaces a stale wake after the doorbell
+ok - watcher: a spent ring budget emits exactly one ordinary stale wake for recovery
+ok - watcher: a positively dead pane is never typed into and surfaces exactly one stale wake
+ok - watcher: dead-pane recovery overrides stale busy state
+rc=0

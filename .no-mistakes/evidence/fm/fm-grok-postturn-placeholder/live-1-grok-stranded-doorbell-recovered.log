@@ -1,0 +1,17 @@
+Live: real grok 1.0.41 in isolated tmux server (-L fmgroklab), task meta harness=grok
+--- composer BEFORE fm_task_inbox_ring (stranded own doorbell, unsent):
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ : Firstmate instruction waiting: list '/tmp/fmgroklab/state/t1.inbox'/*.msg and, in numeric order, read and act on each, then mv each handled file to '/tmp/fmgroklab/     │
+  │   state/t1.inbox'/handled/.                                                                                                                                                  │
+  ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Grok 4.6 (low) ─╯
+
+--- keystrokes the ring sent:
+send-keys -t lab:fm-t1 Escape
+send-keys -t lab:fm-t1 Enter
+--- ring rc=0; screen AFTER:
+       fmgroklab/state/t1.inbox'/handled/.
+    ⠦ Waiting for response… 1.3s                                                                                                                                1.3s ⇣2.26k [stop]
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                                                                                                                            │
+  ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Grok 4.6 (low) ─╯
+  Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+.:shortcuts
