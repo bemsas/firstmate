@@ -53,6 +53,9 @@ make_fake_root() {
   # fm-backend.sh is real, while its adapter is stubbed so this temp-cleanup
   # test cannot depend on or mutate a host tmux server.
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
+  ln -s "$ROOT/bin/fm-agent-process-lib.sh" "$fake/bin/fm-agent-process-lib.sh"
+  ln -s "$ROOT/bin/fm-session-lock-lib.sh" "$fake/bin/fm-session-lock-lib.sh"
+  ln -s "$ROOT/bin/fm-gemini-lib.sh" "$fake/bin/fm-gemini-lib.sh"
   cat > "$fake/bin/backends/tmux.sh" <<'SH'
 fm_backend_tmux_kill() { return 0; }
 SH
@@ -109,7 +112,7 @@ SH
   # fused backlog close is skipped and the follow-up echo takes the plain-message
   # path; there is no tasks-axi and no backlog in this fixture.
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
-FM_TASKS_AXI_MIN=0.2.4
+FM_TASKS_AXI_MIN=0.2.6
 fm_tasks_axi_backend() { printf 'markdown\n'; }
 fm_tasks_axi_backend_available() { return 1; }
 fm_tasks_axi_compatible() { return 1; }
@@ -157,6 +160,9 @@ test_teardown_skips_gracefully_without_tasktmp() {
   mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data"
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
+  ln -s "$ROOT/bin/fm-agent-process-lib.sh" "$fake/bin/fm-agent-process-lib.sh"
+  ln -s "$ROOT/bin/fm-session-lock-lib.sh" "$fake/bin/fm-session-lock-lib.sh"
+  ln -s "$ROOT/bin/fm-gemini-lib.sh" "$fake/bin/fm-gemini-lib.sh"
   cat > "$fake/bin/backends/tmux.sh" <<'SH'
 fm_backend_tmux_kill() { return 0; }
 SH
@@ -202,7 +208,7 @@ exit 0
 SH
   chmod +x "$fake/bin/fm-fleet-sync.sh"
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
-FM_TASKS_AXI_MIN=0.2.4
+FM_TASKS_AXI_MIN=0.2.6
 fm_tasks_axi_backend() { printf 'markdown\n'; }
 fm_tasks_axi_backend_available() { return 1; }
 fm_tasks_axi_compatible() { return 1; }
