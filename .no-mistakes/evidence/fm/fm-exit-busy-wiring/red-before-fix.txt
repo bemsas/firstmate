@@ -1,0 +1,10 @@
+== new tests run against PRE-FIX bin/fm-control.sh (tests from b6918af)
+not ok - an already-stopped exit left the task recorded busy with no agent behind it
+fm-control.test.sh rc=1
+ok - fm-control relaunch: an unreadable composer fails safe before the exit command is typed
+ok - fm-control relaunch: wiring cleanup failure refuses replacement arming
+ok - fm-control relaunch: checkpoint inspection failures refuse before stopping
+ok - fm-control relaunch: a launch failure after the stop keeps the prior record and reports the real state
+ok - fm-control relaunch: post-publication failure keeps the new durable record
+fm-control-relaunch.test.sh rc=1
+not ok - a herdr already-stopped exit left the task recorded busy with no agent behind it

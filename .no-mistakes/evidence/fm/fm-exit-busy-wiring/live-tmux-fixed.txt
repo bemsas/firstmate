@@ -1,0 +1,17 @@
+== [fixed] tmux panes (agent already gone; only a shell remains)
+fm-t1 cmd=bash path=/tmp/tmp.dKMQKGtsMC/wt-t1
+fm-t2 cmd=bash path=/tmp/tmp.dKMQKGtsMC/wt-t2
+== [fixed] Scenario A: t1 armed busy, worker exited on its own
+state files before: t1.busy-gen t1.busy-state 
+classify before exit: busy fm-spawn
+fm-control t1 exit -> rc=0 out: already-stopped t1 harness=claude backend=tmux endpoint=fmlive:fm-t1 worktree=/tmp/tmp.dKMQKGtsMC/wt-t1
+state files after: 
+classify after exit: unknown missing
+pane still present: fm-t1
+== [fixed] Scenario B: t2 never armed (no-op guard)
+state files before: t2.meta 
+fm-control t2 exit -> rc=0 out: already-stopped t2 harness=claude backend=tmux endpoint=fmlive:fm-t2 worktree=/tmp/tmp.dKMQKGtsMC/wt-t2
+state files after: t2.meta 
+== [fixed] Scenario C: rerun exit on t1 (idempotent, already retired)
+fm-control t1 exit -> rc=0 out: already-stopped t1 harness=claude backend=tmux endpoint=fmlive:fm-t1 worktree=/tmp/tmp.dKMQKGtsMC/wt-t1
+state files after: t1.meta 
