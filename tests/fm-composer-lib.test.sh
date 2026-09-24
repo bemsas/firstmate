@@ -171,6 +171,34 @@ assert_screen() {
   [ "$out" = "$want" ] || fail "$label under LC_ALL=C: expected $want, got '$out'"
 }
 
+# Repeat <char> <n> times. GNU tr is byte-oriented, so it cannot emit a
+# multibyte box-drawing dash from a single ASCII space.
+repeat_char() {  # <char> <n>
+  local c=$1 n=$2 out='' i=0
+  while [ "$i" -lt "$n" ]; do
+    out="${out}${c}"
+    i=$((i + 1))
+  done
+  printf '%s' "$out"
+}
+
+# A Grok 1.0.5 titled composer holding <text> on one content row after the
+# prompt glyph. Width follows the text so a full doorbell line stays one row.
+grok_titled_pending_row() {  # <text>
+  local text=$1
+  local body="❯ $text"
+  local w pad between dashes title n pre
+  w=${#body}
+  [ "$w" -ge 72 ] || w=72
+  pad=$(repeat_char ' ' $((w - ${#body})))
+  between=" ${body}${pad}"
+  dashes=$(repeat_char '─' "${#between}")
+  title=' Grok 4.6 (xhigh) '
+  n=$((${#between} + 3 - ${#title} - 1))
+  pre=$(repeat_char '─' "$n")
+  printf '%s\n' "  ╭${dashes}╮" "  │${between}│" "  ╰${pre}${title}─╯"
+}
+
 test_matrix_claude_bare_nbsp_row() {
   # Real idle claude: `❯` + U+00A0, borderless, between horizontal rules.
   # The audit's headline defect: this row read `pending` under LC_ALL=C
@@ -680,6 +708,46 @@ test_matrix_grok_titled_bottom_border() {
   pass "matrix: grok's real oversized titled bottom is empty while typed and unproved panes stay safe"
 }
 
+test_matrix_grok_stranded_own_doorbell() {
+  # Grok's suggestion popup can consume the Enter of a doorbell and leave
+  # firstmate's own constant line as bright unsubmitted text. The pending-text
+  # refusal must still stand for any other draft; Escape recovery is authorized
+  # only when the pending row is exactly that doorbell line.
+  local doorbell screen leftover idle out
+  doorbell=": Firstmate instruction waiting: list '/i'/*.msg and, in numeric order, read and act on each, then mv each handled file to '/i'/handled/."
+  screen=$(grok_titled_pending_row "$doorbell")
+  assert_screen "grok stranded doorbell on tmux" pending "$CAPS_TMUX" "$screen" 1
+  assert_screen "grok stranded doorbell on herdr" pending "$CAPS_STYLED" "$screen"
+  assert_screen "grok stranded doorbell on zellij" pending "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "grok stranded doorbell on plain backends" pending "$CAPS_PLAIN" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  [ "$out" = "$doorbell" ] \
+    || fail "extracted grok pending row must equal the doorbell line, got '$out'"
+  out=$(fm_composer_extract_selected_content "$CAPS_PLAIN" "$screen")
+  [ "$out" = "$doorbell" ] \
+    || fail "a plain capture of the stranded doorbell must still extract it, got '$out'"
+  fm_composer_pending_row_equals "$CAPS_STYLED" "$screen" "$doorbell" \
+    || fail "the stranded doorbell row must match the constant line on herdr"
+  fm_composer_pending_row_equals "$CAPS_TMUX" "$screen" "$doorbell" 1 \
+    || fail "the stranded doorbell row must match the constant line on tmux"
+  fm_composer_pending_row_equals "$CAPS_PLAIN" "$screen" "$doorbell" \
+    || fail "the stranded doorbell row must match the constant line on a plain capture"
+  leftover=$'  ╭──────────────────────────────────────────────────────────────────────────╮\n  │ ❯ deploy the fix                                                         │\n  ╰────────────────────────────────────────────────────────── Grok 4.6 (xhigh) ─╯'
+  assert_screen "grok leftover draft still pending" pending "$CAPS_STYLED" "$leftover"
+  fm_composer_pending_row_equals "$CAPS_STYLED" "$leftover" "$doorbell" \
+    && fail "a real grok draft must not match the doorbell line"
+  idle=$'  ╭──────────────────────────────────────────────────────────────────────────╮\n  │ ❯                                                                        │\n  ╰────────────────────────────────────────────────────────── Grok 4.6 (xhigh) ─╯'
+  assert_screen "grok idle still empty" empty "$CAPS_STYLED" "$idle"
+  fm_composer_pending_row_equals "$CAPS_STYLED" "$idle" "$doorbell" \
+    && fail "an empty grok composer must not match the doorbell line"
+  # A realistic pane wraps the doorbell; equality ignores that wrap.
+  screen=$'  ╭──────────────────────────────────────────────────────────────────────────╮\n  │ ❯ : Firstmate instruction waiting: list \'/i\'/*.msg and, in numeric order,│\n  │   read and act on each, then mv each handled file to \'/i\'/handled/.      │\n  ╰────────────────────────────────────────────────────────── Grok 4.6 (xhigh) ─╯'
+  assert_screen "grok wrapped doorbell on herdr" pending "$CAPS_STYLED" "$screen"
+  fm_composer_pending_row_equals "$CAPS_STYLED" "$screen" "$doorbell" \
+    || fail "a wrapped grok doorbell row must still match the constant line"
+  pass "matrix: grok's stranded own-doorbell pending row is exact-match only"
+}
+
 test_matrix_kimi_bordered_shell_glyph_box() {
   # Kimi's bordered `│ > │` composer - the shape fm-spawn.sh's retired
   # spawn-local regex used to own. Now the shared owner proves it everywhere,
@@ -930,6 +998,7 @@ test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
+test_matrix_grok_stranded_own_doorbell
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence
