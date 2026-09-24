@@ -1,0 +1,13 @@
+session=fm-lab-grok-postturn-1740913-21919 grok=grok 1.0.41 (4220f3b224a6) [stable] herdr=herdr 0.9.1
+[S2] reply observed=1 after ~4s; scrollback lines with prompt/reply:
+    | 7:     ❯ What is 6 times 7? Answer with only the digits, no tools.                                            11:01 PM
+    | 12:     42                                                                                                     11:01 PM
+[S2] native agent_status=idle rendered_busy=idle
+[S2 post-turn] fixed-lib composer_state=empty | base-lib(31c47af) verdict on same capture=unknown
+    |   ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+    |   │ ❯                                                                                                                │
+    |   ╰──────────────────────────────────────────────────────────────────────────────── Grok 4.6 (low) · always-approve ─╯
+    |   Shift+Tab:mode  │  Ctrl+.:shortcuts
+[S4] fm-control exit on finished grok worker rc=0: stopped gtask harness=grok backend=herdr endpoint=fm-lab-grok-postturn-1740913-21919:w1:p2 worktree=/tmp/fm-grok-live/work.BPGdo3/wt
+[S4] agent_state after exit=dead; pane still present: yes
+teardown ok: fm-lab-grok-postturn-1740913-21919

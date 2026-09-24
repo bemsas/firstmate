@@ -1,0 +1,39 @@
+session=fm-lab-grok-composer-1653959-29482 grok=grok 1.0.41 (4220f3b224a6) [stable] herdr=herdr 0.9.1
+agent_state=alive
+[S1 startup idle] fixed-lib composer_state=empty | base-lib(31c47af) verdict on same capture=unknown
+    |    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+    |    Tip: Try out workflows using /workflows.
+    |   ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+    |   │ ❯                                                                                                                │
+    |   ╰─────────────────────────────────────────────────────────────────────────────── Grok 4.6 (high) · always-approve ─╯
+    |                                                                                                               [stable]
+[S3 typed unsubmitted] fixed-lib composer_state=pending | base-lib(31c47af) verdict on same capture=pending-unproven
+    |   gtask worktree /t/f/run.ow2s9I/wt                                                          2.3K / 500K │ [Dashboard]
+    |      Switched to Grok 4.6 (low effort)
+    |   ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+    |   │ ❯ deploy the fix now                                                                                             │
+    |   ╰──────────────────────────────────────────────────────────────────────────────── Grok 4.6 (low) · always-approve ─╯
+    |   Enter:send  │  Shift+Enter/Alt+Enter:newline  │  Shift+Tab:mode  │  Ctrl+.:shortcuts
+[S3] fm-control exit with typed text rc=1: error: task gtask's composer visibly holds pending text; refusing to type the /exit exit command because it would concatenate onto that text. Clear or submit the pending text, then retry 'exit'
+[S3b cleared] fixed-lib composer_state=empty | base-lib(31c47af) verdict on same capture=unknown
+    |   gtask worktree /t/f/run.ow2s9I/wt                                                          2.3K / 500K │ [Dashboard]
+    |      Switched to Grok 4.6 (low effort)
+    |   ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+    |   │ ❯                                                                                                                │
+    |   ╰──────────────────────────────────────────────────────────────────────────────── Grok 4.6 (low) · always-approve ─╯
+    |   Shift+Tab:mode  │  Ctrl+.:shortcuts
+[S2 post-turn] fixed-lib composer_state=empty | base-lib(31c47af) verdict on same capture=unknown
+    |                                                                                                                        █
+    |                                                                                                                        █
+    |   ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+    |   │ ❯                                                                                                                │
+    |   ╰──────────────────────────────────────────────────────────────────────────────── Grok 4.6 (low) · always-approve ─╯
+    |   Shift+Tab:mode  │  Ctrl+.:shortcuts
+[S4] fm-control exit rc=0: stopped gtask harness=grok backend=herdr endpoint=fm-lab-grok-composer-1653959-29482:w1:p2 worktree=/tmp/fm-grok-live/run.ow2s9I/wt
+[S4] agent_state after exit=dead
+    |   grok --resume 01a0d56e-eb95-7cd3-9539-14ddf69446bd
+    | wt gtask ❯
+    | wt gtask ❯
+    | wt gtask ❯
+[S4] pane still present: yes
+teardown ok: fm-lab-grok-composer-1653959-29482
