@@ -1,0 +1,24 @@
+== tmux pane (agent already exited; only its shell remains):
+fmlive:fm-t1 cmd=bash cwd=/tmp/fm-live-exit.9v4O/wt
+== arm busy incarnation (worker wedged at auth was armed busy):
+g1790287467.1968084.30021
+arm rc=0
+t1.busy-gen
+t1.busy-state
+== fm_busy_classify BEFORE exit:
+busy fm-spawn
+== fm-control.sh t1 exit:
+already-stopped t1 harness=claude backend=tmux endpoint=fmlive:fm-t1 worktree=/tmp/fm-live-exit.9v4O/wt
+ rc=0
+== busy files AFTER exit:
+t1.busy-gen
+t1.busy-state
+== fm_busy_classify AFTER exit:
+busy fm-spawn
+== idempotent second exit with no armed incarnation:
+already-stopped t1 harness=claude backend=tmux endpoint=fmlive:fm-t1 worktree=/tmp/fm-live-exit.9v4O/wt
+ rc=0
+t1.busy-gen
+t1.busy-state
+== endpoint preserved:
+fmlive:fm-t1 cmd=bash

@@ -1,0 +1,26 @@
+== lab session: fm-lab-exitbusy-2007672-11729 (herdr 0.9.1)
+
+### H1 dead: agent-free herdr pane (agent exited on its own)
+pane=w1:p2 state=dead
+armed: h1.busy-gen h1.busy-state  classify=[busy fm-spawn]
+exit: already-stopped h1 harness=claude backend=herdr endpoint=fm-lab-exitbusy-2007672-11729:w1:p2 worktree=/tmp/fm-live-herdr.xSyd/wt-h1
+ rc=0
+after: busy files=[] classify=[unknown missing]
+
+### H2 missing->gone: the recorded pane was destroyed
+pane=w1:p3 state=missing
+armed: h2.busy-gen h2.busy-state  classify=[busy fm-spawn]
+exit: endpoint-gone h2 harness=claude backend=herdr endpoint=fm-lab-exitbusy-2007672-11729:w1:p3 worktree=/tmp/fm-live-herdr.xSyd/wt-h2
+ rc=0
+after: busy files=[] classify=[unknown missing]
+
+### H3 missing->dead: lab session server stopped, pane outlives it
+armed: h3.busy-gen h3.busy-state  classify=[busy fm-spawn]
+server stopped; state=missing
+exit: already-stopped h3 harness=claude backend=herdr endpoint=fm-lab-exitbusy-2007672-11729:w1:p4 worktree=/tmp/fm-live-herdr.xSyd/wt-h3
+ rc=0
+after: busy files=[] classify=[unknown missing]
+pane still present after exit: yes
+== teardown fm-lab-exitbusy-2007672-11729: ok
+
+NOTE: H3 exit blocked after its absence recheck restarted the lab server (pre-existing: fm_backend_herdr_server_ensure background subshell holds the $(...) pipe via bash saved fd 10); unblocked with `bin/fm-herdr-lab.sh stop <session>`, after which exit completed as shown.
