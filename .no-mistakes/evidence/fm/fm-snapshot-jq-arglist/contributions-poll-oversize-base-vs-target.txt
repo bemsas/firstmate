@@ -1,0 +1,8 @@
+--- base: FM_HOME=<big> bin/fm-contributions.sh poll
+exit=0
+stdout: 
+stderr: /tmp/fmsnap-live.N9Uh/base/bin/fm-fleet-snapshot.sh: line 1994: /usr/bin/jq: Argument list too long
+--- target: FM_HOME=<big> bin/fm-contributions.sh poll
+exit=0
+stdout: 
+stderr: 

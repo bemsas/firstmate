@@ -1,0 +1,5 @@
+base exit=0 stderr=
+target exit=0 stderr=
+byte-identical --contribution-input on normal home: YES
+target output:
+{"backlog":{"present":true,"ids":["ship-task","queued-task"]},"tasks":[{"id":"ship-task","kind":"ship","pr":{"url":"https://github.com/kunchenguid/firstmate/pull/9","head":"abc123"},"merge_authority":"attended"}]}

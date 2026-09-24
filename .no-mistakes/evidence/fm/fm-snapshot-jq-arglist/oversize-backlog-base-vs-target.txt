@@ -1,0 +1,21 @@
+=== ARG_MAX=2097152, backlog.md=2105522 bytes (one In-flight row padded past ARG_MAX)
+--- base (31c47af): FM_HOME=<big> bin/fm-fleet-snapshot.sh --contribution-input
+exit=0 stdout_bytes=0
+stderr: /tmp/fmsnap-live.N9Uh/base/bin/fm-fleet-snapshot.sh: line 1994: /usr/bin/jq: Argument list too long
+jq summary: 
+leftover transport dirs in TMPDIR: 0
+--- target (ac833a4): FM_HOME=<big> bin/fm-fleet-snapshot.sh --contribution-input
+exit=0 stdout_bytes=2107918
+stderr: 
+jq summary: {"backlog_present":true,"ids":["huge-task","q1"],"tasks_type":"array"}
+leftover transport dirs in TMPDIR: 0
+--- base (31c47af): FM_HOME=<big> bin/fm-fleet-snapshot.sh (default json)
+exit=0 stdout_bytes=2109870
+stderr: 
+jq summary: {"backlog_present":true,"ids":["huge-task","q1"],"tasks_type":"array"}
+leftover transport dirs in TMPDIR: 0
+--- target (ac833a4): FM_HOME=<big> bin/fm-fleet-snapshot.sh (default json)
+exit=0 stdout_bytes=2109919
+stderr: 
+jq summary: {"backlog_present":true,"ids":["huge-task","q1"],"tasks_type":"array"}
+leftover transport dirs in TMPDIR: 0

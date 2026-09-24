@@ -1,0 +1,11 @@
+--- target: bash tests/fm-fleet-snapshot-view.test.sh
+ok - snapshot parses tasks-axi rows and respects operational overrides
+ok - fleet view renders the snapshot without secondmate peek guidance
+ok - fleet view renders secondmate agent liveness
+ok - contribution-input accepts a backlog larger than ARG_MAX
+exit=0
+--- base bin + new test file
+ok - fleet view renders the snapshot without secondmate peek guidance
+ok - fleet view renders secondmate agent liveness
+not ok - contribution-input passed fleet JSON through the argument vector: /tmp/fmsnap-live.N9Uh/base/bin/fm-fleet-snapshot.sh: line 1994: /usr/bin/jq: Argument list too long 
+exit=1
