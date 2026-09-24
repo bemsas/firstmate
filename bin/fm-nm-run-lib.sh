@@ -129,11 +129,15 @@ fm_nm_run_status_class() {  # <status_word>
 # ~/.no-mistakes/state.sqlite; relative NM_HOME resolves from the worktree).
 # The real CLI overview never carries a `repo: ` identity line (observed
 # 2026-09-20: a truncated overview with zero rows for this task's branch has
-# only `count:`/`runs[...]:`), so repo identity is looked up by the task
-# worktree path itself, which is exactly what `no-mistakes` records as a
-# repo's `working_path`; the recorded spelling is matched exactly, so a task
-# worktree that is not absolute, or whose spelling differs from the recorded
-# one, reads as unreadable rather than guessed among candidates.
+# only `count:`/`runs[...]:`), so repo identity is looked up by the
+# no-mistakes `repos.working_path`. That column is the main checkout
+# `no-mistakes init` records via FindMainRepoRoot, never a linked task
+# worktree, so the reader resolves the task worktree to that same main
+# checkout before the exact lookup. The recorded spelling is then matched
+# exactly, including the `len(repo) != 1` guard: a worktree that is not
+# absolute, that cannot be resolved, or whose main checkout differs from
+# the recorded row, reads as unreadable rather than guessed among
+# candidates.
 # The reader subprocess is bounded by $4 seconds (default 10), so a contended
 # database can never outlast the caller's per-read budget.
 # If that reader or inventory is unavailable, report unknown with available
@@ -236,12 +240,45 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 from contextlib import closing
 from pathlib import Path
 
 branch, worktree, available_ids = sys.argv[1:]
 ids = available_ids.split(", ") if available_ids else []
+
+def git_out(*args, cwd=None):
+    completed = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    if completed.returncode != 0:
+        raise ValueError
+    return completed.stdout.strip()
+
+# Same resolution no-mistakes init uses (internal/git.FindMainRepoRoot): the
+# git common dir of a regular repo or linked worktree is <root>/.git, so the
+# recorded working_path is that parent. Absorbed submodules use core.worktree;
+# anything else falls back to --show-toplevel.
+def main_repo_root(path):
+    common = git_out("rev-parse", "--git-common-dir", cwd=path)
+    if not os.path.isabs(common):
+        common = os.path.join(path, common)
+    common = os.path.normpath(common)
+    if os.path.basename(common) == ".git":
+        root = os.path.dirname(common)
+    else:
+        try:
+            configured = git_out("--git-dir", common, "config", "--get", "core.worktree")
+        except ValueError:
+            configured = ""
+        if configured:
+            root = configured if os.path.isabs(configured) else os.path.normpath(os.path.join(common, configured))
+        else:
+            root = git_out("rev-parse", "--show-toplevel", cwd=path)
+    try:
+        return os.path.realpath(root)
+    except OSError:
+        return root
+
 try:
     if not os.path.isabs(worktree):
         raise ValueError
@@ -250,7 +287,7 @@ try:
         root = Path(worktree) / root
     with closing(sqlite3.connect((root / "state.sqlite").as_uri() + "?mode=ro", uri=True, timeout=30)) as db:
         db.execute("BEGIN")
-        repo = db.execute("SELECT id FROM repos WHERE working_path = ?", (worktree,)).fetchall()
+        repo = db.execute("SELECT id FROM repos WHERE working_path = ?", (main_repo_root(worktree),)).fetchall()
         if len(repo) != 1:
             raise ValueError
         rows = db.execute(

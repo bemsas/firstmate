@@ -3267,6 +3267,61 @@ PY
   FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
 }
 
+# Capped overview whose sqlite repos.working_path is the canonical main working
+# tree, while the task meta points at a linked worktree of it. This is the live
+# firstmate shape: no-mistakes init records FindMainRepoRoot (the main checkout),
+# and every lane is a linked worktree of that checkout.
+make_capped_linked_worktree_case() {  # <name> <canonical-relpath>
+  local d=$TMP_ROOT/$1 canonical=$TMP_ROOT/$1/$2 canonical_path gd gcd
+  reset_fakes
+  mkdir -p "$d/state" "$canonical"
+  git -C "$canonical" init -q
+  git -C "$canonical" commit -q --allow-empty -m init
+  git -C "$canonical" worktree add -q -b fm/competing "$d/wt"
+  gd=$(git -C "$d/wt" rev-parse --git-dir)
+  gcd=$(git -C "$d/wt" rev-parse --git-common-dir)
+  [ "$gd" != "$gcd" ] || fail 'linked-worktree fixture must have git-dir != git-common-dir'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/competing.meta" "window=fm:fm-competing" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD=$(git -C "$d/wt" rev-parse HEAD)
+  export FM_FAKE_RUN_HEAD
+  NM_HOME="$d/nm"
+  mkdir -p "$NM_HOME"
+  canonical_path=$(CDPATH='' cd -- "$canonical" && pwd -P)
+  [ "$canonical_path" != "$d/wt" ] || fail 'linked-worktree fixture must not use the main checkout as the task worktree'
+  FM_FAKE_AXI_HOME=$(python3 - "$NM_HOME/state.sqlite" "$canonical_path" running cancelled "$FM_FAKE_RUN_HEAD" hidden <<'PY'
+import csv
+import json
+import sqlite3
+import sys
+
+database, working_path, newest, oldest, head, placement = sys.argv[1:]
+with sqlite3.connect(database) as db:
+    db.executescript("""
+        CREATE TABLE repos (id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE);
+        CREATE TABLE runs (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL,
+                           status TEXT NOT NULL, head_sha TEXT NOT NULL, created_at INTEGER NOT NULL);
+    """)
+    db.executemany("INSERT INTO repos VALUES (?, ?)", [("repo", working_path), ("other-repo", working_path + "-other")])
+    db.executemany("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)", [
+        ("01NEW", "repo", "fm/competing", newest, head, 12 if placement == "visible" else 1),
+        ("01OLD", "repo", "fm/competing", oldest, head, 0),
+        ("01FOREIGN", "other-repo", "fm/competing", "running", head, 20),
+    ] + [("01OTHER%02d" % i, "repo", "fm/other-%d" % i, "running", head, i + 2)
+         for i in range(9 if placement == "visible" else 10)])
+    rows = db.execute("SELECT id, branch, status, head_sha FROM runs WHERE repo_id = 'repo' "
+                      "ORDER BY created_at DESC, id DESC").fetchall()
+print("count: 10 of %d total" % len(rows))
+print("runs[10]{id,branch,status,head,pr}:")
+for row in rows[:10]:
+    sys.stdout.write("  ")
+    csv.writer(sys.stdout, lineterminator="\n").writerow([*row, ""])
+PY
+  ) || fail 'could not create the linked-worktree run inventory fixture'
+  FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01NEW/')"
+  FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
+}
+
 test_capped_competing_live_runs_report_both_ids() {
   make_capped_runs_case capped-competing running running
   local d=$TMP_ROOT/capped-competing out
@@ -3414,18 +3469,47 @@ SH
   pass 'the capped inventory reader is bounded by the crew read budget'
 }
 
-# Repo identity is looked up by the exact recorded `working_path`; a worktree
-# spelled differently from the registered row is not guessed at, and reads as
-# an unreadable inventory that still names every candidate run id.
+# Repo identity is looked up by the exact recorded `working_path` after the
+# task worktree is resolved to its main checkout; a different git repository
+# is not guessed at, and reads as an unreadable inventory that still names
+# every candidate run id.
 test_capped_inventory_requires_exact_worktree_path() {
   make_capped_runs_case capped-noncanonical running pending hidden
   local d=$TMP_ROOT/capped-noncanonical out
-  fm_write_meta "$d/state/competing.meta" "window=fm:fm-competing" "worktree=$d/wt/./" "kind=ship"
+  make_repo_on_branch "$d/other" fm/competing
+  fm_write_meta "$d/state/competing.meta" "window=fm:fm-competing" "worktree=$d/other" "kind=ship"
   out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'an unmatched worktree spelling cannot establish a verdict'
+  assert_contains "$out" 'state: unknown' 'an unmatched worktree cannot establish a verdict'
   assert_contains "$out" 'unreadable' 'an unmatched repo lookup reports the inventory unreadable'
   assert_not_contains "$out" 'absent' 'an unmatched repo lookup never reads as a branch without runs'
-  pass 'a worktree spelling the inventory does not record reads unreadable'
+  pass 'a worktree the inventory does not record reads unreadable'
+}
+
+# Live firstmate lanes are linked worktrees of the canonical project checkout
+# that no-mistakes records as repos.working_path. The sqlite reader must
+# resolve the task worktree to that main checkout before the exact lookup, the
+# same way no-mistakes init does via FindMainRepoRoot. A firstmate-repo task's
+# canonical path is the home itself.
+test_capped_inventory_resolves_linked_worktree_to_canonical_repo() {
+  local kind rel d out gd gcd
+  for kind in project home; do
+    case "$kind" in
+      project) rel=project ;;
+      home) rel=home ;;
+    esac
+    make_capped_linked_worktree_case "capped-linked-$kind" "$rel"
+    d=$TMP_ROOT/capped-linked-$kind
+    gd=$(git -C "$d/wt" rev-parse --git-dir)
+    gcd=$(git -C "$d/wt" rev-parse --git-common-dir)
+    [ "$gd" != "$gcd" ] || fail "$kind fixture is not a linked worktree"
+    out=$(run_crew_state "$d" competing)
+    assert_contains "$out" 'state: parked' "$kind linked worktree must read the canonical repo's run step"
+    assert_contains "$out" 'parked at review: 2 finding(s)' "$kind linked worktree keeps the replacement gate"
+    assert_contains "$out" '01NEW' "$kind linked worktree identifies the hidden same-branch run"
+    assert_not_contains "$out" 'unreadable' "$kind linked worktree must not read the inventory as unreadable"
+    assert_not_contains "$out" 'state: unknown' "$kind linked worktree must not report unknown"
+  done
+  pass 'a linked worktree of a project or firstmate home resolves to the recorded canonical repo'
 }
 
 test_capped_replacement_keeps_gate_and_inventory_unchanged() {
@@ -4928,6 +5012,7 @@ test_capped_overview_without_repo_line_and_no_runs_reports_absent
 test_no_branch_run_beside_a_live_run_elsewhere_reads_absent
 test_capped_inventory_reader_is_time_bounded
 test_capped_inventory_requires_exact_worktree_path
+test_capped_inventory_resolves_linked_worktree_to_canonical_repo
 test_capped_replacement_keeps_gate_and_inventory_unchanged
 test_capped_inventory_failures_report_unknown
 test_complete_inventory_ignores_unrelated_semantics
