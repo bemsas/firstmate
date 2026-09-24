@@ -1022,7 +1022,7 @@ EOF
 # inner (corners already stripped) still starts and ends with the family's own
 # rule glyph, so the title is embedded IN the rule rather than replacing it.
 _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
-  local family=$1 inner=$2 expected=$3 dash spaces title effort model middot mode_suffix
+  local family=$1 inner=$2 expected=$3 dash spaces title effort model middot
   fm_composer_normalize_trim_var inner
   case "$family" in
     rounded|light) dash='─' ;;
@@ -1038,7 +1038,7 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
   # U+00B7 MIDDLE DOT is the separator grok 1.0.41 draws in
   # `Grok <model> (<effort>) · always-approve` (Firstmate's --always-approve
   # spawn). Map it like ASCII printable so a same-width titled rule still
-  # proves, then require the typed Grok title on the overhang path below.
+  # proves.
   middot=$(printf '\302\267')
   spaces=${inner//"$dash"/ }
   spaces=${spaces//"$middot"/ }
@@ -1052,18 +1052,13 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
   # columns wider than the otherwise aligned top and content rows (issue
   # #3436; see the constant's definition for provenance and caveats). Accept
   # only that exact overhang and only the typed Grok model/effort title
-  # shape, optionally with the live always-approve mode suffix. This keeps
-  # arbitrary malformed bottoms ambiguous while preserving the complete-box
-  # proof around a genuinely idle or pending Grok composer.
+  # shape. This keeps arbitrary malformed bottoms ambiguous while preserving
+  # the complete-box proof around a genuinely idle or pending Grok composer.
   local overhang
   overhang=$(printf '%*s' "$FM_COMPOSER_GROK_TITLE_OVERHANG" '')
   [ "$spaces" = "$expected$overhang" ] || return 1
   title=${inner//"$dash"/}
   fm_composer_normalize_trim_var title
-  mode_suffix=$(printf ' \302\267 always-approve')
-  case "$title" in
-    *"$mode_suffix") title=${title%"$mode_suffix"} ;;
-  esac
   case "$title" in
     'Grok '*\ \(low\)) effort=low ;;
     'Grok '*\ \(medium\)) effort=medium ;;
