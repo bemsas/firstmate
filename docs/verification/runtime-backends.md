@@ -774,7 +774,7 @@ Verified on 2026-09-24 against grok 1.0.41 (4220f3b224a6) in an isolated Herdr 0
 The titled bottom is the same width as the top and content rows and carries `Grok 4.7 (low) · always-approve`, with U+00B7 MIDDLE DOT between the effort and the mode suffix.
 Before the matcher treated that middle dot as a non-title remainder, the complete box was ambiguous: a visibly empty composer classified `unknown` (blocking `bin/fm-control.sh exit`) and typed text classified `pending-unproven`.
 Byte captures are in `tests/fixtures/grok-composer/`.
-`tests/fm-composer-lib.test.sh` watched the new assertions fail on the unmatched title (`expected empty, got 'unknown'`), then pass after `_fm_composer_titled_bottom_ok` mapped the middle dot and accepted the live always-approve suffix on the existing Grok title path.
+`tests/fm-composer-lib.test.sh` watched the new assertions fail on the unmatched title (`expected empty, got 'unknown'`), then pass after `_fm_composer_titled_bottom_ok` mapped the middle dot on the same-width titled-bottom path.
 Idle and post-turn empty composers classify `empty`; typed `deploy the fix now` classifies `pending`; an oversized bottom whose title is not the Grok model/effort shape remains `unknown`.
 Cursor is deliberately outside this cursor-anchored empty-composer matrix because its terminal cursor is parked outside the composer; tmux's Cursor-specific, process-identity-gated cursorless fallback is covered by the [Cursor Agent CLI](#cursor-agent-cli) section's separate live evidence and drift guard.
 
