@@ -1,0 +1,40 @@
+wt glive ? ❯ grok --always-approve --no-alt-screen --reasoning-effort low
+
+  glive worktree /t/fm-grok-live.CZ9h0W/wt                                                   2.3K / 500K │ [Dashboard]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                                                                │
+  ╰──────────────────────────────────────────────────────────────────────────────── Grok 4.6 (low) · always-approve ─╯
+
+  Shift+Tab:mode  │  Ctrl+.:shortcuts

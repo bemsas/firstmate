@@ -1,0 +1,21 @@
+== 2026-09-24T22:43:46+01:00 grok grok 1.0.41 (4220f3b224a6) [stable] / herdr herdr 0.9.1 / lab session fm-lab-grok-composer-645115-1684
+pane fm-lab-grok-composer-645115-1684:w1:p1 (workspace w1 tab w1:t1)
+agent status after launch: idle
+S1 idle: HEAD verdict=empty | pre-fix lib verdict=unknown
+   bottom title: Grok 4.6 (low) · always-approve 
+S2 typed: HEAD verdict=pending | pre-fix lib verdict=pending-unproven
+S2 fm-control exit on typed composer: rc=1
+   error: task glive's composer visibly holds pending text; refusing to type the /exit exit command because it would concatenate onto that text. Clear or submit the pending text, then retry 'exit' - or use 'stop', which signals the agent process and never types
+   typed text intact, no /exit concatenated
+   agent status: idle
+S3 cleared composer: HEAD verdict=empty | pre-fix lib verdict=unknown
+S4 post-turn empty composer (agent idle): HEAD verdict=empty | pre-fix lib verdict=unknown
+S5a PRE-FIX fm-control exit on empty grok composer: rc=1
+   error: task glive's composer state is 'unknown', not proven empty; refusing to type the /exit exit command because it could concatenate onto existing text. Clear the composer, then retry 'exit' - or use 'stop', which signals the agent process and never types, for a worker whose screen cannot be read at all
+   agent status: idle
+S5b HEAD fm-control exit on empty grok composer: rc=0
+   stopped glive harness=grok backend=herdr endpoint=fm-lab-grok-composer-645115-1684:w1:p1 worktree=/tmp/fm-grok-live.CZ9h0W/wt
+   agent status after exit: 
+   endpoint pane w1:p1 still present
+   worktree uncommitted file preserved
+teardown: fm-lab-grok-composer-645115-1684 removed

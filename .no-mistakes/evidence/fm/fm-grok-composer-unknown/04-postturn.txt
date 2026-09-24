@@ -1,0 +1,40 @@
+wt glive ? ❯ grok --always-approve --no-alt-screen --reasoning-effort low
+
+  glive worktree /t/fm-grok-live.CZ9h0W/wt                                                    26K / 500K │ [Dashboard]
+
+
+     ❯ Reply with only the word ok. Do not use tools.                                                       10:43 PM
+
+
+     ◆ Thought for 0.1s
+
+     ok                                                                                                     10:43 PM
+
+     Worked for 3.5s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                                                                │
+  ╰──────────────────────────────────────────────────────────────────────────────── Grok 4.6 (low) · always-approve ─╯
+
+  Shift+Tab:mode  │  Ctrl+.:shortcuts
