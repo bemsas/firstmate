@@ -1,0 +1,44 @@
+## Scenario 3: normal-size fleet — --contribution-input output unchanged base vs target
+base exit=0
+target exit=0
+IDENTICAL output (2663 bytes)
+{"ids":["ship-task","queued-task"],"tasks":0}
+
+## Scenario 4: full --json snapshot + fm-fleet-view on the oversized home (target)
+--json exit=0
+stderr:
+{"backlog_records":["huge-task","small-task"],"contributions":"object"}
+default view exit=0
+{
+  "schema": "fm-fleet-snapshot.v1",
+  "generated": "2026-09-24T21:36:06Z",
+  "fm_home": "/tmp/fmsnap-lab.yg2T/home",
+  "roots": {
+    "fm_root": "/home/bemsas/.no-mistakes/worktrees/e6b827affbab/01M3AN8EFE5GEYPPXZ02FR0DKX",
+    "state": "/tmp/fmsnap-lab.yg2T/home/state",
+    "data": "/tmp/fmsnap-lab.yg2T/home/data",
+    "config": "/tmp/fmsnap-lab.yg2T/home/config",
+    "projects": "/tmp/fmsnap-lab.yg2T/home/projects"
+  },
+  "backlog": {
+    "path": "/tmp/fmsnap-lab.yg2T/home/data/backlog.md",
+    "present": true,
+    "records": [
+      {
+        "order": 1,
+        "state": "in_flight",
+        "structured": true,
+        "id": "huge-task",
+        "checked": false,
+        "title": "Huge Task",
+        "repo": "alpha",
+        "kind": "ship",
+        "priority": null,
+        "hold_reason": null,
+        "hold_kind": null,
+        "hold_until": null,
+        "hold_set": null,
+        "blocked_by": null,
+
+base --json on same home for comparison:
+base --json exit=0

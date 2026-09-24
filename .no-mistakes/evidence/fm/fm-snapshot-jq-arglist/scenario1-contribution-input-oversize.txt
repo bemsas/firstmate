@@ -1,0 +1,15 @@
+## Scenario 1: fm-fleet-snapshot.sh --contribution-input with backlog.md of 2105525 bytes (ARG_MAX=2097152)
+
+### BASE aec043c (before fix)
+$ FM_HOME=$H bin/fm-fleet-snapshot.sh --contribution-input > out.json
+exit=0
+stderr:
+/tmp/fmsnap-lab.yg2T/base/bin/fm-fleet-snapshot.sh: line 1991: /usr/bin/jq: Argument list too long
+stdout bytes: 0
+
+### TARGET 04f5fc8 (after fix)
+exit=0
+stderr:
+stdout bytes: 2107924
+parsed summary:
+{"backlog_present":true,"records":[{"id":"huge-task","structured":true,"section":null,"detail_len":0},{"id":"small-task","structured":true,"section":null,"detail_len":0}],"tasks_type":"array"}

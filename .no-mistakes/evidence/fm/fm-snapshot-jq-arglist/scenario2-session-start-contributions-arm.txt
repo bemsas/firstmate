@@ -1,0 +1,12 @@
+## Scenario 2: session-start bootstrap step (fm-bootstrap.sh:1663) — fm-contributions.sh arm --if-owned on the oversized home
+
+### base
+exit=0
+stderr:
+/tmp/fmsnap-lab.yg2T/base/bin/fm-fleet-snapshot.sh: line 1991: /usr/bin/jq: Argument list too long
+contributions.check.sh registered: no
+
+### target
+exit=0
+stderr:
+contributions.check.sh registered: no
