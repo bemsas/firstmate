@@ -201,8 +201,16 @@ fm_backend_detect_cmux_fallback() {
 # inside a command substitution, so an adapter sourced there never reaches this
 # shell. A caller that cannot see the owner would get "not a shell" for every
 # process - the one answer that licenses a signal.
-# shellcheck source=bin/fm-agent-process-lib.sh
-. "$FM_BACKEND_LIB_DIR/fm-agent-process-lib.sh"
+# The owner and the siblings it sources are loaded only when all are readable,
+# so a missing file leaves fm_backend_source to refuse by name instead of
+# aborting every consumer here; fm_backend_process_is_shell refuses while the
+# owner is absent.
+if [ -f "$FM_BACKEND_LIB_DIR/fm-agent-process-lib.sh" ] && [ -r "$FM_BACKEND_LIB_DIR/fm-agent-process-lib.sh" ] \
+  && [ -f "$FM_BACKEND_LIB_DIR/fm-session-lock-lib.sh" ] && [ -r "$FM_BACKEND_LIB_DIR/fm-session-lock-lib.sh" ] \
+  && [ -f "$FM_BACKEND_LIB_DIR/fm-gemini-lib.sh" ] && [ -r "$FM_BACKEND_LIB_DIR/fm-gemini-lib.sh" ]; then
+  # shellcheck source=bin/fm-agent-process-lib.sh
+  . "$FM_BACKEND_LIB_DIR/fm-agent-process-lib.sh"
+fi
 
 # fm_backend_process_alive: 0 when <pid> names a live process. Signal 0 tests
 # existence and permission without delivering anything.
@@ -257,8 +265,11 @@ fm_backend_process_cwd() {  # <pid>
 # be a list that drifts: the one kept here recognized six names while the owner
 # recognized ten, so a pane whose shell is ash, mksh, tcsh, or csh read as "not
 # a shell" and was signallable.
+# Without the owner loaded no name can be classified, so this answers "shell",
+# the verdict that refuses the signal.
 fm_backend_process_is_shell() {  # <pid>
   local comm
+  declare -F fm_agent_process_classify_name >/dev/null || return 0
   comm=$(fm_backend_process_comm "$1") || return 1
   [ "$(fm_agent_process_classify_name "$comm")" = shell ]
 }
