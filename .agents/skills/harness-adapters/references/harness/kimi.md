@@ -1,6 +1,6 @@
 # Kimi Code
 
-Verified on 2026-09-17 with Kimi Code CLI 2.0.0; workspace trust re-verified on 2026-09-19 against 2.0.1 with the single-record helper.
+Verified on 2026-09-17 with Kimi Code CLI 2.0.0; workspace trust re-verified on 2026-09-19 against 2.0.1 with the single-record helper; the submit-settle and composer-footer facts below were verified live on 2026-09-28 against 2.1.1, K3 model, over the herdr backend.
 
 ## Operating facts
 
@@ -15,9 +15,9 @@ Verified on 2026-09-17 with Kimi Code CLI 2.0.0; workspace trust re-verified on 
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; Firstmate skills are discovered. |
 | Autonomy | `--auto` is the `Never Ask` tier; `-y` and `--yolo` now select the distinct, weaker `Ask When Needed` tier and are not used. |
 | Trust dialog | A fresh worktree shows `Trust this folder?` with `Trust this folder` pre-selected, whether or not the folder has any project MCP configuration, because Kimi trusts each exact root separately and never inherits trust from a parent; `../../../bin/fm-spawn.sh` pre-registers every crewmate or scout worktree in Kimi's own per-root store `~/.kimi-code/workspace-trust/` through `../../../bin/fm-kimi-trust.sh` before launch and refuses the spawn when that fails, so the dialog does not render; the live answer described under Readiness-gated start remains the backstop for a dialog that renders anyway, and its diagnostic then names the two trust causes - the record was not honoured, or the pane read a different store - rather than reporting a delivery drop. |
-| Slash submission | One Enter submits, with no popup swallow or settle hazard. |
+| Slash submission | No popup swallow, but kimi-code 2.1.1 can swallow an Enter sent immediately after the pointer is typed, before Kimi is ready to accept it (verified live: with no pause the pointer sat typed but unsent until a human pressed Enter by hand); `../../../bin/fm-spawn.sh` sleeps `FM_KIMI_SUBMIT_SETTLE` (default 1.5s) after typing and before its first Enter, retried through the shared submit core exactly as the trust-dialog answer is. |
 | Environment marker | None; identity comes from process ancestry command name `kimi`, which `../../../bin/fm-harness.sh` keeps a retained foreign marker from overriding. |
-| Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
+| Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text; kimi-code 2.1.1 draws two of its own status rows directly below the closing border with no blank separator - the autonomy tier, model, and reasoning-effort label (`Never Ask  K3 thinking: high  …/project  ctrl+o expand`), then a separate right-aligned context-usage row (`context: 3% (26.9k/1M)`) - both of which `bin/fm-composer-lib.sh`'s shared classifier recognizes as furniture rather than unclaimed activity (`FM_COMPOSER_KIMI_STATUS_RE_DEFAULT`). |
 | Effort | `kimi provider list --json` exposes per-model `supportEfforts` values `low`, `high`, and `max` plus a `defaultEffort`; the launch flag and mapping remain unverified, so spawn records and omits requested effort per `references/common/model-and-effort.md`. |
 
 ## Readiness-gated start

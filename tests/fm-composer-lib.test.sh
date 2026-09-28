@@ -735,13 +735,45 @@ test_matrix_kimi_bordered_shell_glyph_box() {
   # Kimi's bordered `│ > │` composer - the shape fm-spawn.sh's retired
   # spawn-local regex used to own. Now the shared owner proves it everywhere,
   # which is what kimi launch-readiness and delivery route through.
-  local screen
+  local screen footer two_row_footer typed_footer unclaimed_footer
   screen=$'╭────────────────────────╮\n│ >                      │\n╰────────────────────────╯'
   assert_screen "kimi idle on tmux" empty "$CAPS_TMUX" "$screen" 1
   assert_screen "kimi idle on cmux/orca" empty "$CAPS_PLAIN" "$screen"
   assert_screen "kimi idle on herdr" empty "$CAPS_STYLED" "$screen"
   assert_screen "kimi idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
-  pass "matrix: kimi's bordered shell-glyph box reads empty through the shared owner (spawn's fourth copy retired)"
+  # kimi-code 2.1.1 draws its autonomy/effort status row directly below the
+  # closing border with no blank separator (verified live), the exact shape
+  # docs/verification/runtime-backends.md recorded as still unaddressed at
+  # kimi 2.0.2: cursorless read unknown because nothing proved the row below
+  # the box was furniture rather than unclaimed activity.
+  footer=$'╭────────────────────────╮\n│ >                      │\n╰────────────────────────╯\nNever Ask  K3 thinking: high'
+  assert_screen "kimi 2.1.1 idle with contiguous status footer on tmux" empty "$CAPS_TMUX" "$footer" 1
+  assert_screen "kimi 2.1.1 idle with contiguous status footer on cmux/orca" empty "$CAPS_PLAIN" "$footer"
+  assert_screen "kimi 2.1.1 idle with contiguous status footer on herdr" empty "$CAPS_STYLED" "$footer"
+  assert_screen "kimi 2.1.1 idle with contiguous status footer on zellij" empty "$CAPS_STYLED_NOID" "$footer"
+  # The exact two-row shape captured from a real live spawn (kimi-code 2.1.1,
+  # herdr backend, commercialeye project, 2026-09-28): the autonomy/effort row
+  # plus a SEPARATE right-aligned context-usage row directly beneath it, the
+  # combination that first exposed the single-row fixture above as incomplete
+  # - kimi_wait_for_delivery kept reading `unknown` through a real completed
+  # turn until both rows were taught as furniture.
+  two_row_footer=$'╭────────────────────────╮\n│ >                      │\n╰────────────────────────╯\nNever Ask  K3 thinking: high  …/commercialeye-b12d5a/3/commercialeye             ctrl+o expand\n                                                                        context: 3% (26.9k/1M)'
+  assert_screen "kimi 2.1.1 idle with the real two-row status footer on cmux/orca" empty "$CAPS_PLAIN" "$two_row_footer"
+  assert_screen "kimi 2.1.1 idle with the real two-row status footer on herdr" empty "$CAPS_STYLED" "$two_row_footer"
+  assert_screen "kimi 2.1.1 idle with the real two-row status footer on zellij" empty "$CAPS_STYLED_NOID" "$two_row_footer"
+  # The asymmetry holds: real typed content in the box still wins over the
+  # furniture demotion below it. Cursorless backends only - a cursor-mode
+  # read (tmux) resolves the composer directly from the cursor row and never
+  # consults content below the box, on either side of this fix.
+  typed_footer=$'╭────────────────────────╮\n│ > fix the login bug    │\n╰────────────────────────╯\nNever Ask  K3 thinking: high'
+  assert_screen "kimi 2.1.1 typed with contiguous status footer on cmux/orca" pending "$CAPS_PLAIN" "$typed_footer"
+  assert_screen "kimi 2.1.1 typed with contiguous status footer on herdr" pending "$CAPS_STYLED" "$typed_footer"
+  # Unclaimed activity that is not the documented status shape still refuses
+  # rather than being swept up as furniture by the new demotion.
+  unclaimed_footer=$'╭────────────────────────╮\n│ >                      │\n╰────────────────────────╯\nWorking on request...'
+  assert_screen "kimi box above unrelated activity stays unknown on cmux/orca" unknown "$CAPS_PLAIN" "$unclaimed_footer"
+  assert_screen "kimi box above unrelated activity stays unknown on herdr" unknown "$CAPS_STYLED" "$unclaimed_footer"
+  pass "matrix: kimi's bordered shell-glyph box reads empty through the shared owner (spawn's fourth copy retired), with or without its contiguous status footer"
 }
 
 test_matrix_claude_inside_zellij_ansi_dump() {

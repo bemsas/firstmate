@@ -5250,7 +5250,11 @@ if [ "$HARNESS" = kimi ]; then
   KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
   KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
   KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
-  KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
+  # Kimi swallows an Enter sent immediately after the pointer is typed, the
+  # same startup-window hazard kimi_wait_for_ready retries around for the
+  # trust dialog; a 0 settle left the pointer typed but unsent until a human
+  # pressed Enter by hand (verified live, kimi-code 2.1.1). 1.5s cleared it.
+  KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-1.5}
   if ! KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
     "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
     "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W"); then

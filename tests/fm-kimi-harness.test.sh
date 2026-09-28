@@ -257,7 +257,19 @@ EOF
 run_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
   shift 6
-  HOME="$home" KIMI_CODE_HOME='' FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  # Every ordinary test keeps its own submit settle at 0 so the suite stays
+  # fast; test_kimi_submit_settle_defaults_nonzero sets
+  # FM_KIMI_SUBMIT_SETTLE_UNFORCED=1 to leave the variable genuinely unset in
+  # the spawned process instead, so fm-spawn.sh's own default is what runs.
+  # A bash prefix-assignment word must be a literal `name=value` token at
+  # parse time, so an expanded array element here would otherwise be run as
+  # a command instead of exported into the child; `env` parses its own argv
+  # at runtime and accepts either form, which is why the whole invocation
+  # below routes through it rather than bash's own assignment-prefix syntax.
+  local settle_env=(FM_KIMI_SUBMIT_SETTLE="${FM_KIMI_SUBMIT_SETTLE:-0}")
+  [ "${FM_KIMI_SUBMIT_SETTLE_UNFORCED:-0}" != 1 ] || settle_env=()
+  env \
+    HOME="$home" KIMI_CODE_HOME='' FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
@@ -277,6 +289,7 @@ run_spawn() {
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/launch-brief.md" \
     FM_KIMI_READY_POLLS="${FM_KIMI_READY_POLLS:-2}" FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
+    "${settle_env[@]}" \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness kimi --mode no-mistakes --yolo off "$@" 2>&1
 }
@@ -356,6 +369,32 @@ test_kimi_launch_then_send_is_verified() {
   assert_present "$record" "kimi spawn did not pre-register its worktree in Kimi's trust store"
   assert_grep "\"root\":\"$wt_real\"" "$record" "kimi trust record does not name the resolved worktree"
   pass "fm-spawn: kimi pre-trusts its worktree, launches, delivers its brief, and registers a guarded turn-end token"
+}
+
+test_kimi_submit_settle_defaults_nonzero() {
+  # kimi-code 2.1.1 swallows an Enter sent immediately after its pointer is
+  # typed (verified live): with no settle the pointer sits typed but unsent
+  # until a human presses Enter by hand. Every other test in this file pins
+  # its own settle to 0 to stay fast (run_spawn's default); this one leaves
+  # FM_KIMI_SUBMIT_SETTLE genuinely unset so fm-spawn.sh's own default runs,
+  # and asserts it is a real pause rather than 0.
+  local id rec launch_dir start end elapsed out rc
+  id="kimi-settledefault-z1-$$"
+  rec=$(make_spawn_case settledefault "$id")
+  read_spawn_record "$rec"
+  launch_dir=$(kimi_launch_dir "$id" "$HOME_DIR")
+  rm -rf "$launch_dir"
+  start=$(date +%s)
+  out=$(FM_KIMI_SUBMIT_SETTLE_UNFORCED=1 run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model kimi-code/k3)
+  rc=$?
+  end=$(date +%s)
+  elapsed=$((end - start))
+  expect_code 0 "$rc" "kimi spawn with fm-spawn.sh's own default submit settle should still succeed: $out"
+  [ "$elapsed" -ge 1 ] \
+    || fail "kimi spawn with no FM_KIMI_SUBMIT_SETTLE override completed in ${elapsed}s; fm-spawn.sh's own default must pause meaningfully before the first Enter"
+  pass "fm-spawn: kimi's own default submit settle pauses before the first Enter with no override set"
 }
 
 path_mode() {
@@ -1173,6 +1212,7 @@ test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
+test_kimi_submit_settle_defaults_nonzero
 test_kimi_spawn_refuses_shared_task_temp_root
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation

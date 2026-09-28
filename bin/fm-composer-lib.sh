@@ -482,6 +482,24 @@ FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
 # is deliberately not matched - and the marker is quantifier-free so the same
 # bytes match under LC_ALL=C as under a UTF-8 locale.
 FM_COMPOSER_MODE_HINT_RE_DEFAULT='^[[:space:]]*(⏵|⏸)'
+# Kimi draws TWO of its own status rows directly below its bordered composer
+# (verified live on kimi-code 2.1.1 against a real spawn, commercialeye
+# project, herdr backend): one closing over the autonomy tier, the model, its
+# reasoning-effort label, the cwd, and an expand hint (`Never Ask  K3
+# thinking: high  …/project  ctrl+o expand`), the other holding a
+# right-aligned context-usage readout on its own row directly beneath that
+# (`context: 3% (26.9k/1M)`) - the same field kimi_delivery_is_confirmed
+# (bin/fm-spawn.sh) already reads as a submission proof, but on a row of its
+# own rather than sharing the first. Both are furniture, not typed content.
+# Kimi's own `kimi provider list --json` reports supportEfforts values low,
+# high, and max; medium is tolerated for a future model that reports it.
+# `thinking:` followed by one of those levels anchors the first row - the
+# autonomy-tier wording ahead of it is free text and is deliberately not
+# matched; `context:` followed by a percentage anchors the second, at any
+# value, unlike kimi_delivery_is_confirmed's own nonzero-only reading of the
+# same field, because furniture recognition must hold before a turn starts
+# context accruing too.
+FM_COMPOSER_KIMI_STATUS_RE_DEFAULT='thinking:[[:space:]]*(low|medium|high|max)([[:space:]]|$)|context:[[:space:]]*[0-9]+(\.[0-9]+)?%'
 # omp (Oh My Pi) draws a one-row status line directly BELOW its borderless
 # composer: an identity or spinner cell, then middle-dot separated model, path,
 # git, and context cells. Verified live through Herdr on omp 18.1.11:
@@ -1549,11 +1567,12 @@ _fm_composer_row_below_floor_ok() {  # <trimmed-row>
 
 # _fm_composer_row_is_composer_furniture: 0 when <trimmed-row> is DEMONSTRABLY
 # a harness's own furniture drawn below its composer, given <proof-glyph> - the
-# agent glyph that proved the envelope above it. Exactly four things qualify,
+# agent glyph that proved the envelope above it. Exactly five things qualify,
 # every one of them already owned elsewhere in this file:
 #   - omp's status row and braille-only animation rows, the two furniture rows
 #     that already bound a bare composer's wrap region;
 #   - claude's permission-mode hint row (FM_COMPOSER_MODE_HINT_RE_DEFAULT);
+#   - kimi's autonomy/effort status row (FM_COMPOSER_KIMI_STATUS_RE_DEFAULT);
 #   - a row leading with an agent glyph OTHER than the one that proved the
 #     envelope. One pane runs one harness, so a foreign prompt glyph is never
 #     that harness's second composer - this is the `→` statusLine that started
@@ -1569,6 +1588,8 @@ _fm_composer_row_is_composer_furniture() {  # <trimmed-row> <proof-glyph>
   _fm_composer_row_is_braille_furniture "$row" && return 0
   fm_composer_idle_matches "$row" \
     "${FM_COMPOSER_MODE_HINT_RE:-$FM_COMPOSER_MODE_HINT_RE_DEFAULT}" sensitive && return 0
+  fm_composer_idle_matches "$row" \
+    "${FM_COMPOSER_KIMI_STATUS_RE:-$FM_COMPOSER_KIMI_STATUS_RE_DEFAULT}" insensitive && return 0
   fm_composer_leading_agent_glyph_var glyph "$row" || return 1
   [ -n "$proof" ] && [ "$glyph" != "$proof" ]
 }
@@ -1744,6 +1765,26 @@ _fm_composer_select_cursorless() {
     if [ "$footer" = 1 ] && [ "$FM_COMPOSER_FOOTER_AFTER" = "$boundary" ]; then
       next=$((FM_COMPOSER_FOOTER_LAST + 1))
     fi
+    # A harness may draw its own furniture directly below a fully-closed
+    # envelope with no bare candidate anywhere below it to demote (kimi's
+    # `Never Ask  K3 thinking: high` status row below its bordered composer,
+    # verified live on kimi-code 2.1.1). The footer zone above exists for a
+    # different problem - a foreign bare candidate masquerading as a second
+    # composer - and requires one to be present, so walk every contiguous row
+    # _fm_composer_row_is_composer_furniture proves is furniture here,
+    # independent of that gate.
+    while :; do
+      raw=$(_fm_composer_screen_row "$next" "$plain")
+      trimmed=$raw
+      fm_composer_normalize_trim_var trimmed
+      [ -n "$trimmed" ] || break
+      if [ "$FM_COMPOSER_SELECTED_KIND" = box ]; then
+        _fm_composer_row_is_composer_furniture "$trimmed" "$FM_COMPOSER_SCAN_BOX_GLYPH" || break
+      else
+        _fm_composer_row_is_composer_furniture "$trimmed" "$FM_COMPOSER_SCAN_LEFTBAR_GLYPH" || break
+      fi
+      next=$((next + 1))
+    done
     raw=$(_fm_composer_screen_row "$next" "$plain")
     trimmed=$raw
     fm_composer_normalize_trim_var trimmed
