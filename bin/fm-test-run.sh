@@ -102,7 +102,10 @@
 #   mode refuses before selecting a suite: the suite creates and switches
 #   branches, and the primary is the checkout every linked worktree resolves
 #   against. Inspection modes execute nothing and stay available, and a run with
-#   no FM_TASK_ID set is unchanged.
+#   no FM_TASK_ID set is unchanged. A per-task full clone has the primary
+#   checkout's shape by design, so it is accepted only when it passes
+#   bin/fm-clone-copy-lib.sh's registration proof as FM_TASK_ID's copy, checked
+#   against the home and config its marker names.
 #
 # Exit status is non-zero if any selected script exits non-zero, a configured
 # --fail-on-gate-skip token appears, the measured duration exceeds
@@ -248,6 +251,17 @@ now_iso() {
 # reached through a different path. When git resolves neither directory - a
 # non-repository fixture, a detached copy - nothing proves this is the primary,
 # so the run proceeds.
+registered_clone_copy_for_task() { # <top> <task-id>
+  local top=$1 task_id=$2 home config project
+  [ -f "$ROOT/bin/fm-clone-copy-lib.sh" ] || return 1
+  # shellcheck source=bin/fm-clone-copy-lib.sh
+  . "$ROOT/bin/fm-clone-copy-lib.sh" || return 1
+  home=$(fm_clone_copy_marker_field "$top" home) || return 1
+  config=$(fm_clone_copy_marker_field "$top" config) || return 1
+  project=$(fm_clone_copy_marker_field "$top" project) || return 1
+  fm_clone_copy_is_registered "$top" "$project" "$task_id" "$home" "$config"
+}
+
 refuse_primary_checkout_for_task() {
   local task_id git_dir common_dir top
   task_id=${FM_TASK_ID:-}
@@ -259,6 +273,9 @@ refuse_primary_checkout_for_task() {
   [ -n "$git_dir" ] && [ -n "$common_dir" ] || return 0
   [ "$git_dir" = "$common_dir" ] || return 0
   top=$(cd "$ROOT" && pwd -P)
+  if registered_clone_copy_for_task "$top" "$task_id"; then
+    return 0
+  fi
   die "refusing to run in the repository primary checkout $top while FM_TASK_ID=$task_id is set; run from the assigned task worktree instead"
 }
 
@@ -727,7 +744,7 @@ tests/fm-classify-decision-key.test.sh 4362
 tests/fm-claude-stop-autoarm-live-e2e.test.sh 73
 tests/fm-claude-stop-autoarm.test.sh 61189
 tests/fm-claude-trust.test.sh 12010
-tests/fm-clone-copy.test.sh 13807
+tests/fm-clone-copy.test.sh 24101
 tests/fm-cmux-claude-composer-live-e2e.test.sh 77
 tests/fm-codex-continuity-live-e2e.test.sh 108
 tests/fm-codex-hook-layer-live-e2e.test.sh 108

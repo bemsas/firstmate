@@ -110,7 +110,7 @@ if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
 fi
 if [ "$(grep '^isolation=' "$META" | cut -d= -f2- || true)" = clone ]; then
   WT=$(grep '^worktree=' "$META" | cut -d= -f2- || true)
-  fm_clone_copy_is_registered "$WT" "$PROJ" "$ID" || {
+  fm_clone_copy_is_registered "$WT" "$PROJ" "$ID" "$FM_HOME" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" || {
     echo "error: task $ID's recorded clone copy '${WT:-none}' is not its registered clone of $PROJ ($FM_CLONE_COPY_REASON); refusing to carry its branch" >&2
     exit 1
   }

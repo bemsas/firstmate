@@ -1095,10 +1095,12 @@ Without the token, or with `isolation=worktree`, spawning is unchanged, and `bin
 
 Each clone lives at `<root>/<task-id>/<project-name>`.
 The default root is `$HOME/.firstmate/clones/<home-token>`, outside the home so the worker never inherits the home's own instruction files from a parent directory.
-The optional local, gitignored `config/clone-root` replaces that root with the absolute path on its first line.
+The optional local, gitignored `config/clone-root` replaces that root with the absolute path on its first line, which must lie outside both the home and the project.
 The clone starts detached at origin's base branch (`--base-branch` when given, otherwise origin's default branch), carries the primary clone's repo-local `user.name` and `user.email`, and is recorded as the task's `worktree=` with `isolation=clone`.
 A clone spawn refuses on the orca backend and for a no-mistakes ship, which needs the pipeline remote only the primary clone holds, so register such a project `direct-PR` or `local-only`.
-A local-only landing carries the task branch from the clone into the project before fast-forwarding, and cleanup removes the clone only after the ordinary landed-work checks pass.
+A local-only landing carries the task branch from the clone into the project before fast-forwarding.
+Because cleanup deletes the whole clone, it refuses while any local branch tip is on no remote and not in the project's local default branch, or any stash exists, in addition to the ordinary landed-work checks.
+A recorded copy that is not exactly this home's registered path for the task is never touched, even with `--force`.
 [`bin/fm-clone-copy-lib.sh`](../bin/fm-clone-copy-lib.sh) owns the location, creation, registration proof, and removal.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)

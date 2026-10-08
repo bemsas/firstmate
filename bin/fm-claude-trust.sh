@@ -9,13 +9,15 @@
 # on rather than answered on the human's behalf.
 #
 # Usage: fm-claude-trust.sh <worktree> <project>
-#        fm-claude-trust.sh --clone-copy <copy> <project> <id>
+#        fm-claude-trust.sh --clone-copy <copy> <project> <id> <home> <config>
 #        fm-claude-trust.sh --secondmate-home <home> <id>
 #        fm-claude-trust.sh --lab-home <home>
 #   <worktree>  the isolated task worktree this spawn launches into
 #   <project>   the primary checkout that worktree belongs to
 #   <copy>      the per-task clone of <project> this spawn launches into, for a
 #               project registered isolation=clone
+#   <home> <config>  the firstmate home and config directory that registered
+#               <copy>, from which its copies root is recomputed
 #   <home>      the seeded secondmate home this spawn launches into
 #   <id>        the secondmate id that home must already be marked for
 #   --lab-home  the disposable lab home bin/fm-live-lab.sh launches a lab
@@ -126,9 +128,10 @@
 # CLONE-COPY MODE. A per-task clone is a primary checkout of its own, so the
 # worktree test above refuses it by design. The evidence is the registration
 # bin/fm-clone-copy-lib.sh writes when spawn creates the copy, judged by that
-# library's fm_clone_copy_is_registered: a clone with its own repository at
-# exactly the argument, sharing no git dir with <project>, whose marker is a
-# regular file this user owns naming that project and <id>. Claude Code's
+# library's fm_clone_copy_is_registered against <home> and <config>: exactly
+# that home's copy path for <id> and <project>, a clone with its own repository
+# sharing no git dir with <project>, whose marker binds all of those and that
+# git directory. Claude Code's
 # canonical root for a clone is the clone itself, so trust and any carried
 # external-imports consent land on the clone's own entry only. That consent is
 # gated exactly as in worktree mode, on <project>'s canonical primary-checkout
@@ -201,7 +204,7 @@ unset CDPATH \
 
 usage() {
   echo "usage: fm-claude-trust.sh <worktree> <project>" >&2
-  echo "       fm-claude-trust.sh --clone-copy <copy> <project> <id>" >&2
+  echo "       fm-claude-trust.sh --clone-copy <copy> <project> <id> <home> <config>" >&2
   echo "       fm-claude-trust.sh --secondmate-home <home> <id>" >&2
   echo "       fm-claude-trust.sh --lab-home <home>" >&2
   exit 2
@@ -212,11 +215,13 @@ usage() {
 # correctly in both modes.
 case "${1:-}" in
   --clone-copy)
-    [ "$#" -eq 4 ] || usage
+    [ "$#" -eq 6 ] || usage
     MODE=clone-copy
     TARGET_ARG=$2
     PROJ_ARG=$3
     SUB_ID=$4
+    CLONE_HOME=$5
+    CLONE_CONFIG=$6
     SCOPE_NOUN="task clone copy"
     ;;
   --secondmate-home)
@@ -358,7 +363,7 @@ if [ "$MODE" = worktree ]; then
   [ "$WT_COMMON" = "$PROJ_COMMON" ] || refuse "'$TARGET_REAL' is not a worktree of project '$PROJ_REAL'"
   resolve_project_canon
 elif [ "$MODE" = clone-copy ]; then
-  fm_clone_copy_is_registered "$TARGET_REAL" "$PROJ_REAL" "$SUB_ID" \
+  fm_clone_copy_is_registered "$TARGET_REAL" "$PROJ_REAL" "$SUB_ID" "$CLONE_HOME" "$CLONE_CONFIG" \
     || refuse "'$TARGET_REAL' is not task $SUB_ID's registered clone copy of project '$PROJ_REAL': $FM_CLONE_COPY_REASON"
   PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
   [ -n "$PROJ_COMMON" ] || refuse "project '$PROJ_REAL' is not inside a git repository"

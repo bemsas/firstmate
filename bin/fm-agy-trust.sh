@@ -5,11 +5,12 @@
 # dialog and running its turn in agy's own scratch directory.
 #
 # Usage: fm-agy-trust.sh <worktree> <project>
-#        fm-agy-trust.sh --clone-copy <copy> <project> <id>
+#        fm-agy-trust.sh --clone-copy <copy> <project> <id> <home> <config>
 #   <worktree>  the isolated task worktree this spawn launches into
 #   <project>   the primary checkout that worktree belongs to
 #   <copy>      the per-task clone of <project> for task <id>, for a project
-#               registered isolation=clone
+#               registered isolation=clone by firstmate home <home> whose
+#               config directory is <config>
 # Prints one line naming what it registered; refuses loudly on anything else.
 #
 # WHY THIS EXISTS. agy 1.2.0 gates a folder it has never seen behind
@@ -46,8 +47,10 @@ unset CDPATH \
 
 CLONE_ID=
 if [ "${1:-}" = --clone-copy ]; then
-  [ "$#" -eq 4 ] || { echo "usage: fm-agy-trust.sh --clone-copy <copy> <project> <id>" >&2; exit 2; }
+  [ "$#" -eq 6 ] || { echo "usage: fm-agy-trust.sh --clone-copy <copy> <project> <id> <home> <config>" >&2; exit 2; }
   CLONE_ID=$4
+  CLONE_HOME=$5
+  CLONE_CONFIG=$6
   shift
   set -- "$1" "$2"
 fi
@@ -82,7 +85,7 @@ HOME_REAL=$(real_dir "$HOME") || true
 if [ -n "$CLONE_ID" ]; then
   # shellcheck source=bin/fm-clone-copy-lib.sh
   . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/fm-clone-copy-lib.sh"
-  fm_clone_copy_is_registered "$WT_REAL" "$PROJ_REAL" "$CLONE_ID" \
+  fm_clone_copy_is_registered "$WT_REAL" "$PROJ_REAL" "$CLONE_ID" "$CLONE_HOME" "$CLONE_CONFIG" \
     || refuse "'$WT_REAL' is not task $CLONE_ID's registered clone copy of project '$PROJ_REAL': $FM_CLONE_COPY_REASON"
 else
   WT_TOP=$(git -C "$WT_REAL" rev-parse --show-toplevel 2>/dev/null) || true

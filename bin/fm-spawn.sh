@@ -1412,7 +1412,7 @@ spawn_abort_cleanup() {
   if [ "$CLONE_ABORT_CLEANUP" = 1 ]; then
     CLONE_ABORT_CLEANUP=0
     if [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
-      fm_clone_copy_remove "$WT" "$PROJ_ABS" "$ID" || true
+      fm_clone_copy_remove "$WT" "$PROJ_ABS" "$ID" "$FM_HOME" "$CONFIG" || true
     fi
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
@@ -3460,7 +3460,7 @@ spawn_worktree_isolated() { # <path>
     SPAWN_WT_REASON="it is the repository's primary checkout (its git dir is the spawning project's common git dir)"
     return 1
   fi
-  if [ "$ISOLATION" = clone ] && ! fm_clone_copy_is_registered "$path" "$PROJ_ABS" "$ID"; then
+  if [ "$ISOLATION" = clone ] && ! fm_clone_copy_is_registered "$path" "$PROJ_ABS" "$ID" "$FM_HOME" "$CONFIG"; then
     SPAWN_WT_REASON="it is not this task's registered clone copy ($FM_CLONE_COPY_REASON)"
     return 1
   fi
@@ -4456,7 +4456,8 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$ISOLATION" = clone ]; then
   WT=$(fm_clone_copy_path "$FM_HOME" "$CONFIG" "$ID" "$PROJ_ABS") || exit 1
-  fm_clone_copy_create "$PROJ_ABS" "$WT" "$ID" || exit 1
+  fm_clone_copy_create "$PROJ_ABS" "$FM_HOME" "$CONFIG" "$ID" || exit 1
+  WT=$(fm_clone_copy_real_dir "$WT")
   CLONE_ABORT_CLEANUP=1
   validate_spawn_worktree "per-task clone" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
@@ -4582,7 +4583,7 @@ claude*)
   if [ "$KIND" = secondmate ]; then
     spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
   elif [ "$ISOLATION" = clone ]; then
-    spawn_trust_args=(--clone-copy "$WT" "$PROJ_ABS" "$ID")
+    spawn_trust_args=(--clone-copy "$WT" "$PROJ_ABS" "$ID" "$FM_HOME" "$CONFIG")
   else
     spawn_trust_args=("$WT" "$PROJ_ABS")
   fi
@@ -4594,7 +4595,7 @@ claude*)
 agy)
   if [ "$KIND" != secondmate ]; then
     if [ "$ISOLATION" = clone ]; then
-      spawn_agy_trust_args=(--clone-copy "$WT" "$PROJ_ABS" "$ID")
+      spawn_agy_trust_args=(--clone-copy "$WT" "$PROJ_ABS" "$ID" "$FM_HOME" "$CONFIG")
     else
       spawn_agy_trust_args=("$WT" "$PROJ_ABS")
     fi

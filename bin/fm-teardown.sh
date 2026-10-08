@@ -159,7 +159,9 @@
 # inside the clone, whose remote-tracking refs are the real origin's; the
 # local-only fallback instead asks whether the clone's HEAD is merged into the
 # project's own local default branch, since the clone's default branch is
-# its own. When cleanup proceeds the clone directory is removed, because there
+# its own. Because the whole clone is deleted, every other local branch tip must
+# also be on a remote or merged into that local default branch, and any stash
+# refuses (validate_clone_refs_landed). When cleanup proceeds the clone directory is removed, because there
 # is no pool to return it to; forced secondmate retirement proves and removes a
 # child's clone copy the same way.
 # Orca tasks use the same safety checks, then close the recorded terminal and
@@ -1181,7 +1183,7 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 BASE_BRANCH=$(grep '^base_branch=' "$META" | cut -d= -f2- || true)
 ISOLATION=$(fm_meta_get "$META" isolation)
-if [ "$ISOLATION" = clone ] && [ -d "$WT" ] && ! fm_clone_copy_is_registered "$WT" "$PROJ" "$ID"; then
+if [ "$ISOLATION" = clone ] && [ -d "$WT" ] && ! fm_clone_copy_is_registered "$WT" "$PROJ" "$ID" "$FM_HOME" "$CONFIG"; then
   echo "REFUSED: task $ID's recorded clone copy $WT is not its registered clone of $PROJ ($FM_CLONE_COPY_REASON); nothing was changed - not even with --force." >&2
   echo "Reconcile the record (bin/fm-crew-state.sh $ID), then re-run teardown." >&2
   exit 1
@@ -1980,6 +1982,46 @@ validate_worktree_teardown_safety() {
       return 1
     fi
   fi
+  [ "$ISOLATION" != clone ] || validate_clone_refs_landed
+}
+
+# A clone copy is deleted whole, unlike a pool slot whose other branches live on
+# in the shared repository, so every local branch tip and every stash entry must
+# be safe too. HEAD was judged above by the ordinary landed-work rules; every
+# other branch tip must be reachable from a remote-tracking ref or already be an
+# ancestor of the project's own local default branch, and any stash refuses.
+validate_clone_refs_landed() {
+  local default head refs ref tip outside stashes unlanded=
+  default=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
+  head=$(git -C "$WT" rev-parse --verify --quiet HEAD 2>/dev/null) || head=
+  refs=$(git -C "$WT" for-each-ref --format='%(refname)' refs/heads 2>/dev/null) || {
+    echo "REFUSED: cannot list the branches of clone copy $WT, so its unlanded work cannot be ruled out." >&2
+    return 1
+  }
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    if ! tip=$(git -C "$WT" rev-parse --verify --quiet "$ref^{commit}" 2>/dev/null) ||
+      ! outside=$(git -C "$WT" rev-list --max-count=1 "$tip" --not --remotes -- 2>/dev/null); then
+      unlanded+="  ${ref#refs/heads/} (unreadable)"$'\n'
+      continue
+    fi
+    [ "$tip" != "$head" ] || continue
+    [ -n "$outside" ] || continue
+    ! git -C "$PROJ" merge-base --is-ancestor "$tip" "refs/heads/$default" 2>/dev/null || continue
+    unlanded+="  ${ref#refs/heads/} at ${tip:0:12}"$'\n'
+  done <<EOF
+$refs
+EOF
+  stashes=$(git -C "$WT" stash list 2>/dev/null) || {
+    echo "REFUSED: cannot list the stashes of clone copy $WT, so its unlanded work cannot be ruled out." >&2
+    return 1
+  }
+  [ -n "$unlanded" ] || [ -n "$stashes" ] || return 0
+  echo "REFUSED: clone copy $WT holds work that is on no remote and not in local $default, and cleanup deletes the whole clone." >&2
+  [ -z "$unlanded" ] || printf 'unlanded branches:\n%s' "$unlanded" >&2
+  [ -z "$stashes" ] || printf 'stashes:\n%s\n' "$stashes" >&2
+  echo "Push or land those branches and drop or apply the stashes, or get the captain's explicit OK to discard, then --force." >&2
+  return 1
 }
 
 # Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
@@ -3037,7 +3079,7 @@ validate_firstmate_home_children_removal() {
       fi
     elif [ "$(meta_value "$child_meta" isolation)" = clone ] && [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
       child_proj=$(meta_value "$child_meta" project)
-      fm_clone_copy_is_registered "$child_wt" "$child_proj" "$child_id" || {
+      fm_clone_copy_is_registered "$child_wt" "$child_proj" "$child_id" "$home" "$home/config" || {
         echo "REFUSED: child $child_id's recorded clone copy $child_wt is not its registered clone of ${child_proj:-the recorded project} ($FM_CLONE_COPY_REASON)" >&2
         return 1
       }
@@ -3285,7 +3327,7 @@ cleanup_firstmate_home_children() {
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ "$(meta_value "$child_meta" isolation)" = clone ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
-        fm_clone_copy_remove "$child_wt" "$child_proj" "$child_id" || return 1
+        fm_clone_copy_remove "$child_wt" "$child_proj" "$child_id" "$home" "$home/config" || return 1
       fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       # The same ownership determination as the parent's own slot: a child
@@ -3626,7 +3668,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
 elif [ "$ISOLATION" = clone ] && [ -d "$WT" ]; then
-  fm_clone_copy_remove "$WT" "$PROJ" "$ID" || {
+  fm_clone_copy_remove "$WT" "$PROJ" "$ID" "$FM_HOME" "$CONFIG" || {
     echo "error: could not remove clone copy $WT; teardown aborted" >&2
     exit 1
   }
