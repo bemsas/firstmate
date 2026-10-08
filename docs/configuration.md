@@ -7,7 +7,7 @@ Start with the directory layout, then use the setting reference for the behavior
 
 | What you want to configure | Start here |
 | --- | --- |
-| Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
+| Firstmate's code, private files, or project location | [FM_HOME](#fm_home), [operational home layout](#operational-home-layout-and-state), and [per-task clone isolation](#per-task-clone-isolation-isolationclone--configclone-root) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
@@ -1083,6 +1083,23 @@ When every place is held, `bin/fm-spawn.sh` launches nothing, creates no record,
 A malformed or unreadable file refuses every fresh ship or scout spawn until it is fixed, rather than guessing the intended limit, and so does a local home's state directory or task record that cannot be read while counting a capped project's holders.
 Firstmate cannot see which part of a worker's life uses the resource, so the number bounds whole workers from launch to handoff, and the tightest resource every worker needs should decide it.
 [`bin/fm-project-capacity-lib.sh`](../bin/fm-project-capacity-lib.sh) owns the file format, what holds a place, and why concurrent spawns cannot both take the last one.
+
+## Per-task clone isolation (isolation=clone / config/clone-root)
+
+A project whose registry entry in `data/projects.md` carries the bracket token `isolation=clone` gives every ship and scout a dedicated full `git clone` of the project's origin instead of a Treehouse or Orca worktree, for a codebase that must never be worked through git worktrees.
+Without the token, or with `isolation=worktree`, spawning is unchanged, and `bin/fm-project-mode.sh --isolation <project>` reports which one a project registers.
+
+```text
+- siunta [direct-PR isolation=clone] - legacy monolith (added 2026-10-08)
+```
+
+Each clone lives at `<root>/<task-id>/<project-name>`.
+The default root is `$HOME/.firstmate/clones/<home-token>`, outside the home so the worker never inherits the home's own instruction files from a parent directory.
+The optional local, gitignored `config/clone-root` replaces that root with the absolute path on its first line.
+The clone starts detached at origin's base branch (`--base-branch` when given, otherwise origin's default branch), carries the primary clone's repo-local `user.name` and `user.email`, and is recorded as the task's `worktree=` with `isolation=clone`.
+A clone spawn refuses on the orca backend and for a no-mistakes ship, which needs the pipeline remote only the primary clone holds, so register such a project `direct-PR` or `local-only`.
+A local-only landing carries the task branch from the clone into the project before fast-forwarding, and cleanup removes the clone only after the ordinary landed-work checks pass.
+[`bin/fm-clone-copy-lib.sh`](../bin/fm-clone-copy-lib.sh) owns the location, creation, registration proof, and removal.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

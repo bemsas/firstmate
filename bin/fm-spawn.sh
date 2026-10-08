@@ -275,6 +275,17 @@
 #   itself a linked worktree of the project repository still launches. A pane
 #   that never reaches an isolated worktree refuses at the end of that wait,
 #   naming the last path seen and why it was rejected.
+#   A project registered `isolation=clone` (bin/fm-project-mode.sh --isolation)
+#   skips `treehouse get`: a fresh ship or scout gets a dedicated full clone of
+#   the project's origin, created and registered by bin/fm-clone-copy-lib.sh
+#   (which owns its location and proof), recorded as worktree= with
+#   isolation=clone in the task meta, and then refreshed to its base exactly like
+#   a pooled worktree. The same isolation test additionally requires that
+#   registration, so a clone task never accepts a linked worktree or an
+#   unregistered directory, on spawn or relaunch. A clone spawn refuses on the
+#   orca backend, which owns its own worktrees, and for --mode no-mistakes,
+#   because the pipeline remote lives only in the primary clone's config. A
+#   spawn that aborts before its record is published removes its new clone.
 #   That placement is proven only at launch. Every ship or scout pane therefore
 #   also receives `export FM_TASK_ID=<task-id>` before the launch command, on
 #   the same channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
@@ -683,6 +694,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-project-capacity-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-clone-copy-lib.sh
+. "$SCRIPT_DIR/fm-clone-copy-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1248,6 +1261,8 @@ spawn_remote_secondmate() {
 }
 
 BACKEND=
+ISOLATION=worktree
+CLONE_ABORT_CLEANUP=0
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
@@ -1392,6 +1407,12 @@ spawn_abort_cleanup() {
             true
         fi
       fi
+    fi
+  fi
+  if [ "$CLONE_ABORT_CLEANUP" = 1 ]; then
+    CLONE_ABORT_CLEANUP=0
+    if [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+      fm_clone_copy_remove "$WT" "$PROJ_ABS" "$ID" || true
     fi
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
@@ -1884,6 +1905,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
     fi
   fi
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
+  ISOLATION=$(fm_meta_get "$RELAUNCH_META" isolation)
+  ISOLATION=${ISOLATION:-worktree}
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
     exit 1
@@ -3115,6 +3138,17 @@ else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
   BRIEF="$DATA/$ID/brief.md"
+  if [ "$RELAUNCH" -eq 0 ]; then
+    ISOLATION=$("$FM_ROOT/bin/fm-project-mode.sh" --isolation "$(basename "$PROJ_ABS")") || exit 1
+  fi
+  if [ "$ISOLATION" = clone ] && [ "$BACKEND" = orca ]; then
+    echo "error: project $(basename "$PROJ_ABS") is registered isolation=clone, but the orca backend owns its own worktrees; spawn it on a session-provider backend" >&2
+    exit 1
+  fi
+  if [ "$ISOLATION" = clone ] && [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+    echo "error: project $(basename "$PROJ_ABS") is registered isolation=clone, and a per-task clone has no no-mistakes pipeline remote; ship it direct-PR or local-only" >&2
+    exit 1
+  fi
 fi
 # Project capacity admission (bin/fm-project-capacity-lib.sh owns the
 # declaration, what holds a place, and why this is race-safe). A fresh worker
@@ -3424,6 +3458,10 @@ spawn_worktree_isolated() { # <path>
   fi
   if [ "$wt_git_dir" = "$proj_common" ]; then
     SPAWN_WT_REASON="it is the repository's primary checkout (its git dir is the spawning project's common git dir)"
+    return 1
+  fi
+  if [ "$ISOLATION" = clone ] && ! fm_clone_copy_is_registered "$path" "$PROJ_ABS" "$ID"; then
+    SPAWN_WT_REASON="it is not this task's registered clone copy ($FM_CLONE_COPY_REASON)"
     return 1
   fi
   return 0
@@ -4416,6 +4454,11 @@ elif [ "$RELAUNCH" -eq 1 ]; then
     fi
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
+elif [ "$ISOLATION" = clone ]; then
+  WT=$(fm_clone_copy_path "$FM_HOME" "$CONFIG" "$ID" "$PROJ_ABS") || exit 1
+  fm_clone_copy_create "$PROJ_ABS" "$WT" "$ID" || exit 1
+  CLONE_ABORT_CLEANUP=1
+  validate_spawn_worktree "per-task clone" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
@@ -4538,6 +4581,8 @@ case "$HARNESS" in
 claude*)
   if [ "$KIND" = secondmate ]; then
     spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
+  elif [ "$ISOLATION" = clone ]; then
+    spawn_trust_args=(--clone-copy "$WT" "$PROJ_ABS" "$ID")
   else
     spawn_trust_args=("$WT" "$PROJ_ABS")
   fi
@@ -4548,7 +4593,12 @@ claude*)
   ;;
 agy)
   if [ "$KIND" != secondmate ]; then
-    if "$FM_ROOT/bin/fm-agy-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
+    if [ "$ISOLATION" = clone ]; then
+      spawn_agy_trust_args=(--clone-copy "$WT" "$PROJ_ABS" "$ID")
+    else
+      spawn_agy_trust_args=("$WT" "$PROJ_ABS")
+    fi
+    if "$FM_ROOT/bin/fm-agy-trust.sh" "${spawn_agy_trust_args[@]}" >/dev/null; then
       AGY_TRUST_PREREGISTERED=1
     else
       echo "warning: could not pre-register agy workspace trust for $WT; the launch will answer the folder-trust dialog in window $T instead" >&2
@@ -5077,7 +5127,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree isolation project harness kind mode yolo branch tasktmp base_branch model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5087,6 +5137,7 @@ preserve_relaunch_meta() {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
+  [ "$ISOLATION" = worktree ] || echo "isolation=$ISOLATION"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
@@ -5226,6 +5277,7 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
 fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+CLONE_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

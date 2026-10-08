@@ -15,6 +15,12 @@
 # merge, so a captain approval must be recorded as an `answer --release` before
 # this entrypoint is invoked. The lock ends when the fast-forward returns;
 # docs/captain-hold-lifecycle.md owns the accepted merge-to-cleanup residual.
+# A task recorded isolation=clone works in its own full clone, so its branch is
+# not yet a ref of the project. After the recorded copy proves it is the task's
+# registered clone (bin/fm-clone-copy-lib.sh), the branch is fetched from it into
+# the project's refs/heads/<branch> without force, so a branch the project
+# already holds at a commit the clone's branch does not extend refuses here; the
+# fast-forward below then proceeds exactly as for a worktree task.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
@@ -26,6 +32,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-clone-copy-lib.sh
+. "$SCRIPT_DIR/fm-clone-copy-lib.sh"
 if [ "$#" -ne 1 ] || ! fm_pr_task_id_valid "$1"; then
   echo "error: invalid local merge request" >&2
   exit 2
@@ -99,6 +107,17 @@ BRANCH=$(grep '^branch=' "$META" | cut -d= -f2- || true)
 if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
   echo "error: task $ID has an invalid recorded ship branch '$BRANCH'" >&2
   exit 1
+fi
+if [ "$(grep '^isolation=' "$META" | cut -d= -f2- || true)" = clone ]; then
+  WT=$(grep '^worktree=' "$META" | cut -d= -f2- || true)
+  fm_clone_copy_is_registered "$WT" "$PROJ" "$ID" || {
+    echo "error: task $ID's recorded clone copy '${WT:-none}' is not its registered clone of $PROJ ($FM_CLONE_COPY_REASON); refusing to carry its branch" >&2
+    exit 1
+  }
+  git -C "$PROJ" fetch --quiet --no-tags "$WT" "refs/heads/$BRANCH:refs/heads/$BRANCH" || {
+    echo "error: could not carry branch $BRANCH from clone copy $WT into $PROJ (a diverged existing $BRANCH there is refused)" >&2
+    exit 1
+  }
 fi
 git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
 

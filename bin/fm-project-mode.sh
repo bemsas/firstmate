@@ -9,6 +9,16 @@
 # With --forge it prints one word instead: the project's registered forge,
 # none|gerrit. The forge is asked for explicitly, so the default output stays
 # the same two words for every project, bound or not.
+# With --isolation it prints one word: the project's registered worker-copy
+# isolation, worktree|clone. `worktree` (a Treehouse or Orca worktree) is the
+# default for every project that registers none, is unregistered, or when the
+# registry is absent, and this query prints no warning for those, because the
+# default is exactly today's behavior. `clone` makes bin/fm-spawn.sh give each
+# ship or scout a dedicated full clone instead (bin/fm-clone-copy-lib.sh owns
+# that copy). A malformed `isolation=` value is REFUSED by this query: nothing
+# on stdout, exit status 3, the token named, so a typo never quietly brings
+# worktrees back to a project registered against them. The other output forms
+# ignore the token.
 #
 # MECHANICAL CONSUMERS ONLY. This answers "what posture did the captain register
 # for this project", never "how does this task ship". A task's delivery mode,
@@ -18,9 +28,10 @@
 # The consumers are bin/fm-fleet-sync.sh (skip local-only clones),
 # bin/fm-home-seed.sh and bin/fm-remote-home-seed.sh (refuse local-only seeding,
 # run no-mistakes init), bin/fm-spawn.sh's advisory registry-deviation notice,
-# and --forge for bin/fm-spawn.sh's forge agreement and yolo refusal and for
+# --forge for bin/fm-spawn.sh's forge agreement and yolo refusal and for
 # bin/fm-promote.sh, which takes the forge binding from here because it is a
-# project fact rather than a task choice.
+# project fact rather than a task choice, and --isolation for bin/fm-spawn.sh's
+# choice of worker copy, a project fact for the same reason.
 #
 # Registry line format (data/projects.md):
 #   - <name> - <desc> (added <date>)                                 -> no-mistakes off fm/  (legacy default)
@@ -28,10 +39,11 @@
 #   - <name> [<mode> +yolo] - <desc> (added <date>)                  -> <mode> on fm/
 #   - <name> [<mode> +yolo branch=<prefix>] - <desc> (added <date>)  -> <mode> <yolo> <prefix>
 #   - <name> [<mode> forge=gerrit] - <desc> (added <date>)           -> <mode> off, --forge gerrit
+#   - <name> [<mode> isolation=clone] - <desc> (added <date>)        -> <mode> off, --isolation clone
 #   <name> may contain spaces; it ends at the literal " [" or " - " that follows it.
-#   Bracket tokens are order-independent: +yolo, branch=<prefix>, and forge=<value>
-#   are recognized by their own shape wherever they appear, and whichever token is
-#   left over is the mode. <prefix> must not contain a space; an empty override
+#   Bracket tokens are order-independent: +yolo, branch=<prefix>, forge=<value>,
+#   and isolation=<value> are recognized by their own shape wherever they appear,
+#   and whichever token is left over is the mode. <prefix> must not contain a space; an empty override
 #   ("branch=") resolves to "" for a bare "<task-id>" ship branch instead of the
 #   legacy "fm/<task-id>".
 #
@@ -93,7 +105,7 @@
 # to the forge binding, so it prints even when the forge token is malformed;
 # every path that reads the forge binding (default, --forge, and spawn's
 # forge-agreement check) still refuses.
-# Usage: fm-project-mode.sh [--raw|--branch-prefix|--forge] <project-name>
+# Usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--isolation] <project-name>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -104,13 +116,19 @@ REG="$DATA/projects.md"
 RAW=0
 BRANCH_PREFIX_QUERY=0
 WANT_FORGE=0
+WANT_ISOLATION=0
 case "${1:-}" in
   --raw) RAW=1; shift ;;
   --branch-prefix) BRANCH_PREFIX_QUERY=1; shift ;;
   --forge) WANT_FORGE=1; shift ;;
+  --isolation) WANT_ISOLATION=1; shift ;;
 esac
-NAME=${1:?usage: fm-project-mode.sh [--raw|--branch-prefix|--forge] <project-name>}
+NAME=${1:?usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--isolation] <project-name>}
 
+if [ "$WANT_ISOLATION" -eq 1 ] && [ ! -f "$REG" ]; then
+  echo worktree
+  exit 0
+fi
 if [ ! -f "$REG" ]; then
   echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
   if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
@@ -149,7 +167,7 @@ parsed=$(awk -v n="$NAME" '
     if (substr($0, 1, plen) != prefix) next
     after = substr($0, plen + 1);
     if (after != "" && substr(after, 1, 2) != " [" && substr(after, 1, 3) != " - ") next
-    mode="no-mistakes"; yolo="off"; branch="fm/"; forge="none";
+    mode="no-mistakes"; yolo="off"; branch="fm/"; forge="none"; isolation="isolation=worktree";
     if (substr(after, 1, 2) == " [") {
       s="";
       nk = split(after, rest, " ");
@@ -165,6 +183,7 @@ parsed=$(awk -v n="$NAME" '
         if (a[j]=="+yolo") { yolo="on"; continue }
         if (a[j] ~ /^branch=/) { branch = substr(a[j], 8); continue }
         if (a[j] ~ /^forge=/) { forge = a[j]; continue }
+        if (a[j] ~ /^isolation=/) { isolation = a[j]; continue }
         if (a[j] ~ /^[^=]+=/) {
           key = substr(a[j], 1, index(a[j], "=") - 1);
           e = dist(key, "forge");
@@ -177,10 +196,15 @@ parsed=$(awk -v n="$NAME" '
     }
     # branch is printed LAST: an empty branch= override must survive as an
     # empty final field, which only holds when nothing follows it.
+    print "isolation", isolation;
     print "posture", mode, yolo, forge, branch; exit
   }
 ' "$REG")
 
+if [ -z "$parsed" ] && [ "$WANT_ISOLATION" -eq 1 ]; then
+  echo worktree
+  exit 0
+fi
 if [ -z "$parsed" ]; then
   echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
   if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
@@ -190,8 +214,10 @@ if [ -z "$parsed" ]; then
 fi
 
 posture=
+isolation=
 while IFS=' ' read -r kind rest; do
   case "$kind" in
+    isolation) isolation=$rest ;;
     near) echo "warn: ignoring \"$rest\" registered for $NAME in $REG; it is not a forge binding, and the forge binding is spelled forge=gerrit" >&2 ;;
     posture) posture=$rest ;;
   esac
@@ -204,6 +230,13 @@ done <<EOF
 $posture
 EOF
 forge=${rest_forge:-none}
+if [ "$WANT_ISOLATION" -eq 1 ]; then
+  case "$isolation" in
+    isolation=worktree | isolation=clone) echo "${isolation#isolation=}"; exit 0 ;;
+  esac
+  echo "refused: unknown isolation \"${isolation#isolation=}\" registered for $NAME in $REG; the accepted values are isolation=clone and isolation=worktree, or no isolation token at all for the default worktree; correct the registry entry" >&2
+  exit 3
+fi
 case "$mode" in
   no-mistakes|direct-PR|local-only|no-mistakes-prod-only) ;;
   *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off; branch=fm/ ;;

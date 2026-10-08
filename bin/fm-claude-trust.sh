@@ -9,10 +9,13 @@
 # on rather than answered on the human's behalf.
 #
 # Usage: fm-claude-trust.sh <worktree> <project>
+#        fm-claude-trust.sh --clone-copy <copy> <project> <id>
 #        fm-claude-trust.sh --secondmate-home <home> <id>
 #        fm-claude-trust.sh --lab-home <home>
 #   <worktree>  the isolated task worktree this spawn launches into
 #   <project>   the primary checkout that worktree belongs to
+#   <copy>      the per-task clone of <project> this spawn launches into, for a
+#               project registered isolation=clone
 #   <home>      the seeded secondmate home this spawn launches into
 #   <id>        the secondmate id that home must already be marked for
 #   --lab-home  the disposable lab home bin/fm-live-lab.sh launches a lab
@@ -120,6 +123,18 @@
 # opt-in guard family (FM_*_LIVE_E2E=1) and record the result in
 # docs/verification/runtime-backends.md, rather than assuming the shape here.
 #
+# CLONE-COPY MODE. A per-task clone is a primary checkout of its own, so the
+# worktree test above refuses it by design. The evidence is the registration
+# bin/fm-clone-copy-lib.sh writes when spawn creates the copy, judged by that
+# library's fm_clone_copy_is_registered: a clone with its own repository at
+# exactly the argument, sharing no git dir with <project>, whose marker is a
+# regular file this user owns naming that project and <id>. Claude Code's
+# canonical root for a clone is the clone itself, so trust and any carried
+# external-imports consent land on the clone's own entry only. That consent is
+# gated exactly as in worktree mode, on <project>'s canonical primary-checkout
+# entry: refused when that entry declined, carried only when it already
+# approved, otherwise left undecided.
+#
 # SECONDMATE-HOME MODE. A secondmate home is a whole firstmate instance rather
 # than a task worktree, and bin/fm-home-seed.sh produces it in two shapes: a
 # leased treehouse worktree (linked) and a standalone clone of the firstmate
@@ -186,6 +201,7 @@ unset CDPATH \
 
 usage() {
   echo "usage: fm-claude-trust.sh <worktree> <project>" >&2
+  echo "       fm-claude-trust.sh --clone-copy <copy> <project> <id>" >&2
   echo "       fm-claude-trust.sh --secondmate-home <home> <id>" >&2
   echo "       fm-claude-trust.sh --lab-home <home>" >&2
   exit 2
@@ -195,6 +211,14 @@ usage() {
 # names what the argument was expected to be so every shared refusal below reads
 # correctly in both modes.
 case "${1:-}" in
+  --clone-copy)
+    [ "$#" -eq 4 ] || usage
+    MODE=clone-copy
+    TARGET_ARG=$2
+    PROJ_ARG=$3
+    SUB_ID=$4
+    SCOPE_NOUN="task clone copy"
+    ;;
   --secondmate-home)
     [ "$#" -eq 3 ] || usage
     MODE=secondmate-home
@@ -228,6 +252,8 @@ refuse() { echo "error: refusing to pre-register Claude trust: $1" >&2; exit 1; 
 
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-clone-copy-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/fm-clone-copy-lib.sh"
 
 real_dir() { (cd -P -- "$1" 2>/dev/null && pwd -P); }
 
@@ -244,9 +270,40 @@ common_dir_of() {
   (cd -P -- "$dir" && real_dir "$common")
 }
 
+# resolve_project_canon sets PROJ_CANON. The external-imports flags must land
+# on the primary checkout - its own git dir equals the common dir - because that is exactly the path Claude Code's
+# own git-root canonicalization collapses every linked worktree to. When
+# <project> is itself a linked worktree (a secondmate home spawned from,
+# rather than as, the primary checkout), refusing outright would wedge a
+# relaunch that is otherwise perfectly valid: PROJ_COMMON already IS that
+# primary checkout's own git dir (git's git-common-dir answer never changes
+# by which worktree asks), so the checkout is derived structurally from it -
+# its parent directory in the standard non-bare, non-GIT_DIR-overridden
+# layout this script already requires elsewhere - and verified, never
+# assumed: the candidate's own resolved git dir must equal PROJ_COMMON, the
+# same primary-checkout definition the worktree test uses, or this refuses
+# rather than guess.
+resolve_project_canon() {
+  PROJ_GIT_DIR=$(git -C "$PROJ_REAL" rev-parse --absolute-git-dir 2>/dev/null) || true
+  [ -n "$PROJ_GIT_DIR" ] || refuse "project '$PROJ_REAL' has no resolvable git directory"
+  PROJ_GIT_DIR=$(real_dir "$PROJ_GIT_DIR") || true
+  [ -n "$PROJ_GIT_DIR" ] || refuse "project '$PROJ_REAL' has an unresolvable git directory"
+  if [ "$PROJ_GIT_DIR" = "$PROJ_COMMON" ]; then
+    PROJ_CANON=$PROJ_REAL
+  else
+    PROJ_CANON=$(real_dir "$(dirname -- "$PROJ_COMMON")") || true
+    [ -n "$PROJ_CANON" ] \
+      || refuse "project '$PROJ_REAL' is a linked worktree whose primary checkout could not be resolved"
+    CANON_GIT_DIR=$(git -C "$PROJ_CANON" rev-parse --absolute-git-dir 2>/dev/null) || true
+    CANON_GIT_DIR=$(real_dir "${CANON_GIT_DIR:-}") || true
+    [ -n "$CANON_GIT_DIR" ] && [ "$CANON_GIT_DIR" = "$PROJ_COMMON" ] \
+      || refuse "project '$PROJ_REAL' is a linked worktree whose primary checkout could not be resolved"
+  fi
+}
+
 TARGET_REAL=$(real_dir "$TARGET_ARG") || true
 [ -n "$TARGET_REAL" ] || refuse "$SCOPE_NOUN '$TARGET_ARG' is not an accessible directory"
-if [ "$MODE" = worktree ]; then
+if [ "$MODE" = worktree ] || [ "$MODE" = clone-copy ]; then
   PROJ_REAL=$(real_dir "$PROJ_ARG") || true
   [ -n "$PROJ_REAL" ] || refuse "project '$PROJ_ARG' is not an accessible directory"
 fi
@@ -299,35 +356,14 @@ if [ "$MODE" = worktree ]; then
   PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
   [ -n "$PROJ_COMMON" ] || refuse "project '$PROJ_REAL' is not inside a git repository"
   [ "$WT_COMMON" = "$PROJ_COMMON" ] || refuse "'$TARGET_REAL' is not a worktree of project '$PROJ_REAL'"
+  resolve_project_canon
+elif [ "$MODE" = clone-copy ]; then
+  fm_clone_copy_is_registered "$TARGET_REAL" "$PROJ_REAL" "$SUB_ID" \
+    || refuse "'$TARGET_REAL' is not task $SUB_ID's registered clone copy of project '$PROJ_REAL': $FM_CLONE_COPY_REASON"
+  PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
+  [ -n "$PROJ_COMMON" ] || refuse "project '$PROJ_REAL' is not inside a git repository"
+  resolve_project_canon
 
-  # The external-imports flags must land on the primary checkout - its own git
-  # dir equals the common dir - because that is exactly the path Claude Code's
-  # own git-root canonicalization collapses every linked worktree to. When
-  # <project> is itself a linked worktree (a secondmate home spawned from,
-  # rather than as, the primary checkout), refusing outright would wedge a
-  # relaunch that is otherwise perfectly valid: PROJ_COMMON already IS that
-  # primary checkout's own git dir (git's git-common-dir answer never changes
-  # by which worktree asks), so the checkout is derived structurally from it -
-  # its parent directory in the standard non-bare, non-GIT_DIR-overridden
-  # layout this script already requires elsewhere - and verified, never
-  # assumed: the candidate's own resolved git dir must equal PROJ_COMMON, the
-  # same primary-checkout definition used above, or this refuses rather than
-  # guess.
-  PROJ_GIT_DIR=$(git -C "$PROJ_REAL" rev-parse --absolute-git-dir 2>/dev/null) || true
-  [ -n "$PROJ_GIT_DIR" ] || refuse "project '$PROJ_REAL' has no resolvable git directory"
-  PROJ_GIT_DIR=$(real_dir "$PROJ_GIT_DIR") || true
-  [ -n "$PROJ_GIT_DIR" ] || refuse "project '$PROJ_REAL' has an unresolvable git directory"
-  if [ "$PROJ_GIT_DIR" = "$PROJ_COMMON" ]; then
-    PROJ_CANON=$PROJ_REAL
-  else
-    PROJ_CANON=$(real_dir "$(dirname -- "$PROJ_COMMON")") || true
-    [ -n "$PROJ_CANON" ] \
-      || refuse "project '$PROJ_REAL' is a linked worktree whose primary checkout could not be resolved"
-    CANON_GIT_DIR=$(git -C "$PROJ_CANON" rev-parse --absolute-git-dir 2>/dev/null) || true
-    CANON_GIT_DIR=$(real_dir "${CANON_GIT_DIR:-}") || true
-    [ -n "$CANON_GIT_DIR" ] && [ "$CANON_GIT_DIR" = "$PROJ_COMMON" ] \
-      || refuse "project '$PROJ_REAL' is a linked worktree whose primary checkout could not be resolved"
-  fi
 elif [ "$MODE" = lab-home ]; then
   LAB_MARKER="$TARGET_REAL/$FM_GATE_LAB_MARKER"
   [ ! -L "$LAB_MARKER" ] || refuse "'$LAB_MARKER' is a symlink; a lab home carries the marker as a regular file"
@@ -454,7 +490,7 @@ fi
 # consent the human was never asked for.
 TRUST_FLAG='hasTrustDialogAccepted'
 IMPORT_FLAGS='["hasClaudeMdExternalIncludesApproved","hasClaudeMdExternalIncludesWarningShown"]'
-if [ "$MODE" = worktree ]; then
+if [ "$MODE" = worktree ] || [ "$MODE" = clone-copy ]; then
   WRITE_ARGS=("$STORE" "$MODE" "$TARGET_REAL" "$PROJ_CANON" "$TRUST_FLAG" "$IMPORT_FLAGS")
 else
   WRITE_ARGS=("$STORE" "$MODE" "$TARGET_REAL" "" "$TRUST_FLAG" "$IMPORT_FLAGS")
@@ -535,6 +571,15 @@ const attempt = () => {
     setFlags(projects, target, targetFlags);
     setFlags(projects, project, projectFlags);
     keys = [[target, targetFlags], [project, projectFlags]];
+  } else if (mode === "clone-copy") {
+    if (declinedExternalImports(projects, project)) {
+      throw new Error(
+        `project entry for ${project} in ${store} already declined external CLAUDE.md imports; refusing to override that consent for its clone copy ${target}`,
+      );
+    }
+    const cloneFlags = approvedExternalImports(projects, project) ? [trustFlag, ...importFlags] : [trustFlag];
+    setFlags(projects, target, cloneFlags);
+    keys = [[target, cloneFlags]];
   } else {
     setFlags(projects, target, [trustFlag]);
     keys = [[target, [trustFlag]]];
@@ -576,7 +621,7 @@ try {
   console.error(`error: ${err.message}`);
   process.exit(1);
 }
-console.error(`error: ${store} did not retain trust for ${target}${project ? ` and ${project}` : ""} after 3 attempts`);
+console.error(`error: ${store} did not retain trust for ${target}${project && mode === "worktree" ? ` and ${project}` : ""} after 3 attempts`);
 process.exit(1);
 NODE
 then

@@ -151,6 +151,17 @@
 # own is removed by a refusal; reconcile whichever record is wrong and re-run.
 # Orca is not a pool slot and proves its path through
 # require_orca_worktree_path_match instead.
+# A task recorded isolation=clone (bin/fm-spawn.sh) owns a dedicated full clone,
+# not a pool slot, so none of the slot checks apply to it. Before anything is
+# changed, a clone that still exists must prove it is this task's registered
+# copy of the recorded project (bin/fm-clone-copy-lib.sh owns that proof), or
+# teardown refuses even with --force. The landed-work gates are the same, judged
+# inside the clone, whose remote-tracking refs are the real origin's; the
+# local-only fallback instead asks whether the clone's HEAD is merged into the
+# project's own local default branch, since the clone's default branch is
+# its own. When cleanup proceeds the clone directory is removed, because there
+# is no pool to return it to; forced secondmate retirement proves and removes a
+# child's clone copy the same way.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -408,6 +419,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 }
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-clone-copy-lib.sh
+. "$SCRIPT_DIR/fm-clone-copy-lib.sh"
 # Supervision lease guard: post-landing cleanup is overlap territory between
 # the two Pi supervision actors; refuse while the OTHER actor holds this
 # task's live lease (contract: bin/fm-lease-lib.sh; no-op in homes without
@@ -1167,6 +1180,12 @@ fi
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 BASE_BRANCH=$(grep '^base_branch=' "$META" | cut -d= -f2- || true)
+ISOLATION=$(fm_meta_get "$META" isolation)
+if [ "$ISOLATION" = clone ] && [ -d "$WT" ] && ! fm_clone_copy_is_registered "$WT" "$PROJ" "$ID"; then
+  echo "REFUSED: task $ID's recorded clone copy $WT is not its registered clone of $PROJ ($FM_CLONE_COPY_REASON); nothing was changed - not even with --force." >&2
+  echo "Reconcile the record (bin/fm-crew-state.sh $ID), then re-run teardown." >&2
+  exit 1
+fi
 
 # A record accepted as a legacy incarnation (no spawn_gen, and either
 # --legacy-record given or the record is windowless) may be torn down only
@@ -1892,7 +1911,7 @@ report_worktree_dirt() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch head
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -1921,7 +1940,13 @@ validate_worktree_teardown_safety() {
 
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
     DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
+    if [ "$ISOLATION" = clone ]; then
+      unmerged_raw=$unpushed_raw
+      if head=$(git -C "$WT" rev-parse --verify --quiet HEAD) &&
+        git -C "$PROJ" merge-base --is-ancestor "$head" "refs/heads/$DEFAULT" 2>/dev/null; then
+        unmerged_raw=
+      fi
+    elif ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
       if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
       fi
@@ -3010,6 +3035,12 @@ validate_firstmate_home_children_removal() {
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         require_orca_worktree_path_match "$child_orca_worktree_id" "$child_wt" || return 1
       fi
+    elif [ "$(meta_value "$child_meta" isolation)" = clone ] && [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
+      child_proj=$(meta_value "$child_meta" project)
+      fm_clone_copy_is_registered "$child_wt" "$child_proj" "$child_id" || {
+        echo "REFUSED: child $child_id's recorded clone copy $child_wt is not its registered clone of ${child_proj:-the recorded project} ($FM_CLONE_COPY_REASON)" >&2
+        return 1
+      }
     elif [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
       child_proj=$(meta_value "$child_meta" project)
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
@@ -3252,6 +3283,10 @@ cleanup_firstmate_home_children() {
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
+    elif [ "$(meta_value "$child_meta" isolation)" = clone ]; then
+      if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+        fm_clone_copy_remove "$child_wt" "$child_proj" "$child_id" || return 1
+      fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       # The same ownership determination as the parent's own slot: a child
       # slot reassigned to another task is not this child's to kill, reset,
@@ -3590,6 +3625,11 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
+elif [ "$ISOLATION" = clone ] && [ -d "$WT" ]; then
+  fm_clone_copy_remove "$WT" "$PROJ" "$ID" || {
+    echo "error: could not remove clone copy $WT; teardown aborted" >&2
+    exit 1
+  }
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then

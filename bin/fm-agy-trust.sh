@@ -5,8 +5,11 @@
 # dialog and running its turn in agy's own scratch directory.
 #
 # Usage: fm-agy-trust.sh <worktree> <project>
+#        fm-agy-trust.sh --clone-copy <copy> <project> <id>
 #   <worktree>  the isolated task worktree this spawn launches into
 #   <project>   the primary checkout that worktree belongs to
+#   <copy>      the per-task clone of <project> for task <id>, for a project
+#               registered isolation=clone
 # Prints one line naming what it registered; refuses loudly on anything else.
 #
 # WHY THIS EXISTS. agy 1.2.0 gates a folder it has never seen behind
@@ -29,7 +32,9 @@
 # <project>'s common dir - whose top level is exactly the resolved argument. A
 # primary checkout, a worktree of an unrelated repo, a subdirectory of a
 # worktree, a plain directory, and a home directory are each refused with a
-# non-zero exit, never a warning and never a silent skip. Only the launching
+# non-zero exit, never a warning and never a silent skip. With --clone-copy the
+# argument must instead be that task's registered clone of <project>, decided by
+# bin/fm-clone-copy-lib.sh's fm_clone_copy_is_registered. Only the launching
 # user's own store is written, it must be a regular file this uid owns, every
 # unrelated key and entry is preserved, and the replacement is atomic.
 set -u
@@ -39,6 +44,13 @@ unset CDPATH \
   GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_CONFIG GIT_CONFIG_GLOBAL \
   GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT
 
+CLONE_ID=
+if [ "${1:-}" = --clone-copy ]; then
+  [ "$#" -eq 4 ] || { echo "usage: fm-agy-trust.sh --clone-copy <copy> <project> <id>" >&2; exit 2; }
+  CLONE_ID=$4
+  shift
+  set -- "$1" "$2"
+fi
 [ "$#" -eq 2 ] || { echo "usage: fm-agy-trust.sh <worktree> <project>" >&2; exit 2; }
 WT_ARG=$1
 PROJ_ARG=$2
@@ -67,22 +79,29 @@ HOME_REAL=$(real_dir "$HOME") || true
 [ -n "$HOME_REAL" ] || refuse "HOME '$HOME' is not an accessible directory"
 [ "$WT_REAL" != "$HOME_REAL" ] || refuse "'$WT_REAL' is the home directory, not a task worktree"
 
-WT_TOP=$(git -C "$WT_REAL" rev-parse --show-toplevel 2>/dev/null) || true
-[ -n "$WT_TOP" ] || refuse "'$WT_REAL' is not inside a git repository"
-WT_TOP_REAL=$(real_dir "$WT_TOP") || true
-[ "$WT_TOP_REAL" = "$WT_REAL" ] || refuse "'$WT_REAL' is not a worktree root (its root is '${WT_TOP_REAL:-unresolvable}')"
+if [ -n "$CLONE_ID" ]; then
+  # shellcheck source=bin/fm-clone-copy-lib.sh
+  . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/fm-clone-copy-lib.sh"
+  fm_clone_copy_is_registered "$WT_REAL" "$PROJ_REAL" "$CLONE_ID" \
+    || refuse "'$WT_REAL' is not task $CLONE_ID's registered clone copy of project '$PROJ_REAL': $FM_CLONE_COPY_REASON"
+else
+  WT_TOP=$(git -C "$WT_REAL" rev-parse --show-toplevel 2>/dev/null) || true
+  [ -n "$WT_TOP" ] || refuse "'$WT_REAL' is not inside a git repository"
+  WT_TOP_REAL=$(real_dir "$WT_TOP") || true
+  [ "$WT_TOP_REAL" = "$WT_REAL" ] || refuse "'$WT_REAL' is not a worktree root (its root is '${WT_TOP_REAL:-unresolvable}')"
 
-WT_GIT_DIR=$(git -C "$WT_REAL" rev-parse --absolute-git-dir 2>/dev/null) || true
-[ -n "$WT_GIT_DIR" ] || refuse "'$WT_REAL' has no resolvable git directory"
-WT_GIT_DIR=$(real_dir "$WT_GIT_DIR") || true
-[ -n "$WT_GIT_DIR" ] || refuse "'$WT_REAL' has an unresolvable git directory"
-WT_COMMON=$(common_dir_of "$WT_REAL") || true
-[ -n "$WT_COMMON" ] || refuse "'$WT_REAL' has no resolvable git common directory"
-[ "$WT_GIT_DIR" != "$WT_COMMON" ] || refuse "'$WT_REAL' is a primary checkout, not an isolated worktree"
+  WT_GIT_DIR=$(git -C "$WT_REAL" rev-parse --absolute-git-dir 2>/dev/null) || true
+  [ -n "$WT_GIT_DIR" ] || refuse "'$WT_REAL' has no resolvable git directory"
+  WT_GIT_DIR=$(real_dir "$WT_GIT_DIR") || true
+  [ -n "$WT_GIT_DIR" ] || refuse "'$WT_REAL' has an unresolvable git directory"
+  WT_COMMON=$(common_dir_of "$WT_REAL") || true
+  [ -n "$WT_COMMON" ] || refuse "'$WT_REAL' has no resolvable git common directory"
+  [ "$WT_GIT_DIR" != "$WT_COMMON" ] || refuse "'$WT_REAL' is a primary checkout, not an isolated worktree"
 
-PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
-[ -n "$PROJ_COMMON" ] || refuse "project '$PROJ_REAL' is not inside a git repository"
-[ "$WT_COMMON" = "$PROJ_COMMON" ] || refuse "'$WT_REAL' is not a worktree of project '$PROJ_REAL'"
+  PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
+  [ -n "$PROJ_COMMON" ] || refuse "project '$PROJ_REAL' is not inside a git repository"
+  [ "$WT_COMMON" = "$PROJ_COMMON" ] || refuse "'$WT_REAL' is not a worktree of project '$PROJ_REAL'"
+fi
 
 command -v node >/dev/null 2>&1 || refuse "node is required to record workspace trust and was not found on PATH"
 
