@@ -254,12 +254,28 @@ test_trust_accepts_only_a_registered_clone() {
     && fail "Kimi worktree-mode trust accepted a clone"
   HOME="$case_dir/kimi-home" KIMI_CODE_HOME='' "$ROOT/bin/fm-kimi-trust.sh" --clone-copy "$case_dir/linked" "$case_dir/project" t1 \
     "$case_dir/home" "$case_dir/home/config" >/dev/null 2>&1 && fail "Kimi clone-copy trust accepted a linked worktree"
+  mkdir -p "$case_dir/grok-home"
+  out=$(HOME="$case_dir/grok-home" GROK_HOME='' "$ROOT/bin/fm-grok-trust.sh" --clone-copy "$clone" "$case_dir/project" t1 \
+    "$case_dir/home" "$case_dir/home/config" 2>&1) || fail "Grok trust refused a registered clone copy: $out"
+  python3 -c '
+import sys, tomllib
+data = tomllib.load(open(sys.argv[1], "rb"))
+sys.exit(0 if data.get("folders", {}).get(sys.argv[2], {}).get("trusted") is True else 1)
+' "$case_dir/grok-home/.grok/trusted_folders.toml" "$clone" || fail "Grok trust did not record the clone root"
+  grep -qF "$case_dir/project\"" "$case_dir/grok-home/.grok/trusted_folders.toml" \
+    && fail "Grok clone-copy trust granted the primary checkout"
+  HOME="$case_dir/grok-home" GROK_HOME='' "$ROOT/bin/fm-grok-trust.sh" --clone-copy "$clone" "$case_dir/project" t2 \
+    "$case_dir/home" "$case_dir/home/config" >/dev/null 2>&1 && fail "Grok trust accepted a clone registered for another task"
+  HOME="$case_dir/grok-home" GROK_HOME='' "$ROOT/bin/fm-grok-trust.sh" "$clone" "$case_dir/project" >/dev/null 2>&1 \
+    && fail "Grok worktree-mode trust accepted a clone"
+  HOME="$case_dir/grok-home" GROK_HOME='' "$ROOT/bin/fm-grok-trust.sh" --clone-copy "$case_dir/linked" "$case_dir/project" t1 \
+    "$case_dir/home" "$case_dir/home/config" >/dev/null 2>&1 && fail "Grok clone-copy trust accepted a linked worktree"
 
   git init --quiet "$case_dir/copies/t4/project"
   cp "$clone/.git/fm-clone-copy" "$case_dir/copies/t4/project/.git/fm-clone-copy"
   CLAUDE_CONFIG_DIR="$cfg" "$ROOT/bin/fm-claude-trust.sh" --clone-copy "$case_dir/copies/t4/project" "$case_dir/project" t1 \
     "$case_dir/home" "$case_dir/home/config" >/dev/null 2>&1 && fail "Claude trust accepted an unrelated repository with a copied marker"
-  pass "Claude, agy, and Kimi trust register a registered clone copy and refuse anything else"
+  pass "Claude, agy, Kimi, and Grok trust register a registered clone copy and refuse anything else"
 }
 
 # A fixture project that carries the real test runner, so it can be invoked from

@@ -331,7 +331,7 @@ So this path is intentionally fail-open and cannot use the run tier.
 
 Grok's guaranteed-loading alternative is a global token-guarded hook like the pattern used by `bin/fm-spawn.sh`.
 That alternative expands trust and writes outside this repository.
-So Firstmate never installs it or grants folder trust automatically.
+So no session-start path installs it or grants folder trust; the one grant Firstmate writes automatically is the grok crewmate and scout spawn's, owned by [`references/harness/grok.md`](../.agents/skills/harness-adapters/references/harness/grok.md).
 
 ### Cursor
 
