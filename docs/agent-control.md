@@ -81,6 +81,7 @@ It cannot make a promise about text the capture never showed it - a composer scr
 
 SIGTERM is the only signal sent.
 SIGKILL would deny the harness its chance to flush, so an agent that has not stopped within the wait is reported unconfirmed rather than escalated to a stronger signal.
+Stopped means the exact signalled process incarnation - its pid and start time - is proven gone, never that its endpoint disappeared: a process that survives SIGTERM can still take its window away, so until the exit is proven the result is `stop=unconfirmed` and the task's busy wiring stays armed.
 
 The endpoint postcondition is established, not sampled, and it reports three different facts as three different results.
 A terminal whose window *was* the agent tears that window down after the process exits, so a single read taken the moment the agent state settles can still see a window that is already going away.

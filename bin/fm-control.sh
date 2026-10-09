@@ -73,8 +73,11 @@
 #              seen. There is no flag that overrides this.
 #              SIGTERM only: SIGKILL would deny the harness its chance to flush
 #              uncommitted work, so an agent that does not stop is reported
-#              unconfirmed rather than escalated. Postcondition: the backend's
-#              recovery-grade classifier reports the agent gone, and the
+#              unconfirmed rather than escalated. Postcondition: the exact
+#              signalled process incarnation is proven to have exited (an
+#              endpoint that merely vanished proves nothing, and a survivor
+#              keeps its busy wiring), the backend's recovery-grade
+#              classifier reports the agent gone, and the
 #              endpoint's and the worktree's fates are each reported as what
 #              could be ESTABLISHED about them - the endpoint preserved, proven
 #              gone, or unestablished; the worktree entries-preserved, CHANGED,
@@ -985,8 +988,35 @@ physical_path() {  # <dir>
   (cd -P -- "$1" 2>/dev/null && pwd -P)
 }
 
+# process_start: the start time of <pid>, which names that process INCARNATION
+# rather than its reusable number. Empty when it cannot be read.
+process_start() {  # <pid>
+  ps -p "$1" -o lstart= 2>/dev/null | tr -s '[:space:]' ' '
+}
+
+# wait_process_exit: 0 once the incarnation of <pid> that started at <start> is
+# proven gone - no such pid, a zombie awaiting its reaper, or a pid reused by a
+# process with a different start time - within <timeout> seconds; 1 otherwise.
+# This is the only proof a stop may report: an endpoint that disappeared says
+# nothing about whether the process that was in it exited.
+wait_process_exit() {  # <pid> <start> <timeout>
+  local pid=$1 start=$2 timeout=$3 elapsed=0 stat now
+  while :; do
+    kill -0 "$pid" 2>/dev/null || return 0
+    stat=$(ps -p "$pid" -o stat= 2>/dev/null | tr -d '[:space:]')
+    case "$stat" in Z*) return 0 ;; esac
+    if [ -n "$start" ]; then
+      now=$(process_start "$pid")
+      [ -z "$now" ] || [ "$now" = "$start" ] || return 0
+    fi
+    awk -v e="$elapsed" -v t="$timeout" 'BEGIN{exit !(e < t)}' || return 1
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+}
+
 do_stop() {
-  local state absence pid comm cwd wt_real before after waited endpoint
+  local state absence pid comm cwd wt_real before after waited endpoint start
   require_state_verified_backend stop
   state=$(agent_state)
   # Every exit below reports an agent already established not running, and each
@@ -1047,14 +1077,22 @@ do_stop() {
     || die "task $ID's composer was not established to be free of content, so stopping it could discard text the agent is holding; refusing to signal. Read the pane and clear or submit what is there, then use '$VERB' or 'exit'"
 
   comm=$(fm_backend_process_comm "$pid" 2>/dev/null) || comm=unknown
+  start=$(process_start "$pid")
   before=$(worktree_fingerprint)
   kill -TERM "$pid" 2>/dev/null \
     || die "task $ID's agent pid $pid ($comm) could not be signalled; it may belong to another user"
-  # `missing` is accepted as a settled outcome here, not just `dead`: when the
-  # agent was launched AS the pane's own command, its exit takes the pane with
-  # it, and the classifier then reads the endpoint as missing rather than as a
-  # pane holding no agent. That is a real, correctly-reported result - reporting
-  # it as "did not stop" would be false, since the process is demonstrably gone.
+  # The signalled process itself must be proven gone first. Endpoint state
+  # cannot stand in for that: a process that survives SIGTERM can still take
+  # its window away, and the endpoint then reads `missing` while the agent runs
+  # on. Until the exit is proven nothing is reported stopped and the busy
+  # wiring stays armed, so supervision keeps seeing a live worker.
+  if ! wait_process_exit "$pid" "$start" "$EXIT_WAIT"; then
+    die "stop-delivered $ID pid=$pid comm=$comm signal=TERM agent-process=still-running stop=unconfirmed; the signalled process had not exited within ${EXIT_WAIT}s, whatever its endpoint shows. No further signal was sent, because SIGKILL would deny the harness its chance to flush uncommitted work"
+  fi
+  # With the process proven gone, `missing` is accepted as a settled endpoint
+  # outcome, not just `dead`: when the agent was launched AS the pane's own
+  # command, its exit takes the pane with it, and the classifier then reads the
+  # endpoint as missing rather than as a pane holding no agent.
   if ! waited=$(wait_agent_state "$EXIT_WAIT" dead missing); then
     die "stop-delivered $ID pid=$pid comm=$comm signal=TERM agent-state=$waited stop=unconfirmed; the agent did not stop within ${EXIT_WAIT}s. No further signal was sent, because SIGKILL would deny the harness its chance to flush uncommitted work"
   fi
@@ -1063,11 +1101,11 @@ do_stop() {
   # the outcome that would have been convenient.
   endpoint=$(endpoint_outcome)
   after=$(worktree_fingerprint)
-  # The agent is already proven dead or missing, so the incarnation is over
-  # whatever the worktree comparison says. Retire its busy wiring before any
-  # exit from here, or a stop that reports a changed or unverified worktree
-  # leaves the task classifying `busy` with no agent behind it - the very state
-  # this verb exists to clear.
+  # The signalled process is proven gone and the endpoint holds no agent, so
+  # the incarnation is over whatever the worktree comparison says. Retire its
+  # busy wiring before any exit from here, or a stop that reports a changed or
+  # unverified worktree leaves the task classifying `busy` with no agent behind
+  # it - the very state this verb exists to clear.
   retire_busy_incarnation
   case "$(worktree_outcome "$before" "$after")" in
     unchanged) ;;

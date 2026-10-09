@@ -896,10 +896,12 @@ ok - fm-control stop: a clean worktree that only gained a flushed file keeps its
 ok - fm-control stop: a worktree recorded through a symlink is still the agent's own worktree
 ok - fm-control stop: a worktree that could not be read is reported unverified, never preserved
 ok - fm-control stop: a backend that cannot identify the agent process refuses rather than guessing
+ok - fm-control stop: a process that survives SIGTERM while its endpoint vanishes is reported unconfirmed and stays busy
 ok - fm-control stop: real-process identity, signal, postconditions, and refusals
 ```
 
-Re-run on 2026-10-09 on macOS arm64 with tmux, with the same eighteen `ok` lines.
+Re-run on 2026-10-09 on macOS arm64 with tmux, with the same `ok` lines.
+The TERM-resistant case was added that day after a review reproduced a stop reported `stopped-endpoint-unverified`, with its busy generation removed, for a process that ignored SIGTERM and renamed its window; against the pre-fix verb that case fails with exactly that output.
 There the stand-in is a symlink to `tests/lib.sh`'s `fm_agent_standin`, because a copied `/bin/sleep` is killed by code-signing validation, and the not-a-shell proof also reads `ps -o ucomm=`, because macOS `ps -o comm=` truncates a long executable path and loses the name.
 
 tmux creates a task window with no command and types the launch line into the shell, so the agent is the shell's foreground job and the window survives the agent.

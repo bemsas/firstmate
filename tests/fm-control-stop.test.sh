@@ -524,6 +524,53 @@ printf '%s\n' "$GITFILE" > "$WORK/wt/.git"
 git -C "$WORK/wt" status --porcelain >/dev/null 2>&1 || fail "the worktree was not restored for the cases that follow"
 pass "fm-control stop: a worktree that could not be read is reported unverified, never preserved"
 
+# --- 4g. A VANISHED ENDPOINT IS NOT AN EXITED PROCESS -----------------------
+# A process that survives SIGTERM can still take its window away. The endpoint
+# then reads `missing`, which says nothing about the process that was in it, so
+# the verb must report the stop unconfirmed and leave the busy wiring armed.
+CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
+if [ -z "$CC_BIN" ]; then
+  echo "skip: no C compiler, so the TERM-resistant agent case cannot run"
+else
+  mkdir -p "$WORK/resist"
+  printf '%s\n' '#include <signal.h>' '#include <stdlib.h>' '#include <unistd.h>' \
+    'int main(int c,char**v){int i,n=c>1?atoi(v[1]):600;signal(SIGTERM,SIG_IGN);for(i=0;i<n;i++)sleep(1);return 0;}' \
+    > "$WORK/resist/resist.c"
+  "$CC_BIN" -o "$WORK/resist/resist" "$WORK/resist/resist.c" || fail "could not build the TERM-resistant stand-in"
+  ln -s "$WORK/resist/resist" "$WORK/resist/opencode"
+  "$REAL_TMUX" -L "$SOCKET" kill-window -t fmses:fm-t1 2>/dev/null || true
+  "$REAL_TMUX" -L "$SOCKET" new-window -d -t fmses: -n fm-t1 -c "$WORK/wt" >/dev/null
+  RESIST_SHELL=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t fmses:fm-t1 '#{pane_pid}')
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t fmses:fm-t1 "PATH=$WORK/resist:\$PATH opencode 600" Enter
+  i=0; RESIST_PID=
+  while [ "$i" -lt 150 ]; do
+    RESIST_PID=$(agent_pid 2>/dev/null || true)
+    case "$RESIST_PID" in ''|*[!0-9]*|"$RESIST_SHELL") RESIST_PID= ;; *) break ;; esac
+    sleep 0.1; i=$((i + 1))
+  done
+  [ -n "$RESIST_PID" ] || fail "the TERM-resistant stand-in never reached the pane's foreground"
+  bash "$ROOT/bin/fm-busy-event.sh" arm "$WORK/home/state" t1 >/dev/null 2>&1 \
+    || fail "could not arm a busy incarnation for the TERM-resistant case"
+  ( sleep 1; "$REAL_TMUX" -L "$SOCKET" rename-window -t fmses:fm-t1 still-running ) &
+  RENAMER=$!
+  out=$(FM_CONTROL_EXIT_WAIT=4 run_stop) && fail "stop must not report a stop the process survived, got: $out"
+  wait "$RENAMER" 2>/dev/null || true
+  case "$out" in
+    *stop=unconfirmed*) ;;
+    *) fail "stop must report a surviving process as unconfirmed, got: $out" ;;
+  esac
+  case "$out" in
+    *"stopped pid="*|*stopped-endpoint*) fail "stop claimed a stop the process survived, got: $out" ;;
+  esac
+  kill -0 "$RESIST_PID" 2>/dev/null || fail "the TERM-resistant stand-in did not survive, so this case proves nothing"
+  [ -f "$WORK/home/state/t1.busy-gen" ] \
+    || fail "stop retired the busy wiring of a process that is still running"
+  kill -KILL "$RESIST_PID" 2>/dev/null || true
+  "$REAL_TMUX" -L "$SOCKET" kill-window -t fmses:still-running 2>/dev/null || true
+  rm -f "$WORK/home/state/t1.busy-state" "$WORK/home/state/t1.busy-gen"
+  pass "fm-control stop: a process that survives SIGTERM while its endpoint vanishes is reported unconfirmed and stays busy"
+fi
+
 # --- 5. a backend that cannot name a pane's process refuses, never guesses --
 sed 's|^window=.*|window=zjses:fm-t1|' "$WORK/home/state/t1.meta" > "$WORK/home/state/t1.meta.new"
 { cat "$WORK/home/state/t1.meta.new"; echo "backend=zellij"; } > "$WORK/home/state/t1.meta"
