@@ -577,6 +577,53 @@ test_backend_source_requires_adapter_file() {
   done
 }
 
+# The not-a-shell proof is what stands between bin/fm-control.sh `stop` and
+# signalling a pane's own shell, which would destroy the endpoint that verb
+# exists to preserve. It must answer for every shell the fleet's single owner of
+# process-name identity recognizes - the pid is resolved through a backend, and
+# every backend that can resolve one already loads that owner - so a host whose
+# pane shell is ash, mksh, tcsh, or csh is protected exactly as bash and zsh are.
+test_backend_process_is_shell_uses_the_shared_name_owner() {
+  local dir name pid agent_pid standin
+  # A short path: macOS `ps -o comm=` truncates a long one, and the name under
+  # test must survive in at least one surface for this case to prove anything.
+  dir=$(mktemp -d /tmp/fm-sh.XXXXXX) || fail "could not create a short stand-in directory"
+  # A symlink to the portable stand-in, never a copied `sleep`: tests/lib.sh's
+  # fm_agent_standin owns why.
+  standin=$(fm_agent_standin "$dir/standin") || { pass "process shell proof skipped (no stand-in survives a foreign name)"; return 0; }
+  # The same precondition do_stop establishes before it asks: the pid was
+  # resolved through a backend, and loading one loads the shared name owner.
+  fm_backend_source tmux || fail "the tmux adapter should load"
+  # Real processes, named for real shells: the classification is by process
+  # name, so a real process carrying that name is the genuine input.
+  for name in sh bash zsh dash ash ksh mksh tcsh csh fish; do
+    ln -s "$standin" "$dir/$name" || { pass "process shell proof skipped (cannot stage $name)"; return 0; }
+    "$dir/$name" 30 & pid=$!
+    while ! ps -p "$pid" -o comm= 2>/dev/null | sed 's@.*/@@' | grep -qx "$name"; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.05
+    done
+    fm_backend_process_is_shell "$pid" \
+      || { kill "$pid" 2>/dev/null; fail "a pane running '$name' must be proven a shell, so stop refuses to signal it"; }
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  # ...and a real agent is still not a shell, so the proof does not refuse
+  # every stop it is asked about.
+  ln -s "$standin" "$dir/opencode"
+  "$dir/opencode" 30 & agent_pid=$!
+  while ! ps -p "$agent_pid" -o comm= 2>/dev/null | sed 's@.*/@@' | grep -qx opencode; do
+    kill -0 "$agent_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  ! fm_backend_process_is_shell "$agent_pid" \
+    || { kill "$agent_pid" 2>/dev/null; fail "a verified harness must not be proven a shell"; }
+  kill "$agent_pid" 2>/dev/null || true
+  wait "$agent_pid" 2>/dev/null || true
+  rm -rf "$dir"
+  pass "fm_backend_process_is_shell: every shell the shared name owner knows is proven a shell, an agent is not"
+}
+
 test_backend_validate_spawn_accepts_orca() {
   local out
   fm_backend_validate_spawn tmux 2>/dev/null || fail "fm_backend_validate_spawn should accept tmux"
@@ -1225,6 +1272,7 @@ test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
 test_backend_source_requires_adapter_file
+test_backend_process_is_shell_uses_the_shared_name_owner
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms

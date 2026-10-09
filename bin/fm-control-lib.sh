@@ -44,19 +44,27 @@
 # fm_control_relaunch_resume_flag below: a reference the endpoint's runtime
 # bound as its status authority is returned to a replacement with that adapter.
 
-# The complete control-plane verb allowlist, one per line.
+# The complete control-plane verb allowlist, one per line. This listing is the
+# ONE definition: fm_control_verb_allowed tests against it rather than keeping a
+# second copy, so the refusal message a caller discovers verbs from can never
+# name a different set than the one the plane accepts.
 fm_control_verbs() {
   cat <<'EOF'
 interrupt
 exit
+stop
 relaunch
 EOF
 }
 
 fm_control_verb_allowed() {  # <verb>
-  case "${1-}" in
-    interrupt|exit|relaunch) return 0 ;;
-  esac
+  local verb
+  [ -n "${1-}" ] || return 1
+  while IFS= read -r verb; do
+    [ "$verb" != "$1" ] || return 0
+  done <<EOF
+$(fm_control_verbs)
+EOF
   return 1
 }
 
