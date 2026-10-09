@@ -244,12 +244,22 @@ test_trust_accepts_only_a_registered_clone() {
   grep -qF "$clone" "$case_dir/agy-home/.gemini/antigravity-cli/settings.json" || fail "agy trust did not record the clone"
   HOME="$case_dir/agy-home" "$ROOT/bin/fm-agy-trust.sh" --clone-copy "$case_dir/linked" "$case_dir/project" t1 \
     "$case_dir/home" "$case_dir/home/config" >/dev/null 2>&1 && fail "agy clone-copy trust accepted a linked worktree"
+  mkdir -p "$case_dir/kimi-home"
+  out=$(HOME="$case_dir/kimi-home" KIMI_CODE_HOME='' "$ROOT/bin/fm-kimi-trust.sh" --clone-copy "$clone" "$case_dir/project" t1 \
+    "$case_dir/home" "$case_dir/home/config" 2>&1) || fail "Kimi trust refused a registered clone copy: $out"
+  grep -rqF "\"root\":\"$clone\"" "$case_dir/kimi-home/.kimi-code/workspace-trust" || fail "Kimi trust did not record the clone"
+  HOME="$case_dir/kimi-home" KIMI_CODE_HOME='' "$ROOT/bin/fm-kimi-trust.sh" --clone-copy "$clone" "$case_dir/project" t2 \
+    "$case_dir/home" "$case_dir/home/config" >/dev/null 2>&1 && fail "Kimi trust accepted a clone registered for another task"
+  HOME="$case_dir/kimi-home" KIMI_CODE_HOME='' "$ROOT/bin/fm-kimi-trust.sh" "$clone" "$case_dir/project" >/dev/null 2>&1 \
+    && fail "Kimi worktree-mode trust accepted a clone"
+  HOME="$case_dir/kimi-home" KIMI_CODE_HOME='' "$ROOT/bin/fm-kimi-trust.sh" --clone-copy "$case_dir/linked" "$case_dir/project" t1 \
+    "$case_dir/home" "$case_dir/home/config" >/dev/null 2>&1 && fail "Kimi clone-copy trust accepted a linked worktree"
 
   git init --quiet "$case_dir/copies/t4/project"
   cp "$clone/.git/fm-clone-copy" "$case_dir/copies/t4/project/.git/fm-clone-copy"
   CLAUDE_CONFIG_DIR="$cfg" "$ROOT/bin/fm-claude-trust.sh" --clone-copy "$case_dir/copies/t4/project" "$case_dir/project" t1 \
     "$case_dir/home" "$case_dir/home/config" >/dev/null 2>&1 && fail "Claude trust accepted an unrelated repository with a copied marker"
-  pass "Claude and agy trust register a registered clone copy and refuse anything else"
+  pass "Claude, agy, and Kimi trust register a registered clone copy and refuse anything else"
 }
 
 # A fixture project that carries the real test runner, so it can be invoked from
