@@ -155,6 +155,10 @@ all 13 original entries intact
 The original file's bytes remained an exact prefix of the result (identical SHA-256 over the first `<original size>` bytes), which is the mechanism: a new grant is appended and no existing byte is rewritten, so unrelated entries, ordering, spacing and comments survive.
 A second run left `decided_at` unchanged and added no duplicate.
 
+Concurrent registrations are serialized under a Firstmate-owned `flock` on `.trusted_folders.toml.fm-trust.lock` beside the resolved store, covering the read, append, rename, and readback.
+Without it, two registrations could both read the same store and both report success while only one grant survived; a 2026-10-09 review reproduced exactly that on macOS arm64 with two registered clone copies.
+[`tests/fm-clone-copy.test.sh`](../../tests/fm-clone-copy.test.sh) runs six simultaneous clone-copy registrations over five rounds and requires every grant and the pre-existing entry to survive; against the unlocked helper it failed in three of three runs, and with the lock it passes.
+
 ## Refusals confirmed by hand
 
 Each exited non-zero and wrote no store: the primary checkout, a subdirectory of the worktree, a worktree of an unrelated project, the home directory, the filesystem root, the Grok home, a plain non-git directory, a missing path, a relative `GROK_HOME`, and any argument count other than two.

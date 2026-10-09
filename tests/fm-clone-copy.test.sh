@@ -278,6 +278,46 @@ sys.exit(0 if data.get("folders", {}).get(sys.argv[2], {}).get("trusted") is Tru
   pass "Claude, agy, Kimi, and Grok trust register a registered clone copy and refuse anything else"
 }
 
+# Simultaneous spawns for one project register different clone roots in the
+# same global Grok store. Every one that reports success must keep its grant,
+# and so must the entries that were already there.
+test_concurrent_grok_clone_registrations_keep_every_grant() {
+  local case_dir store round n pids pid clones=() rc failed
+  case_dir="$TMP_ROOT/grok-race"
+  make_repos "$case_dir"
+  make_home "$case_dir"
+  for n in 1 2 3 4 5 6; do
+    clones+=("$(new_clone "$case_dir" "r$n")") || fail "fm_clone_copy_create failed for r$n"
+  done
+  mkdir -p "$case_dir/grok-home/.grok"
+  store="$case_dir/grok-home/.grok/trusted_folders.toml"
+  for round in 1 2 3 4 5; do
+    printf '[folders."/kept/before"]\ntrusted = true\ndecided_at = 1700000000\n' > "$store"
+    chmod 600 "$store"
+    pids=()
+    for n in 1 2 3 4 5 6; do
+      HOME="$case_dir/grok-home" GROK_HOME='' "$ROOT/bin/fm-grok-trust.sh" --clone-copy "${clones[$((n - 1))]}" \
+        "$case_dir/project" "r$n" "$case_dir/home" "$case_dir/home/config" >/dev/null 2>&1 &
+      pids+=("$!")
+    done
+    failed=0
+    for pid in "${pids[@]}"; do
+      rc=0; wait "$pid" || rc=$?
+      [ "$rc" -eq 0 ] || failed=1
+    done
+    [ "$failed" -eq 0 ] || fail "a concurrent Grok registration refused in round $round"
+    python3 -c '
+import sys, tomllib
+folders = tomllib.load(open(sys.argv[1], "rb")).get("folders", {})
+missing = [p for p in sys.argv[2:] if folders.get(p, {}).get("trusted") is not True]
+if missing:
+    print("missing: " + ", ".join(missing))
+    sys.exit(1)
+' "$store" /kept/before "${clones[@]}" || fail "concurrent Grok registrations lost a grant in round $round"
+  done
+  pass "concurrent Grok clone registrations all keep their grants and the existing entries"
+}
+
 # A fixture project that carries the real test runner, so it can be invoked from
 # a registered clone with the environment spawn supplies.
 test_runner_accepts_registered_clone_and_refuses_primary() {
@@ -499,6 +539,7 @@ test_spawn_creates_a_real_clone
 test_spawn_refuses_no_mistakes_ship_for_clone
 test_promote_refuses_no_mistakes_for_clone_scout
 test_trust_accepts_only_a_registered_clone
+test_concurrent_grok_clone_registrations_keep_every_grant
 test_runner_accepts_registered_clone_and_refuses_primary
 test_teardown_refuses_unlanded_clone_and_removes_landed_one
 test_teardown_refuses_unpushed_other_branch

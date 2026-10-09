@@ -78,8 +78,14 @@
 # refused, never flipped: that value can only have been set deliberately, and
 # silently overriding a declined folder is not this helper's call to make. The
 # write lands as an exclusive-create temp file renamed over the store, mode
-# 0600, with a fingerprint check before the rename and a re-read after it,
-# because Grok rewrites this same file whenever a dialog is answered.
+# 0600. Concurrent spawns are SERIALIZED: the whole read, append, rename, and
+# readback runs under an exclusive flock on a sibling lock file keyed to the
+# resolved store path, so two registrations never both read the same store and
+# drop each other's grant. Grok itself does not take that lock, so a
+# fingerprint check before the rename still detects a store Grok rewrote under
+# us (it rewrites this file whenever a dialog is answered) and retries rather
+# than clobbering it; that check narrows the window against an outside writer
+# and is not, on its own, concurrency protection.
 #
 # SECONDMATE HOMES ARE OUT OF SCOPE, AND THAT IS A GAP, NOT A PROOF. This helper
 # covers crewmate and scout launches only: it has the worktree and clone-copy
@@ -249,6 +255,7 @@ fi
 
 if ! python3 - "$STORE" "$TRUST_ROOT_REAL" <<'PY'
 import hashlib
+import fcntl
 import os
 import secrets
 import sys
@@ -395,6 +402,20 @@ def attempt():
         return "dropped"
     return "recorded"
 
+
+# Firstmate's own lock, never Grok's trusted_folders.toml.lock: its locking
+# protocol is not documented, so holding that file could block or confuse Grok.
+lock_path = os.path.join(os.path.dirname(store) or ".", ".trusted_folders.toml.fm-trust.lock")
+lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+deadline = time.monotonic() + 30
+while True:
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except BlockingIOError:
+        if time.monotonic() >= deadline:
+            fail(f"another registration held {lock_path} for 30s; refusing to write {store} without it")
+        time.sleep(0.05)
 
 for index in range(3):
     result = attempt()

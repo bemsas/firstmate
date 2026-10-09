@@ -48,7 +48,7 @@ An untrusted repository raises "Do you trust the contents of this directory?", a
 Grok keys the grant on the repository's MAIN worktree root, not on the directory the pane starts in: in a linked worktree the dialog prints the primary checkout path and the answer is recorded there, so registering the worktree path alone writes a key Grok never reads.
 One grant therefore covers the primary checkout and every worktree and subdirectory of that repository, it covers MCP, LSP, hooks, project instructions, and project skills together, and it persists until removed.
 A registered full-clone task copy (`isolation=clone`) is its own main worktree, so the spawn registers it in `--clone-copy` mode and the grant covers only that disposable copy; on 2026-10-09 Grok 1.0.50 recorded a hand-answered clone copy under the clone's own path.
-The store is `${GROK_HOME:-$HOME/.grok}/trusted_folders.toml`, mode 0600, one `[folders."<abs path>"]` table per root with `trusted` and `decided_at`; the helper appends without rewriting any existing byte and refuses a root recorded as not trusted.
+The store is `${GROK_HOME:-$HOME/.grok}/trusted_folders.toml`, mode 0600, one `[folders."<abs path>"]` table per root with `trusted` and `decided_at`; the helper appends without rewriting any existing byte, serializes concurrent spawns under its own lock so no grant is dropped, and refuses a root recorded as not trusted.
 `../../../docs/verification/grok-folder-trust.md` owns the evidence and `../../../tests/fm-grok-trust.test.sh` owns the regression coverage.
 
 A grok secondmate home is not pre-registered and can still meet the dialog.
