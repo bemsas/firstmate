@@ -31,7 +31,14 @@ def valid_record:
         and (.mergeable | IN("mergeable","conflicting","unknown")) and (.can_merge | type == "boolean")
         and (.review_decision | IN("","APPROVED","CHANGES_REQUESTED","REVIEW_REQUIRED"))
         else (.ready | type == "boolean") end))))) catch false;
-def known($input; $saved):
+def github_repo:
+  if type != "string" then null
+  else
+    ((try capture("^https://github.com/(?<repo>[A-Za-z0-9-]+/[A-Za-z0-9._-]+)/pull/[1-9][0-9]*$") catch null) // null) as $m
+    | if $m == null then null else $m.repo end
+  end;
+# A locally merged fork PR replaces another registered PR on that repository.
+def known($input; $saved; $landed):
   ([($input.tasks // [])[] | select(.kind != "secondmate")
      | select(.pr.url | canonical_url) | {task:.id,url:.pr.url}]
    + [($input.backlog.records // [])[] | select(.structured == true) as $task
@@ -40,11 +47,33 @@ def known($input; $saved):
   | unique_by([.task,.url])
   # A retired record ends that task's ownership even while a backlog link remains.
   | [$saved[] | .task as $task | .records[] | select(.retired != null) | {task:$task,url}] as $retired
-  | map(select(. as $pair | any($retired[]; . == $pair) | not));
+  | map(select(. as $pair | any($retired[]; . == $pair) | not)) as $candidates
+  | [$landed[]? | select(canonical_url)] as $landed_urls
+  | ([$landed_urls[] | github_repo] | map(select(. != null)) | unique) as $landed_repos
+  | if ($landed_repos | length) == 0 then $candidates
+    else
+      [$candidates[]
+        | . as $row
+        | ($row.url | github_repo) as $repo
+        | select(
+            $repo == null
+            or (($landed_repos | index($repo)) == null)
+            or (($landed_urls | index($row.url)) != null))] as $kept
+      | ([$landed_urls[] as $url
+          | select(([$kept[].url] | index($url)) == null)
+          | ($url | github_repo) as $repo
+          | ([$candidates[]
+              | . as $row
+              | select(($row.url | github_repo) == $repo and (($landed_urls | index($row.url)) == null))
+              | $row.task] | first) as $task
+          | select($task != null)
+          | {task:$task,url:$url}] + $kept)
+      | unique_by([.task,.url])
+    end;
 def latest_checks:
   group_by(.name) | map(sort_by([(.started_at // ""),(.id // 0)]) | last);
-def projected($input; $saved; $now; $max_age):
-  known($input; $saved) as $known
+def projected($input; $saved; $now; $max_age; $landed):
+  known($input; $saved; $landed) as $known
   | [$known[] as $k
     | ([$saved[] | select(.task == $k.task) | .records[] | select(.url == $k.url)] | first) as $record
     | ([$input.backlog.records[]? | select(.structured and

@@ -15,7 +15,12 @@
 # URLs accepted by canonical_url in fm-contributions.jq and explicitly linked
 # by a structured backlog row or a task's pr= are owned.
 # Previously observed URLs remain in data/<task>/contributions.json after
-# endpoint teardown. Repository-wide PR discovery never establishes ownership.
+# endpoint teardown.
+# A default-branch commit whose subject records a local apply of a fork PR names the PR that landed.
+# On a repository with such a commit, a registered contribution follows that landed PR.
+# The task whose unlanded PR it replaces owns the landed PR when no durable record already links it.
+# Another registered PR on that same repository that the local history did not merge is not followed.
+# Repository-wide PR discovery never establishes ownership.
 # Only canonical PR and issue URLs on the exact github.com host are supported;
 # other accepted URLs remain visibly unmeasured.
 # poll skips unsupported URLs without forge calls, unavailable output, wakes or
@@ -122,6 +127,8 @@ export FM_HOME FM_STATE_OVERRIDE="$STATE"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-path-lib.sh
 . "$SCRIPT_DIR/fm-path-lib.sh"
+# shellcheck source=bin/fm-tangle-lib.sh
+. "$SCRIPT_DIR/fm-tangle-lib.sh"
 
 fail() { printf 'fm-contributions: %s\n' "$*" >&2; exit 1; }
 usage() { sed -n '2,/^set -eu$/s/^# \{0,1\}//p' "$0"; }
@@ -152,6 +159,51 @@ jq_lib() { # jq options/program via final argument
   local program=${!#}
   set -- "${@:1:$#-1}"
   jq -L "$SCRIPT_DIR" "$@" "include \"fm-contributions\"; $program"
+}
+
+github_owner_repo() { # remote URL -> owner/repository, or return 1
+  local url=$1 path
+  case "$url" in
+    https://github.com/*) path=${url#https://github.com/} ;;
+    git@github.com:*) path=${url#git@github.com:} ;;
+    ssh://git@github.com/*) path=${url#ssh://git@github.com/} ;;
+    *) return 1 ;;
+  esac
+  path=${path%.git}
+  path=${path%/}
+  case "$path" in
+    ''|*/*/*|[!A-Za-z0-9-]*/[!A-Za-z0-9._-]*) return 1 ;;
+    [A-Za-z0-9-]*/[A-Za-z0-9._-]*) printf '%s\n' "$path" ;;
+    *) return 1 ;;
+  esac
+}
+
+local_merge_urls() {
+  local dir=$FM_HOME branch remote repo subject number
+  local -a urls=()
+  if ! git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf '[]\n' > "$TMP/landed.json"
+    return 0
+  fi
+  branch=$(fm_default_branch "$dir" || true)
+  remote=$(git -C "$dir" remote get-url upstream 2>/dev/null || true)
+  [ -n "$remote" ] || remote=$(git -C "$dir" remote get-url origin 2>/dev/null || true)
+  repo=$(github_owner_repo "$remote" || true)
+  if [ -z "$branch" ] || [ -z "$repo" ]; then
+    printf '[]\n' > "$TMP/landed.json"
+    return 0
+  fi
+  while IFS= read -r subject; do
+    if [[ $subject =~ ^local:.*[[:space:]]fork[[:space:]]PR[[:space:]]([1-9][0-9]*)$ ]]; then
+      number=${BASH_REMATCH[1]}
+      urls+=("https://github.com/${repo}/pull/${number}")
+    fi
+  done < <(git -C "$dir" log "$branch" --format='%s' --grep='fork PR ')
+  if [ "${#urls[@]}" -eq 0 ]; then
+    printf '[]\n' > "$TMP/landed.json"
+    return 0
+  fi
+  printf '%s\n' "${urls[@]}" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique' > "$TMP/landed.json"
 }
 
 read_saved() {
@@ -185,10 +237,12 @@ get_input() {
 }
 
 project() {
+  local_merge_urls
   jq_lib -n --slurpfile input "$1" --slurpfile saved "$TMP/saved.json" \
+    --slurpfile landed "$TMP/landed.json" \
     --argjson now "$EPOCH" --argjson max_age "$MAX_AGE" --argjson errors "$ERRORS" \
     --arg all "${2:-}" '
-    projected($input[0];$saved[0];$now;$max_age) as $rows
+    projected($input[0];$saved[0];$now;$max_age;$landed[0]) as $rows
     | summary($rows;($errors + (if $input[0].backlog.present == true then 0 else 1 end)))
     # Final rows never expire; a home holding only final rows is valid from now.
     | .valid_until = (if ($rows | length) > 0 and all($rows[]; .final) then $now else .valid_until end) + $max_age
@@ -480,12 +534,14 @@ poll() {
   acquire
   get_input
   read_saved
+  local_merge_urls
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
   clear_unsupported_errors
   # Only supported URLs enter final settlement and the forge-read rotation.
   # One line per distinct URL: the URL, then every owning task.
-  jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
-    known($input[0];$saved[0]) | map(select(.url | supported_url))
+  jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" \
+    --slurpfile landed "$TMP/landed.json" '
+    known($input[0];$saved[0];$landed[0]) | map(select(.url | supported_url))
     | group_by(.url) | map({url:.[0].url,tasks:(map(.task) | unique)})
     | .[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
   : > "$TMP/live.tsv"
@@ -553,8 +609,10 @@ arm() {
   acquire
   if [ "${1:-}" = --if-owned ]; then
     get_input; read_saved
+    local_merge_urls
     if [ "$ERRORS" -eq 0 ] && ! jq_lib -ne --slurpfile input "$TMP/input.json" \
-      --slurpfile saved "$TMP/saved.json" 'known($input[0];$saved[0]) | length > 0' >/dev/null; then
+      --slurpfile saved "$TMP/saved.json" --slurpfile landed "$TMP/landed.json" \
+      'known($input[0];$saved[0];$landed[0]) | length > 0' >/dev/null; then
       return 0
     fi
   fi
@@ -593,8 +651,10 @@ case "${1:-}" in
     [ "$#" -ge 3 ] || fail 'task, URL and evidence required'
     task=$1; url=$2; shift 2
     acquire; get_input; read_saved
-    jq_lib -ne --slurpfile input "$TMP/input.json" --arg task "$task" --arg url "$url" --slurpfile saved "$TMP/saved.json" \
-      'any(known($input[0];$saved[0])[]; .task == $task and .url == $url)' >/dev/null \
+    local_merge_urls
+    jq_lib -ne --slurpfile input "$TMP/input.json" --arg task "$task" --arg url "$url" \
+      --slurpfile saved "$TMP/saved.json" --slurpfile landed "$TMP/landed.json" \
+      'any(known($input[0];$saved[0];$landed[0])[]; .task == $task and .url == $url)' >/dev/null \
       || fail 'contribution is not owned by this durable task'
     jq -e --arg task "$task" --arg url "$url" '.[] | select(.task == $task) | .records[] | select(.url == $url)' "$TMP/saved.json" > "$TMP/row.json" \
       || fail 'observe the contribution before recording evidence'
