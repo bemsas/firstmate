@@ -1611,6 +1611,54 @@ test_matrix_opencode_below_floor_and_sidebar() {
 test_count_and_clip_columns_are_locale_independent
 test_matrix_opencode_below_floor_and_sidebar
 
+# Floor-to-bar alignment is its own invariant. The fit test above only watches
+# the floor's right edge, so a floor shifted off the left bar keeps that edge,
+# still cuts in the sidebar gap, and still satisfies every fit condition. It
+# does not credibly close this composer. The cursorless read then discards the
+# selection, because the hint bar below an unproven floor is unexplained, and
+# the cursor read keeps the sidebar. Neither verdict is empty.
+test_leftbar_floor_aligns_to_bar() {
+  local pad pad58 pad61 floor_aligned floor_right floor_left hint shifted
+  oc_align_row() {  # <left-bar content> [sidebar]
+    local content=$1 side=${2:-} cols
+    cols=$(printf '%s\n' "$content" | fm_composer_count_columns)
+    while [ "$cols" -lt 69 ]; do content="$content "; cols=$((cols + 1)); done
+    [ -n "$side" ] || { printf '%s' "$1"; return 0; }
+    printf '%s%s' "$content" "$side"
+  }
+  align_screen() {  # <floor>
+    printf '%s\n%s\n%s\n%s\n%s\n%s' \
+      "$(oc_align_row '  ┃' 'session: fix the parser')" \
+      "$(oc_align_row '  ┃  Ask anything… "Fix a TODO in the codebase"' '/home/u/app:main')" \
+      "$(oc_align_row '  ┃' '1.2k tokens')" \
+      "$(oc_align_row '  ┃  Build · Big Pickle OpenCode Zen' '0 tokens')" \
+      "$1" "$hint"
+  }
+  pad='                                                            ' # 60
+  pad58=${pad:0:58}
+  pad61="${pad} "
+  # Same right edge (63). Only the column of `╹` moves, relative to `┃` at 2.
+  floor_aligned="  ╹${pad// /▀}"
+  floor_right="    ╹${pad58// /▀}"
+  floor_left=" ╹${pad61// /▀}"
+  hint='             tab agents  ctrl+p commands'
+
+  assert_screen "aligned floor still bounds the sidebar" \
+    empty "$CAPS_STYLED" "$(align_screen "$floor_aligned")"
+  for shifted in "$floor_right" "$floor_left"; do
+    assert_screen "a floor shifted off the left bar is not empty" \
+      unknown "$CAPS_STYLED" "$(align_screen "$shifted")"
+    assert_screen "a floor shifted off the left bar stays unproven without styling" \
+      unknown "$CAPS_PLAIN" "$(align_screen "$shifted")"
+    assert_screen "a floor shifted off the left bar is not empty on tmux" \
+      pending "$CAPS_TMUX" "$(align_screen "$shifted")" 1
+  done
+  unset -f oc_align_row align_screen
+  pass "left-bar floor: a floor shifted off the bar no longer proves an empty composer"
+}
+
+test_leftbar_floor_aligns_to_bar
+
 # --- the stop gate's own question: was anything OBSERVED? --------------------
 # fm_composer_no_content_observed is the only thing standing between
 # bin/fm-control.sh `stop` and a SIGTERM, so it answers about OBSERVATION, not

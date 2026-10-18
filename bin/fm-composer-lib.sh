@@ -610,8 +610,10 @@ fm_composer_strip_braille() {
 # The composer's own closing floor (`╹▀▀…`, _fm_composer_leftbar_floor_row) is
 # drawn exactly as wide as the composer, so its right edge IS the composer's
 # right edge - a structural bound read from the pane itself, not a guess and not
-# a theme or version constant. The two helpers below measure that width and cut
-# every composer row to it.
+# a theme or version constant. A floor whose `╹` does not share that composer's
+# `┃` column is a different shape, and `_fm_composer_leftbar_bound` refuses it
+# even when this right edge would satisfy the fit test. The two helpers below
+# measure that width and cut every composer row to it.
 #
 # Both walk BYTES under LC_ALL=C, the idiom fm_composer_strip_braille above
 # records. A UTF-8 continuation byte (\200-\277) continues the character already
@@ -1736,6 +1738,18 @@ _fm_composer_leftbar_row_content_var() {  # <varname> <plain-row>
   printf -v "$__fmrc_name" '%s' "$__fmrc_text"
 }
 
+# Display column of the first <glyph> on <row>. Absent means failure, so a
+# missing bar cannot be read as column 0.
+_fm_composer_glyph_column() {  # <glyph> <row> -> column
+  local glyph=$1 row=$2 prefix
+  case "$row" in
+    *"$glyph"*) ;;
+    *) return 1 ;;
+  esac
+  prefix=${row%%"$glyph"*}
+  printf '%s\n' "$prefix" | fm_composer_count_columns
+}
+
 # _fm_composer_leftbar_bound: THE one owner of the composer's right edge. Print
 # the display column that bounds the left-bar composer occupying rows
 # <first>..<last>, and fail when the row directly below it is not a floor that
@@ -1743,9 +1757,14 @@ _fm_composer_leftbar_row_content_var() {  # <varname> <plain-row>
 # floor row, because it has to be an absolute column in the captured row rather
 # than a width relative to the floor's own indent.
 #
-# Two properties must hold, and each rejects a different wrong floor:
+# Three properties must hold, and each rejects a different wrong floor:
 #
 #   SHAPE - the row below is `╹▀…`, the composer's own closing glyph.
+#   ALIGN - the floor joins THIS composer's left bar. In the untrimmed capture
+#           the floor's `╹` and every closed row's `┃` share one column. FIT
+#           cannot see this: it only watches the right edge, so a floor shifted
+#           off the bar keeps that edge, still cuts cleanly, and would otherwise
+#           prove the same bound.
 #   FIT   - the bound describes THIS composer. Three things establish that, and
 #           all of them are about what the clip would do to the rows the floor
 #           closes:
@@ -1770,14 +1789,18 @@ _fm_composer_leftbar_row_content_var() {  # <varname> <plain-row>
 _fm_composer_leftbar_bound() {  # <plain-screen> <first> <last> -> width
   local plain=$1 first=$2 last=$3
   local raw trimmed width row clipped whole cols inbound=0 blanked=0 panel=0
+  local floor_col bar_col
   raw=$(_fm_composer_screen_row "$((last + 1))" "$plain")
   trimmed=$raw
   fm_composer_normalize_trim_var trimmed
   _fm_composer_leftbar_floor_row "$trimmed" || return 1
+  floor_col=$(_fm_composer_glyph_column '╹' "$raw") || return 1
   width=$(printf '%s\n' "${raw%"${raw##*[![:space:]]}"}" | fm_composer_count_columns)
   row=$first
   while [ "$row" -le "$last" ]; do
     raw=$(_fm_composer_screen_row "$row" "$plain")
+    bar_col=$(_fm_composer_glyph_column '┃' "$raw") || return 1
+    [ "$bar_col" = "$floor_col" ] || return 1
     _fm_composer_leftbar_row_content_var whole "$raw"
     clipped=$(printf '%s\n' "$raw" | fm_composer_clip_columns "$width")
     cols=$(printf '%s\n' "${clipped%"${clipped##*[![:space:]]}"}" | fm_composer_count_columns)
