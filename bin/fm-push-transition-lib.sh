@@ -133,7 +133,13 @@ mark_surfaced() {  # <status-file> <captured-end-offset> <captured-identity>
   local f=$1 task
   case "$f" in *.status) ;; *) return 0 ;; esac
   task=$(basename "$f"); task="${task%.status}"
-  status_presentation_marker_commit "$(_hb_surfaced_path "$task")" "$f" "$2" "$3"
+  status_presentation_marker_commit "$(_hb_surfaced_path "$task")" "$f" "$2" "$3" || return
+  # Completion work is shared by poll, heartbeat, and native-transition wakes.
+  # Never hold wake delivery open for capture/indexing or forge checks.
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    nohup bash "$FM_PUSH_TRANSITION_LIB_DIR/fm-worker-done.sh" "$task" "$2" "$3" \
+    </dev/null >>"$STATE/worker-done.log" 2>&1 &
+  return 0
 }
 
 mark_surface_reported() {  # <status-file> <reported-signature>
