@@ -635,6 +635,16 @@ The bound is required rather than cosmetic because churn and pane staleness read
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
 
+## Done checklist (config/done-check)
+
+The optional local, gitignored `config/done-check` file holds one of `off`, `shadow`, or `on`, and `FM_DONE_CHECK` overrides it; absent, empty, or unrecognized means `off`, which changes nothing.
+When a ship worker reports done with a GitHub PR, `bin/fm-pr-check.sh` runs `bin/fm-done-check.sh` before it arms merge monitoring.
+`shadow` computes the checklist and appends the verdict to `state/done-check.log` without steering or blocking anything.
+`on` additionally steers the worker back through `fm-send` with the specific failures, at most twice per task; the next failure exits `11` so firstmate escalates, and a bounce or escalation leaves merge monitoring unarmed until the worker reports done on a new head.
+An unreadable fact (forge error, missing worktree ref, no test evidence) is `unknown` and never bounces.
+The checks read the task's brief at `data/<id>/brief.md`: `## Base branch` (or `FM_DONE_CHECK_BASE`, or meta `base=`) names the intended base, `## Files in scope` lists glob bullets, and `## Tests` lists the commands the worker must show passing in `data/<id>/receipt.json`, `report.md`, or `tests.log`; a section that is absent skips its check.
+`bin/fm-done-check.sh`'s header owns the exact checks, receipt shape, and exit codes.
+
 ## Parked-gate wait deferral (config/wedge-defer-parked-gate)
 
 The optional local, gitignored `config/wedge-defer-parked-gate` presence flag opts this home into a default-off further form of wait evidence in the watcher's wedge timer.

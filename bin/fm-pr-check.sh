@@ -130,6 +130,18 @@ if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v g
   fi
 fi
 
+# The done checklist (bin/fm-done-check.sh) is off unless the home enables it. A
+# bounce (10) or an escalation (11) stops here so merge monitoring is never armed
+# for a PR the worker must still fix; every other result proceeds as before.
+if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
+  DONE_CHECK_RC=0
+  "$SCRIPT_DIR/fm-done-check.sh" "$ID" "$URL" >/dev/null || DONE_CHECK_RC=$?
+  case "$DONE_CHECK_RC" in
+    10) echo "error: $URL failed the done checklist and the worker was steered to fix it; arm again when it reports done on a new head" >&2; exit 1 ;;
+    11) echo "error: $URL failed the done checklist after the bounce limit; firstmate must decide before merge monitoring is armed" >&2; exit 1 ;;
+  esac
+fi
+
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 # pr_head is recorded only when the forge's CLI can supply it. gh exposes the
