@@ -57,6 +57,15 @@
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
+#   --claude-sandbox opts this task into Claude Code's Bash sandbox (default
+#   off, canonical Claude ship/scout launches only). The policy is retained on
+#   relaunch; switching that task to another harness is refused. Dependencies
+#   must be available or Claude exits (failIfUnavailable). It selects regular
+#   permissions unless config/claude-permission-mode explicitly selects auto.
+#   Only local settings (including generated worker hooks) are loaded, so user
+#   and project sandbox exceptions cannot widen this per-launch policy.
+#   bin/fm-claude-sandbox.sh owns the generated policy, including the short
+#   task/home-specific temp root, task plumbing grants, and keyring exclusions.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
@@ -832,6 +841,7 @@ RELAUNCH=0
 # Opt-in only: exact-resume presentation-order lock waits instead of refusing.
 # Absent/unset keeps upstream refuse-on-contention. See header.
 HERDR_RESUME_LOCK_WAIT=0
+CLAUDE_SANDBOX=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -902,6 +912,7 @@ for a in "$@"; do
     ;;
   --relaunch) RELAUNCH=1 ;;
   --herdr-resume-lock-wait) HERDR_RESUME_LOCK_WAIT=1 ;;
+  --claude-sandbox) CLAUDE_SANDBOX=1 ;;
   --harness) want_value=harness ;;
   --harness=*)
     HARNESS_ARG=${a#--harness=}
@@ -1809,6 +1820,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  [ "$CLAUDE_SANDBOX" = 0 ] || shared_args+=(--claude-sandbox)
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
@@ -2175,6 +2187,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   esac
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
+  [ "$(fm_meta_get "$RELAUNCH_META" claude_sandbox)" != on ] || CLAUDE_SANDBOX=1
   [ -n "$KIND" ] || KIND=ship
   # A secondmate whose endpoint is gone already has ONE owner for that
   # recovery: the session-start liveness sweep respawns it with
@@ -2836,6 +2849,16 @@ polytoken)
   }
   ;;
 esac
+
+# An explicit sandbox request must never silently select an unsandboxed adapter.
+if [ "$CLAUDE_SANDBOX" = 1 ]; then
+  if [ "$HARNESS" != claude ] || [ "$RAW_LAUNCH" != 0 ] || [ "$KIND" = secondmate ]; then
+    echo "error: --claude-sandbox requires a canonical Claude ship/scout launch; sandboxed tasks cannot switch to another harness" >&2
+    exit 1
+  fi
+  command -v jq >/dev/null 2>&1 || { echo "error: --claude-sandbox requires jq" >&2; exit 1; }
+  [ "$CLAUDE_PERMISSION_MODE" = auto ] || CLAUDE_PERM_FLAG='--permission-mode default'
+fi
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
@@ -5249,7 +5272,29 @@ esac
 # this user and writable by nobody else, then tightened, so no other local user
 # can plant or swap a file in it. The staged launch command lives in a sibling
 # directory namespaced by home identity, not in this shared per-id root.
+spawn_launch_home_token() {
+  local home=$1 root hash
+  root=$(cd "$home" 2>/dev/null && pwd -P) || root=$home
+  if command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$root" | sha256sum | awk '{print $1}')
+  else
+    return 1
+  fi
+  case "$hash" in
+    *[!0-9a-fA-F]*|'') return 1 ;;
+  esac
+  printf '%s' "$hash"
+}
 TASK_TMP="/tmp/fm-$ID"
+if [ "$CLAUDE_SANDBOX" = 1 ]; then
+  # A long CLAUDE_CODE_TMPDIR silently falls back to the shared per-user root.
+  # Include the home and task identity and keep the base below 30 bytes.
+  sandbox_hash=$(spawn_launch_home_token "$FM_HOME/state/$ID") || exit 1
+  sandbox_parent=$("$SCRIPT_DIR/fm-claude-sandbox.sh" --temp-parent) || exit 1
+  TASK_TMP="$sandbox_parent/${sandbox_hash:0:14}"
+fi
 if (umask 077 && mkdir "$TASK_TMP") 2>/dev/null; then
   [ "$HARNESS" != polytoken ] || SPAWN_TASK_TMP_CREATED=1
 else
@@ -5907,7 +5952,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp claude_sandbox base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5930,6 +5975,7 @@ preserve_relaunch_meta() {
   [ "$EXTERNAL_REVIEW" = 0 ] || echo "forge=external"
   [ -z "$EXTERNAL_BACKUP_REMOTE" ] || echo "backup_remote=$EXTERNAL_BACKUP_REMOTE"
   [ -z "$EXTERNAL_BACKUP_REMOTE" ] || echo "backup_prefix=$EXTERNAL_BACKUP_PREFIX"
+  [ "$CLAUDE_SANDBOX" = 0 ] || echo "claude_sandbox=on"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   # The worker account pin, only when this home declares one, so an unpinned
@@ -6090,6 +6136,14 @@ case "$LAUNCH" in
 *__CLAUDESETTINGS__*)
   if [ "$KIND" = secondmate ]; then
     LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$(shell_quote "$STATE_REAL/$ID.claude-settings.json")}
+  elif [ "$CLAUDE_SANDBOX" = 1 ]; then
+    sandbox_settings=$("$SCRIPT_DIR/fm-claude-sandbox.sh" "$WT" "$FM_ROOT" "$FM_HOME" "$STATE" "$DATA" "$CONFIG" "$ID" "$TASK_TMP") || exit 1
+    sandbox_settings=$(jq -cn --argjson policy "$sandbox_settings" --arg keep "$KEEP_AI_TRAILERS" '
+      {feedbackDrafts: "off"} + (if $keep == "1" then {} else {attribution: {commit: "", pr: "", sessionUrl: false}} end) * $policy
+    ') || exit 1
+    LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$(shell_quote "$sandbox_settings")}
+    LAUNCH=${LAUNCH/--settings /--setting-sources local --settings }
+    LAUNCH="CLAUDE_CODE_TMPDIR=$(shell_quote "$TASK_TMP") $LAUNCH"
   else
     claude_settings="'{\"feedbackDrafts\":\"off\"__CLAUDEATTRIBUTION__}'"
     LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$claude_settings}
@@ -6227,21 +6281,7 @@ fi
 # Implement the launch-delivery contract in this script's header. The full
 # home-identity hash isolates equal task ids across homes, and the spawn token in
 # the final filename keeps a buffered source line bound to this incarnation.
-spawn_launch_home_token() {
-  local home=$1 root hash
-  root=$(cd "$home" 2>/dev/null && pwd -P) || root=$home
-  if command -v shasum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print $1}')
-  elif command -v sha256sum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$root" | sha256sum | awk '{print $1}')
-  else
-    return 1
-  fi
-  case "$hash" in
-    *[!0-9a-fA-F]*|'') return 1 ;;
-  esac
-  printf '%s' "$hash"
-}
+
 LAUNCH_HOME_TOKEN=$(spawn_launch_home_token "$FM_HOME") || LAUNCH_HOME_TOKEN=
 if [ -z "$LAUNCH_HOME_TOKEN" ]; then
   echo "error: could not derive a home identity for the staged launch file" >&2

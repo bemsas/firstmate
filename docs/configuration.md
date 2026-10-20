@@ -1112,6 +1112,13 @@ The relaunch checks the selected pin before stopping the current agent.
 Per-secondmate pins stay in the primary home and are not inherited or copied into the secondmate's home.
 A matching primary-side per-secondmate pin for a remote route refuses before remote launch, because its account must be configured on that host instead.
 
+## Claude worker sandbox
+
+The experimental per-task Claude Bash sandbox is opt-in and leaves unselected workers unchanged.
+[`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns its flag, launch permissions, relaunch policy and supported task kinds; [`fm-claude-sandbox.sh`](../bin/fm-claude-sandbox.sh) owns task plumbing grants and the narrow GitHub read exceptions needed for host keyring authentication.
+Those exceptions, hooks and Claude file tools run outside the Bash boundary, so this does not isolate the whole agent process.
+[Runtime verification](verification/runtime-backends.md#claude-worker-bash-sandbox) records the current live scout proof and its refresh command.
+
 ## Lavish server address (config/lavish-axi-host)
 
 The optional local, gitignored `config/lavish-axi-host` contains one non-empty address without whitespace for the per-machine Lavish server.

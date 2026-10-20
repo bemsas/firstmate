@@ -12,6 +12,28 @@ Verified on 2026-10-14 with Polytoken 0.9.0 on macOS arm64 using the tmux worker
 [Polytoken verification](polytoken.md) owns the commands, session-model proof, and lifecycle output; its credentialed live guard refreshes the evidence.
 This does not verify a Polytoken primary, secondmate, or native Herdr pane.
 
+## Claude worker Bash sandbox
+
+Verified on Linux on 2026-10-20 with Claude Code 2.1.302, using the current [sandbox](https://code.claude.com/docs/en/sandboxing) and [settings](https://code.claude.com/docs/en/settings) documentation.
+The credentialed guard runs a finite real Claude scout with the generated launch policy in a disposable repository, without allocating any fleet endpoint or pool worktree.
+It checks host-visible writes, inbox acknowledgement and fleet-ledger capture, synthetic home, shared-temp and other-worker canaries, an outside write, allowed and refused network requests, and a standalone GitHub read through the keyring exception.
+Refresh with:
+
+```sh
+FM_CLAUDE_SANDBOX_LIVE=1 bin/fm-test-run.sh tests/fm-claude-sandbox-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - 2.1.302 (Claude Code): sandbox scout wrote status/report, acknowledged inbox, hid shared canary, contained sibling write and refused unlisted host, and read GitHub via keyring exception
+```
+
+The portable spawn regression in `tests/fm-spawn-claude-sandbox.test.sh` separately executes emitted launch commands to check the default-off path and policy/temp transport under the environment filter.
+The sandbox changes a provider-independent launch string; no live backend lifecycle was exercised by this guard.
+Auto permission mode has portable launch coverage; the live scout used regular permissions.
+File tools, hooks, and excluded GitHub reads are outside the Bash sandbox, as documented by the vendor.
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.

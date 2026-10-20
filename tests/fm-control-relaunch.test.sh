@@ -1402,6 +1402,29 @@ test_spawn_relaunch_of_promoted_scout_uses_the_recorded_branch() {
   pass "fm-spawn --relaunch: a promoted scout with a recorded custom branch relaunches on it instead of being refused"
 }
 
+test_sandbox_relaunch_retains_policy_and_refuses_switch_before_stop() {
+  local dir home id out temp
+  id="sandbox-rl-$$"
+  dir=$(new_case sandbox "$id")
+  add_ship_task "$dir" "$id" claude
+  home="$dir/home"
+  mkdir -p "$home/config"
+  echo 'claude_sandbox=on' >> "$home/state/$id.meta"
+  if out=$(run_control "$dir" "$id" relaunch --harness codex --note 'switch probe'); then
+    fail 'sandbox harness switch should refuse'
+  fi
+  assert_contains "$out" 'retains its Claude sandbox policy' 'sandbox policy refuses switch'
+  assert_equals claude "$(cat "$dir/fake/command")" 'sandbox refusal precedes stop'
+  out=$(run_control "$dir" "$id" relaunch --note 'same sandbox task')
+  assert_contains "$out" "relaunched $id harness=claude" 'sandbox relaunch succeeds'
+  assert_equals on "$(meta_field "$dir" "$id" claude_sandbox)" 'sandbox policy survives relaunch'
+  temp=$(meta_field "$dir" "$id" tasktmp)
+  TASK_TMPS+=("$temp")
+  [ "${#temp}" -le 30 ] || fail 'replacement temp root too long'
+  assert_contains "$(cat "$dir/fake/literal")" 'CLAUDE_CODE_TMPDIR=' 'replacement receives temp override'
+  pass 'fm-control relaunch: sandbox policy survives replacement and refuses a harness switch before stop'
+}
+
 test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
   local dir home id brief launch out mode rule
   for mode in no-mistakes direct-PR local-only; do
@@ -2812,6 +2835,7 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_spawn_relaunch_of_promoted_scout_uses_the_recorded_branch
+test_sandbox_relaunch_retains_policy_and_refuses_switch_before_stop
 test_promoted_scout_relaunch_receives_the_current_delivery_contract
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
