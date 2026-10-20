@@ -2057,6 +2057,18 @@ if [ "$RELAUNCH" -eq 0 ]; then
       echo "warning: backend=orca resolves config/launch-env-allowlist names from the Orca terminal's own environment, not this home's; set config/launch-env-tmux-session to take them from a scoped tmux session" >&2
     fi
   fi
+  if [ "$BACKEND" = acp ]; then
+    # PILOT (docs/acp-backend.md): opt-in per spawn only, never from config/backend or
+    # auto-detection, scouts only, on the one verified agent.
+    if [ "$BACKEND_SET" -ne 1 ] || [ "$KIND" != scout ]; then
+      echo "error: backend=acp is a scout-only pilot selected with an explicit --backend acp on a --scout spawn" >&2
+      exit 1
+    fi
+    if [ -z "$MODEL" ]; then
+      echo "error: backend=acp requires an explicit --model (the pilot runs on a free model)" >&2
+      exit 1
+    fi
+  fi
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
@@ -4142,6 +4154,66 @@ fi
 if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   echo "error: task $ID has a pending authoritative backlog close at $STATE/$ID.backlog-close; finish or repair that close before dispatching a new worker" >&2
   exit 1
+fi
+
+# PILOT hand-off for --backend acp (docs/acp-backend.md): bin/fm-acp-harness.py leases the
+# worktree, owns the agent process, and writes the task record; this script keeps the
+# locks, the slot claim, the atomic record publication, and the backlog transition.
+# Everything below this block is the pane path and never runs for an acp task.
+spawn_acp_scout() {
+  local harness="$FM_ROOT/bin/fm-acp-harness.py" meta_tmp="$STATE/.$ID.meta.spawn.${BASHPID:-$$}"
+  if [ "$HARNESS" != opencode ]; then
+    echo "error: backend=acp supports only --harness opencode in the pilot, not '$HARNESS'" >&2
+    exit 1
+  fi
+  WT=$(FM_HOME="$FM_HOME" python3 "$harness" lease "$ID" "$PROJ_ABS") || exit 1
+  spawn_acp_return_slot() { (cd "$PROJ_ABS" && treehouse return --force "$WT") >/dev/null 2>&1 || echo "warning: could not return leased worktree $WT; return it by hand" >&2; }
+  if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+    if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
+      echo "error: could not claim Treehouse pool slot $WT for task $ID" >&2
+      spawn_acp_return_slot
+      exit 1
+    fi
+    SPAWN_SLOT_CLAIMED=1
+  fi
+  freshen_spawn_worktree_base "$WT" || { spawn_acp_return_slot; exit 1; }
+  SPAWN_META_TMP=$meta_tmp
+  # The same envelope the pane launches carry around the rendered launch brief.
+  "$FM_ROOT/bin/fm-operational-input.sh" encode launch-brief <"$BRIEF" >"$meta_tmp.brief" || {
+    rm -f "$meta_tmp.brief"
+    spawn_acp_return_slot
+    exit 1
+  }
+  FM_HOME="$FM_HOME" python3 "$harness" spawn "$ID" "$PROJ_ABS" --brief "$meta_tmp.brief" --worktree "$WT" \
+    --model "$MODEL" --max-cost "${FM_ACP_MAX_COST:-0}" --meta-out "$meta_tmp" || {
+    rm -f "$meta_tmp.brief"
+    FM_HOME="$FM_HOME" python3 "$harness" stop "$ID" >/dev/null 2>&1 || true
+    spawn_acp_return_slot
+    exit 1
+  }
+  rm -f "$meta_tmp.brief"
+  SPAWN_FRESH_COMMIT_PENDING=1
+  if ! fm_backlog_atomic_transition publish "$meta_tmp" "$STATE/$ID.meta" "task record" "$STATE"; then
+    echo "error: task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+    SPAWN_FRESH_COMMIT_PENDING=0
+    FM_HOME="$FM_HOME" python3 "$harness" stop "$ID" >/dev/null 2>&1 || true
+    spawn_acp_return_slot
+    exit 1
+  fi
+  SPAWN_META_TMP=
+  if [ "$BACKLOG_TRANSITION" = 1 ] && ! fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"; then
+    echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); stopping its agent" >&2
+    spawn_fresh_commit_rollback || true
+    FM_HOME="$FM_HOME" python3 "$harness" stop "$ID" >/dev/null 2>&1 || true
+    spawn_acp_return_slot
+    exit 1
+  fi
+  SPAWN_FRESH_COMMIT_PENDING=0
+  echo "spawned $ID harness=$HARNESS kind=$KIND window=acp:$ID worktree=$WT backend=acp"
+  exit 0
+}
+if [ "$BACKEND" = acp ] && [ "$RELAUNCH" -eq 0 ]; then
+  spawn_acp_scout
 fi
 
 W="fm-$ID"

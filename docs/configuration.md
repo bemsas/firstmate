@@ -421,6 +421,7 @@ For spawn-capable adapters, the runtime session-provider backend controls where 
 | `zellij` | Experimental; no dedicated real-backend CI lane | [`docs/zellij-backend.md`](zellij-backend.md) |
 | `orca` | Experimental; no dedicated real-backend CI lane | [`docs/orca-backend.md`](orca-backend.md) |
 | `cmux` | Experimental; no dedicated real-backend CI lane | [`docs/cmux-backend.md`](cmux-backend.md) |
+| `acp` | Pilot; scouts only, chosen only by an explicit `--backend acp` | [`docs/acp-backend.md`](acp-backend.md) |
 
 Treehouse remains the worktree provider for tmux, herdr, zellij, and cmux, since herdr, zellij, and cmux are session providers only; Orca provides both the task worktree and terminal endpoint.
 

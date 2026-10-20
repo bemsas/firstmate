@@ -301,6 +301,10 @@
       "audience": "public-product"
     },
     {
+      "path": "docs/acp-backend.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/agent-control.md",
       "audience": "maintainer-architecture"
     },

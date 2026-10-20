@@ -288,7 +288,7 @@ test_supported_backend_endpoint_records_validate() {
     "backend=cmux" "cmux_workspace_id=workspace-1" "cmux_surface_id=surface-2"
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid cmux endpoint refused"
 
-  for backend in tmux herdr zellij orca cmux; do
+  for backend in tmux herdr zellij orca cmux acp; do
     set +e
     fm_backend_kill "$backend" "" >/dev/null 2>&1
     target=$?
