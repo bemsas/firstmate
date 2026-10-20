@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Code-checked done checklist for a ship worker's PR, run when the worker reports
-# done with a PR and before merge monitoring is armed (bin/fm-pr-check.sh calls it).
-# Usage: fm-done-check.sh <task-id> <pr-url>
+# done with a PR. fm-pr-check.sh calls it before arming merge monitoring;
+# fm-watch.sh calls --auto on complete, newly observed ship done: lines with one PR.
+# Usage: fm-done-check.sh [--auto] <task-id> <pr-url>
+# --auto atomically stamps canonical pr= into ship metadata, even with the
+# checklist off, and pr_head= when the enabled checklist can read a valid head.
+# It shares the metadata lock with fm-pr-check.sh and never arms a merge poll.
 #
 # Switch: FM_DONE_CHECK, else the first non-comment line of config/done-check
 # (under FM_CONFIG_OVERRIDE or $FM_HOME/config). Values:
-#   off     (default; absent, empty, or any unrecognized value) - exit 0, nothing read or written.
+#   off     (default; absent, empty, or any unrecognized value) - exit 0; only --auto binds pr=.
 #   shadow  compute the verdict, append it to state/done-check.log, never steer, always exit 0.
 #   on      as shadow, and a failed checklist steers the worker back through fm-send.
 #
@@ -48,8 +52,10 @@ BOUNCE_LIMIT=2
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 
+AUTO=0
+if [ "${1:-}" = --auto ]; then AUTO=1; shift; fi
 if [ "$#" -ne 2 ]; then
-  echo "usage: fm-done-check.sh <task-id> <pr-url>" >&2
+  echo "usage: fm-done-check.sh [--auto] <task-id> <pr-url>" >&2
   exit 2
 fi
 ID=$1
@@ -72,13 +78,48 @@ done_check_mode() {
 }
 
 MODE=$(done_check_mode)
-[ "$MODE" != off ] || exit 0
+[ "$MODE" != off ] || [ "$AUTO" -eq 1 ] || exit 0
 
 if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
   echo "error: invalid done check request" >&2
   exit 2
 fi
 URL=$FM_PR_URL
+
+# Automatic done ingestion binds the PR even when the optional checklist is off.
+# Use the same task metadata lock as fm-pr-check; no merge poll is armed here.
+stamp_pr() {  # [head]
+  local lock tmp device
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  lock=$(fm_meta_lock_path "$STATE/$ID.meta") || return 1
+  fm_lock_acquire_wait "$lock" || return 1
+  if [ ! -f "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ] \
+    || [ "$(fm_pr_file_link_count "$STATE/$ID.meta")" != 1 ] \
+    || [ "$(sed -n 's/^kind=//p' "$STATE/$ID.meta")" != ship ]; then
+    fm_lock_release "$lock"
+    return 1
+  fi
+  device=$(fm_pr_file_device "$STATE") || { fm_lock_release "$lock"; return 1; }
+  tmp=$(umask 077; mktemp "$STATE/.fm-done-meta.XXXXXX") || { fm_lock_release "$lock"; return 1; }
+  if awk '!/^(pr|pr_head)=/' "$STATE/$ID.meta" > "$tmp" \
+    && printf 'pr=%s\n' "$URL" >> "$tmp" \
+    && { [ -z "${1:-}" ] || printf 'pr_head=%s\n' "$1" >> "$tmp"; } \
+    && fm_pr_private_file_valid "$tmp" 600 "$device" \
+    && fm_pr_regular_destination_on_device_or_absent "$STATE/$ID.meta" "$device" \
+    && mv -f -- "$tmp" "$STATE/$ID.meta"; then
+    fm_lock_release "$lock"
+    return 0
+  fi
+  rm -f -- "$tmp"
+  fm_lock_release "$lock"
+  return 1
+}
+if [ "$AUTO" -eq 1 ]; then
+  stamp_pr || { echo 'error: could not bind the ship task PR' >&2; exit 3; }
+fi
+[ "$MODE" != off ] || exit 0
 
 RESULTS=
 note() {  # <name> <pass|fail|unknown|skip> <detail>
@@ -112,6 +153,9 @@ MERGEABLE=$(printf '%s' "$PR_JSON" | jq -r '.mergeable // empty' 2>/dev/null) ||
 MERGE_STATE=$(printf '%s' "$PR_JSON" | jq -r '.mergeStateStatus // empty' 2>/dev/null) || MERGE_STATE=
 fm_pr_head_valid "$HEAD" || unknown_exit "the forge returned no usable head commit"
 [ -n "$BASE" ] || unknown_exit "the forge returned no base branch"
+if [ "$AUTO" -eq 1 ]; then
+  stamp_pr "$HEAD" || unknown_exit "the task PR head could not be recorded"
+fi
 
 # Text of a "## <heading>" section of the brief, heading excluded, up to the next "## ".
 brief_section() {  # <heading>
@@ -130,6 +174,7 @@ section_items() {  # <heading>
       *) continue ;;
     esac
     item=$(printf '%s' "$line" | sed -e 's/^[-*][[:space:]]*//' -e 's/^[0-9][0-9]*\.[[:space:]]*//')
+    # shellcheck disable=SC2016 # Literal Markdown code-span delimiters.
     case "$item" in
       *'`'*'`'*) item=$(printf '%s' "$item" | sed -e 's/^[^`]*`//' -e 's/`.*$//') ;;
     esac

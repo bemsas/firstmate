@@ -23,13 +23,17 @@
 # when it carries one GitHub pull request URL followed by ` head <40-hex sha>`.
 #
 # The standing dev-merge test is then read live, never from the status line:
-#   - a task in this home records the PR as its pr= and is a ship task;
+#   - one ship task records pr=, or one unbound ship task matches the live
+#     headRefName to its metadata branch when no task records pr=;
 #   - that task is yolo (merge authority stays with the captain otherwise);
 #   - the task is not held for the captain;
 #   - the PR is open, not a draft, and its base is exactly `dev`;
 #   - the live head equals the validated sha;
-#   - nothing is marked security-sensitive (the status line, the PR title, body
-#     or labels say "security-sensitive", or a label contains "security");
+#   - the validated line does not say "security-sensitive" or "security sensitive",
+#     and no PR label contains "security" (title/body prose is not authority);
+#   - the latest state/review-verdicts.jsonl entry for this PR and exact head
+#     says merge, recorded by fm-review-verdict.sh after a second-model review;
+#     a complete test/spec-only diff exempts a missing verdict, never a fix;
 #   - every check is green by bin/fm-pr-lib.sh's fm_pr_github_checks_not_green,
 #     and at least one check exists;
 #   - no reviewer's latest approving-or-blocking review requests changes, and
@@ -52,8 +56,9 @@
 # fm-pr-merge: <first error>`. Live mode prints ONE line when a merge landed or
 # fm-pr-merge refused a PR that passed the test, which the watcher turns into a
 # `check:` wake: teardown, the backlog record, and any Linear record stay with
-# the supervisor. The cursor moves past a line BEFORE its live merge starts, so
-# a killed check can lose the wake line but can never merge a line twice.
+# the supervisor. A passing live attempt is saved before its cursor advances;
+# a killed scan retries safely by checking the live PR state before merging.
+# FM_PR_MERGE_EXPECTED_HEAD binds the guarded merge to the validated/reviewed head.
 #
 # `arm` writes state/merge-on-validated.check.sh and binds its bytes with
 # fm-check-register.sh, so the watcher dispatches it on the normal
@@ -66,6 +71,16 @@
 # FM_MERGE_ON_VALIDATED_GH_SECS (default 8). A line whose live state cannot be
 # read is retried on later polls and logged as `would not merge` / `not merged`
 # after three unreadable attempts so one broken PR cannot block the log.
+# Transient refusals (pending/missing checks or review, DIRTY/UNKNOWN mergeability,
+# unreadable forge state, and a moved head) are kept as JSONL {pr,head,line} in
+# state/.merge-on-validated.pending, one record per PR, under the scan lock.
+# Later scans re-evaluate these without another validated line. A successful
+# dry-run or merge, a permanent refusal, or a changed head on recheck retires the
+# record; an initial moved-head read is retained for one recheck. Red completed
+# checks, security markers, authority/hold refusals, and review fix are permanent.
+# A new validated event can replace a pending PR's head. Original status text is
+# retained so retry never drops its security marker. Scan budget applies to both
+# retries and new lines; existing pending records are checked first.
 set -u
 export LC_ALL=C
 
@@ -75,6 +90,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/merge-on-validated"
 LOG="$STATE/merge-on-validated.log"
 CURSOR="$STATE/.merge-on-validated.cursor"
+PENDING="$STATE/.merge-on-validated.pending"
 LOCK="$STATE/.merge-on-validated.lock"
 CHECK_ID=merge-on-validated
 CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
@@ -190,14 +206,23 @@ EV_SHA=
 EV_TASK=
 EV_REASON=
 EV_JSON=
+EV_RETRY=0
+EV_PERMANENT=0
+EV_HEAD_CHANGED=0
+
+add_retry() {
+  EV_RETRY=1
+  EV_REASON="${EV_REASON:+$EV_REASON; }$1"
+}
 
 add_reason() {
+  EV_PERMANENT=1
   EV_REASON="${EV_REASON:+$EV_REASON; }$1"
 }
 
 # Finds the one ship task in this home that records the PR. Sets EV_TASK.
 find_task() {
-  local f id found=0 pr kind
+  local f id found=0 pr kind branch
   EV_TASK=
   for f in "$STATE"/*.meta; do
     [ -f "$f" ] || continue
@@ -210,10 +235,26 @@ find_task() {
     found=$((found + 1))
     EV_TASK=$id
   done
+  if [ "$found" -eq 0 ]; then
+    # The direct-PR path may not have recorded pr= yet. Resolve the live branch
+    # only in that case; an explicit PR binding always takes precedence.
+    branch=$(gh_run pr view "$EV_URL" --json headRefName --jq .headRefName) || return 2
+    [ -n "$branch" ] && [ "$branch" != null ] || return 2
+    for f in "$STATE"/*.meta; do
+      [ -f "$f" ] || continue
+      [ "$(meta_value "$f" kind)" = ship ] || continue
+      [ -z "$(meta_value "$f" pr)" ] || continue
+      [ "$(meta_value "$f" branch)" = "$branch" ] || continue
+      id=$(basename "$f" .meta)
+      fm_pr_task_id_valid "$id" || continue
+      found=$((found + 1))
+      EV_TASK=$id
+    done
+  fi
   case "$found" in
     1) return 0 ;;
-    0) add_reason "no task in this home records this pull request"; EV_TASK= ;;
-    *) add_reason "more than one task records this pull request"; EV_TASK= ;;
+    0) add_reason "no task in this home records this pull request or its head branch"; EV_TASK= ;;
+    *) add_reason "more than one task records this pull request or its head branch"; EV_TASK= ;;
   esac
   return 1
 }
@@ -230,7 +271,7 @@ check_task() {  # sets reasons; uses EV_TASK
   case "$hold_rc" in
     0) add_reason "task $EV_TASK is held for the captain" ;;
     1|3) ;;
-    *) add_reason "could not tell whether task $EV_TASK is held for the captain" ;;
+    *) add_retry "could not tell whether task $EV_TASK is held for the captain" ;;
   esac
 }
 
@@ -252,15 +293,44 @@ vision_blob() {  # <ref> -> blob sha, or "absent"; returns 1 when unreadable
   return 1
 }
 
+# The latest valid verdict for this canonical PR and exact head is authoritative.
+# Test-only exemptions require a complete forge file list, including rename sources.
+check_review_verdict() {
+  local verdict='' files count
+  if [ -f "$STATE/review-verdicts.jsonl" ]; then
+    verdict=$(jq -Rrs --arg pr "$EV_URL" --arg head "$EV_SHA" '
+      [split("\n")[] | fromjson? | select(.pr == $pr and .head == $head)
+       | select(.verdict == "merge" or .verdict == "fix")] | last | .verdict // ""' \
+      "$STATE/review-verdicts.jsonl" 2>/dev/null) || verdict=''
+  fi
+  case "$verdict" in
+    merge) return 0 ;;
+    fix) add_reason "second-model review says fix for this head"; return 0 ;;
+  esac
+  count=$(jqf '.changedFiles // 0')
+  if files=$(gh_run api "repos/$FM_PR_OWNER/$FM_PR_REPO/pulls/$FM_PR_NUMBER/files?per_page=100" --paginate --slurp) \
+    && printf '%s' "$files" | jq -e --argjson count "$count" '
+      add | length == $count and length > 0' >/dev/null 2>&1; then
+    if printf '%s' "$files" | jq -e '
+      def testfile: type == "string" and
+        test("(^|/)(test_[^/]+\\.[^/]+|[^/]+[._-](test|spec)\\.[^/]+)$|(^|/)(tests?|specs?)/.*\\.(sh|[cm]?[jt]sx?|py|rb|go|rs|java|kt|swift|c|cpp)$");
+      add | all(.[]; (.filename | testfile) and
+        (if has("previous_filename") then (.previous_filename | testfile) else true end))' >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  add_retry "missing second-model merge verdict for this head (diff is not verified test-only)"
+}
+
 # Reads the live pull request and appends every failing condition to EV_REASON.
 # Returns 2 when the live state could not be read at all.
 check_live() {
-  local state draft mergeable base head decision red nchecks blocking marker
+  local state draft mergeable merge_state base head decision red nchecks blocking check_reason
   local tries=0 sleep_secs=${FM_MERGE_ON_VALIDATED_UNKNOWN_SLEEP:-3}
   local threads total open vbase vhead
 
   while :; do
-    EV_JSON=$(gh_run pr view "$EV_URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup,reviewDecision,reviews,labels,title,body) \
+    EV_JSON=$(gh_run pr view "$EV_URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup,reviewDecision,reviews,labels,changedFiles) \
       || { EV_REASON="could not read the live pull request"; return 2; }
     mergeable=$(jqf '.mergeable // ""')
     # GitHub answers UNKNOWN for a closed or merged pull request for good, so
@@ -270,6 +340,7 @@ check_live() {
     [ "$tries" -lt 3 ] || break
     sleep "$sleep_secs"
   done
+  merge_state=$(jqf '.mergeStateStatus // ""')
   state=$(jqf '.state // ""')
   draft=$(jqf 'if .isDraft == true then "true" elif .isDraft == false then "false" else "" end')
   base=$(jqf '.baseRefName // ""')
@@ -283,28 +354,38 @@ check_live() {
   [ "$state" = OPEN ] || add_reason "pull request state is $state, not OPEN"
   [ "$draft" = false ] || add_reason "pull request is a draft or its draft state is unreadable"
   [ "$base" = "$DEV_BASE" ] || add_reason "base is '$base', not $DEV_BASE"
-  [ "$head" = "$EV_SHA" ] || add_reason "live head ${head:0:12} is not the validated head ${EV_SHA:0:12}"
+  if [ "$head" != "$EV_SHA" ]; then
+    EV_HEAD_CHANGED=1
+    add_retry "live head ${head:0:12} is not the validated head ${EV_SHA:0:12}"
+  fi
   # The remaining reads describe a head or base that will not be merged.
   if [ "$state" != OPEN ] || [ "$base" != "$DEV_BASE" ] || [ "$head" != "$EV_SHA" ]; then
     return 1
   fi
 
-  marker=$(jqf '[(.title // ""), (.body // ""), (.labels[]?.name // "")] | join("\n") | test("security[- ]sensitive"; "i")')
-  if [ "$marker" = true ] \
-    || [ "$(jqf 'any(.labels[]?; (.name // "") | test("security"; "i"))')" = true ]; then
+  if [ "$(jqf 'any(.labels[]?; (.name // "") | test("security"; "i"))')" = true ]; then
     add_reason "marked security-sensitive on the pull request"
   fi
+  check_review_verdict
 
   if red=$(fm_pr_github_checks_not_green "$EV_JSON"); then
     nchecks=$(jqf '.statusCheckRollup | length')
     if [ "${nchecks:-0}" -eq 0 ]; then
-      add_reason "no checks are reported at the head"
+      add_retry "no checks are reported at the head"
     fi
     if [ -n "$red" ]; then
-      add_reason "checks not green: $(printf '%s' "$red" | paste -sd, - | sed 's/,/, /g')"
+      check_reason="checks not green: $(printf '%s' "$red" | paste -sd, - | sed 's/,/, /g')"
+      if [ "$(jqf 'any(.statusCheckRollup[]?;
+          (.__typename == "CheckRun" and .status == "COMPLETED" and
+            (.conclusion != "SUCCESS" and .conclusion != "NEUTRAL" and .conclusion != "SKIPPED"))
+          or (.__typename == "StatusContext" and (.state == "ERROR" or .state == "FAILURE")))')" = true ]; then
+        add_reason "$check_reason"
+      else
+        add_retry "$check_reason"
+      fi
     fi
   else
-    add_reason "could not read the check results"
+    add_retry "could not read the check results"
   fi
 
   blocking=$(jqf '[.reviews[]? | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED")] | group_by(.author.login) | map(sort_by(.submittedAt) | last) | map(select(.state == "CHANGES_REQUESTED") | (.author.login // "unknown")) | join(", ")')
@@ -322,15 +403,19 @@ check_live() {
       add_reason "$open open review thread(s)"
     fi
   else
-    add_reason "could not read the review threads"
+    add_retry "could not read the review threads"
   fi
 
-  [ "$mergeable" = MERGEABLE ] || add_reason "mergeable is ${mergeable:-unreadable}, not MERGEABLE"
+  case "$mergeable:$merge_state" in
+    *:DIRTY|UNKNOWN:*|:*) add_retry "mergeable is ${mergeable:-unreadable}, state ${merge_state:-unreadable}, not MERGEABLE" ;;
+    MERGEABLE:*) ;;
+    *) add_reason "mergeable is $mergeable, not MERGEABLE" ;;
+  esac
 
   if vbase=$(vision_blob "$base") && vhead=$(vision_blob "$head"); then
     [ "$vbase" = "$vhead" ] || add_reason "VISION.md differs from the $base tip"
   else
-    add_reason "could not read VISION.md at the head and the base"
+    add_retry "could not read VISION.md at the head and the base"
   fi
   [ -z "$EV_REASON" ]
 }
@@ -344,6 +429,9 @@ evaluate() {  # <status-line>
   EV_TASK=
   EV_REASON=
   EV_JSON=
+  EV_RETRY=0
+  EV_PERMANENT=0
+  EV_HEAD_CHANGED=0
   body=${line#*]: }
   urls=$(printf '%s\n' "$body" | grep -oE 'https://[^[:space:])]+/(pull|merge_requests)/[0-9]+' | sort -u)
   nurls=$(printf '%s' "$urls" | grep -c . || true)
@@ -362,10 +450,16 @@ evaluate() {  # <status-line>
     EV_REASON="not a GitHub pull request URL"
     return 1
   fi
-  case "$line" in
-    *[Ss]ecurity-[Ss]ensitive*|*[Ss]ecurity\ [Ss]ensitive*) add_reason "marked security-sensitive in the validated line" ;;
-  esac
-  if find_task; then
+  if printf '%s\n' "$line" | grep -qiE 'security[- ]sensitive'; then
+    add_reason "marked security-sensitive in the validated line"
+  fi
+  local find_rc=0
+  find_task || find_rc=$?
+  if [ "$find_rc" -eq 2 ]; then
+    EV_REASON="could not read the live pull request branch"
+    EV_RETRY=1
+    return 2
+  elif [ "$find_rc" -eq 0 ]; then
     check_task
   fi
   # A structural refusal makes the live reads pointless, and they cost forge calls.
@@ -397,8 +491,25 @@ where_suffix() {
   [ -z "$EV_URL" ] || printf ' [%s %s]' "$EV_URL" "$EV_SHA"
 }
 
+# One bounded-size record per PR, replaced by a new validated head. Original
+# status text preserves its security marker. All writes hold the scan lock.
+pending_set() {  # <line>; empty line removes this PR
+  local tmp
+  [ -n "$EV_URL" ] || return 0
+  tmp=$(umask 077; mktemp "$STATE/.merge-on-validated.pending.XXXXXX") || return 1
+  if { [ ! -f "$PENDING" ] || jq -c --arg pr "$EV_URL" 'select(.pr != $pr)' "$PENDING"; } > "$tmp"; then
+    if [ -n "$1" ]; then
+      jq -nc --arg pr "$EV_URL" --arg head "$EV_SHA" --arg line "$1" \
+        '{pr:$pr,head:$head,line:$line}' >> "$tmp" || { rm -f "$tmp"; return 1; }
+    fi
+    mv -f -- "$tmp" "$PENDING" && return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
+}
+
 # Called with the verdict of evaluate. $1 is the cursor writer to run before a
-# live merge starts, so that line can never be merged twice.
+# live merge starts. Pending retries re-read live PR state before another attempt.
 act_on_verdict() {  # <evaluate-rc> <advance-command...>
   local rc=$1 out merge_rc=0 first
   shift
@@ -419,16 +530,54 @@ act_on_verdict() {  # <evaluate-rc> <advance-command...>
     return 0
   fi
   log_line "merging $EV_URL $EV_SHA task=$EV_TASK"
-  out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-pr-merge.sh" "$EV_TASK" "$EV_URL" 2>&1 </dev/null) || merge_rc=$?
+  out=$(FM_HOME="$FM_HOME" FM_PR_MERGE_EXPECTED_HEAD="$EV_SHA" "$SCRIPT_DIR/fm-pr-merge.sh" "$EV_TASK" "$EV_URL" 2>&1 </dev/null) || merge_rc=$?
   if [ "$merge_rc" -eq 0 ]; then
+    pending_set "" || return 1
     log_line "merged $EV_URL $EV_SHA"
     add_wake "merged $EV_URL at $EV_SHA (task $EV_TASK); teardown and the Linear record are pending"
   else
     first=$(printf '%s\n' "$out" | grep -m1 -E '^(error|actionable)' | cut -c1-200)
     [ -n "$first" ] || first=$(printf '%s\n' "$out" | head -n 1 | cut -c1-200)
     log_line "merge refused by fm-pr-merge: ${first:-exit $merge_rc} [$EV_URL $EV_SHA]"
+    case "$out" in
+      *UNKNOWN*|*DIRTY*|*[Pp]ending*|*"not green"*|*"head moved"*|*"head changed"*) ;;
+      *) pending_set "" || return 1 ;;
+    esac
     add_wake "fm-pr-merge refused $EV_URL at $EV_SHA (task $EV_TASK): ${first:-exit $merge_rc}"
   fi
+}
+
+# Persist before advancing or merging so a killed scan resumes safely. A changed
+# head is retained once, then retired on recheck: old validation never blesses it.
+handle_verdict() {  # <rc> <line> <is-pending> <advance-command...>
+  local rc=$1 line=$2 is_pending=$3
+  shift 3
+  if [ "$is_pending" -eq 1 ] && [ "$EV_HEAD_CHANGED" -eq 1 ]; then
+    pending_set "" || return 1
+    log_line "not merged: pending validated head changed$(where_suffix)"
+    return 0
+  fi
+  if [ "$EV_PERMANENT" -eq 0 ] && { [ "$EV_RETRY" -eq 1 ] || [ "$rc" -eq 2 ] || { [ "$rc" -eq 0 ] && [ "$MODE" = live ]; }; }; then
+    pending_set "$line" || return 1
+  else
+    pending_set "" || return 1
+  fi
+  act_on_verdict "$rc" "$@"
+}
+
+scan_pending() {
+  local snapshot row line rc
+  [ -s "$PENDING" ] || return 0
+  snapshot=$(mktemp "$STATE/.merge-on-validated.retry.XXXXXX") || return 1
+  cp "$PENDING" "$snapshot" || { rm -f "$snapshot"; return 1; }
+  while IFS= read -r row; do
+    [ "$(budget_left)" -ge "$MIN_LINE_SECS" ] || break
+    line=$(printf '%s' "$row" | jq -er .line) || continue
+    rc=0
+    evaluate "$line" || rc=$?
+    handle_verdict "$rc" "$line" 1 true || break
+  done < "$snapshot"
+  rm -f -- "$snapshot"
 }
 
 # --- scan -------------------------------------------------------------------
@@ -472,9 +621,10 @@ scan_log() {  # <secondmate-id>; returns 1 to stop the whole scan
             break
           fi
           EV_REASON="the live pull request could not be read after $MAX_ATTEMPTS attempts"
+          EV_RETRY=1
           rc=1
         fi
-        act_on_verdict "$rc" cursor_set "$id" "$newoff" 0
+        handle_verdict "$rc" "$line" 0 cursor_set "$id" "$newoff" 0 || { stop=1; break; }
         att=0
         ;;
     esac
@@ -518,6 +668,7 @@ action_scan() {
   [ "$budget" -le "$left" ] || budget=$left
   DEADLINE=$(( $(now_epoch) + budget ))
 
+  scan_pending
   for f in "$STATE"/*.meta; do
     [ -f "$f" ] || continue
     [ "$(meta_value "$f" kind)" = secondmate ] || continue

@@ -35,10 +35,11 @@ make_case() {
   printf '%s\n' '## In flight' '' '## Queued' '' '## Done' > "$dir/home/data/backlog.md"
   fm_write_secondmate_meta "$dir/home/state/vm-mate.meta" "$dir/home" "remote:vm-mate" commercialeye
   fm_write_meta "$dir/home/state/task-a.meta" \
-    "window=fm-task-a" "kind=ship" "mode=direct-PR" "yolo=on" "base_branch=dev" "pr=$URL"
+    "window=fm-task-a" "kind=ship" "mode=direct-PR" "yolo=on" "base_branch=dev" "branch=fm/task-a" "pr=$URL"
   printf 'validated [at=1]: corr=old %s head %s old history\n' "$OTHER_URL" "$HEAD_B" \
     > "$dir/home/state/vm-mate.status"
   printf '%s\n' dry-run > "$dir/home/config/merge-on-validated"
+  printf '{"pr":"%s","head":"%s","verdict":"merge"}\n' "$URL" "$HEAD_A" > "$dir/home/state/review-verdicts.jsonl"
   : > "$dir/gh.log"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
@@ -47,9 +48,17 @@ printf '%s\n' "$*" >> "$c/gh.log"
 case "$1 $2" in
   "pr view")
     [ ! -f "$c/view.fail" ] || exit 1
-    cat "$c/view.json"
+    if [ "$*" = "pr view $3 --json headRefName --jq .headRefName" ]; then
+      jq -r .headRefName "$c/view.json"
+    else
+      cat "$c/view.json"
+    fi
     ;;
   "pr merge") exit 0 ;;
+  api\ repos/*/pulls/*/files*)
+    [ ! -f "$c/files.fail" ] || exit 1
+    cat "$c/files.json"
+    ;;
   "api graphql")
     [ ! -f "$c/threads.fail" ] || exit 1
     cat "$c/threads.json"
@@ -69,6 +78,7 @@ esac
 SH
   chmod +x "$fakebin/gh"
   write_view "$dir" "$HEAD_A"
+  printf '[[{"filename":"src/app.js","status":"modified"}]]\n' > "$dir/files.json"
   printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"totalCount":1,"nodes":[{"isResolved":true}]}}}}}' \
     > "$dir/threads.json"
   printf 'blob1\n' > "$dir/vision-dev"
@@ -78,7 +88,7 @@ SH
 
 write_view() {  # <case> <head>
   cat > "$1/view.json" <<JSON
-{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$2","baseRefName":"dev","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-20T10:00:00Z"}],"reviewDecision":"","reviews":[],"labels":[],"title":"docs: plain change","body":"A plain change."}
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$2","headRefName":"fm/task-a","changedFiles":1,"baseRefName":"dev","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-20T10:00:00Z"}],"reviewDecision":"","reviews":[],"labels":[],"title":"docs: plain change","body":"A plain change."}
 JSON
 }
 
@@ -269,8 +279,6 @@ test_refusal_reasons() {
   refuses conflicting "mergeable is CONFLICTING" '.mergeable = "CONFLICTING"'
   refuses unknown-mergeable "mergeable is UNKNOWN" '.mergeable = "UNKNOWN"'
   refuses security-label "marked security-sensitive on the pull request" '.labels = [{"name":"security"}]'
-  refuses security-title "marked security-sensitive on the pull request" '.title = "fix: Security-Sensitive path"'
-  refuses security-body "marked security-sensitive on the pull request" '.body = "this is security sensitive"'
   pass "each live condition refuses with its own reason"
 }
 
@@ -366,7 +374,7 @@ test_task_conditions() {
   append_status "$dir" "$(validated_line)"
   scan "$dir"
   assert_contains "$(log_of "$dir")" "no task in this home records this pull request" "no task: not reported"
-  assert_equals "" "$(cat "$dir/gh.log")" "no task: live reads were spent on an unrecorded PR"
+
 
   dir=$(make_case two-tasks)
   fm_write_meta "$dir/home/state/task-b.meta" "kind=ship" "yolo=on" "pr=$URL"
@@ -484,6 +492,7 @@ live_case() {
   cat > "$dir/bin/fm-pr-merge.sh" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> '$dir/merge.args'
+printf '%s\n' "\${FM_PR_MERGE_EXPECTED_HEAD:-}" > '$dir/expected-head'
 if [ '$stub_rc' -ne 0 ]; then
   echo 'error: refusing to merge $URL' >&2
   echo '  - check ci is not green' >&2
@@ -504,6 +513,7 @@ test_live_merges_through_fm_pr_merge() {
   expect_code 0 "$SCAN_RC" "live: scan"
   assert_equals "task-a $URL" "$(cat "$dir/merge.args")" \
     "live: fm-pr-merge must get exactly the task and the URL"
+  assert_equals "$HEAD_A" "$(cat "$dir/expected-head")" "live: review head binding was lost"
   assert_no_grep "pr merge" "$dir/gh.log" "live: the hook reached a lower-level forge merge"
   assert_contains "$(log_of "$dir")" "merged $URL $HEAD_A" "live: merge not logged"
   assert_contains "$(cat "$dir/stdout")" "merge-on-validated: merged $URL at $HEAD_A (task task-a)" \
@@ -527,7 +537,7 @@ test_live_reports_a_refused_merge() {
     "live refused: refusal not logged"
   assert_contains "$(cat "$dir/stdout")" "fm-pr-merge refused $URL" "live refused: no wake line"
   scan "$dir"
-  assert_equals "1" "$(wc -l < "$dir/merge.args" | tr -d ' ')" "live refused: merge retried on the next poll"
+  assert_equals "2" "$(wc -l < "$dir/merge.args" | tr -d ' ')" "live refused: transient check refusal was not retried"
   SCAN_BIN=
   pass "live mode reports a merge the guarded script refused"
 }
@@ -568,6 +578,229 @@ test_arm_and_disarm() {
   pass "arm needs the config, binds the shim, and disarm removes it"
 }
 
+test_branch_fallback() {
+  local dir
+  dir=$(make_case branch-fallback)
+  sed '/^pr=/d' "$dir/home/state/task-a.meta" > "$dir/meta.tmp"
+  mv "$dir/meta.tmp" "$dir/home/state/task-a.meta"
+  prime "$dir"
+  append_status "$dir" "$(validated_line)"
+  scan "$dir"
+  assert_contains "$(log_of "$dir")" "would merge $URL $HEAD_A" "branch fallback did not find the unbound task"
+  pass "an unbound ship task is found by the live PR branch"
+}
+
+test_prose_is_not_security_authority() {
+  local dir
+  dir=$(make_case security-prose)
+  edit_view "$dir" '.title = "Security-sensitive discussion" | .body = "This is not security-sensitive."'
+  prime "$dir"
+  append_status "$dir" "$(validated_line)"
+  scan "$dir"
+  assert_contains "$(log_of "$dir")" "would merge $URL $HEAD_A" "free prose caused a security refusal"
+  pass "PR title and body prose do not classify security sensitivity"
+}
+
+test_pending_retries() {
+  local dir filter name
+  for name in pending-check dirty unknown; do
+    dir=$(make_case "retry-$name")
+    case "$name" in
+      pending-check) filter='.statusCheckRollup[0].status = "IN_PROGRESS" | .statusCheckRollup[0].conclusion = null' ;;
+      dirty) filter='.mergeStateStatus = "DIRTY"' ;;
+      unknown) filter='.mergeable = "UNKNOWN"' ;;
+    esac
+    edit_view "$dir" "$filter"
+    prime "$dir"
+    append_status "$dir" "$(validated_line)"
+    scan "$dir"
+    assert_not_contains "$(log_of "$dir")" "would merge " "$name should wait"
+    assert_present "$dir/home/state/.merge-on-validated.pending" "$name was not retained"
+    write_view "$dir" "$HEAD_A"
+    scan "$dir"
+    assert_contains "$(log_of "$dir")" "would merge $URL $HEAD_A" "$name was never retried"
+    scan "$dir"
+    assert_equals 1 "$(log_of "$dir" | grep -c 'would merge ')" "$name success replayed"
+  done
+  pass "pending checks and DIRTY/UNKNOWN mergeability retry without new status lines"
+}
+
+test_review_verdict_gate() {
+  local dir rc
+  dir=$(make_case review-verdict)
+  rm "$dir/home/state/review-verdicts.jsonl"
+  prime "$dir"
+  append_status "$dir" "$(validated_line)"
+  scan "$dir"
+  assert_contains "$(log_of "$dir")" "missing second-model merge verdict" "missing review must wait"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$URL" "$HEAD_B" merge || fail "could not record stale-head review"
+  scan "$dir"
+  assert_not_contains "$(log_of "$dir")" "would merge " "another head authorized merge"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$OTHER_URL" "$HEAD_A" merge || fail "could not record other PR review"
+  scan "$dir"
+  assert_not_contains "$(log_of "$dir")" "would merge " "another PR authorized merge"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$URL" "$HEAD_A" merge || fail "could not record review"
+  scan "$dir"
+  assert_contains "$(log_of "$dir")" "would merge $URL $HEAD_A" "exact-head merge verdict did not release wait"
+  assert_equals 3 "$(wc -l < "$dir/home/state/review-verdicts.jsonl" | tr -d ' ')" "helper lost a record"
+  rc=0
+  FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$URL" bad merge >/dev/null 2>&1 || rc=$?
+  expect_code 2 "$rc" "bad review head"
+  rc=0
+  FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$URL" "$HEAD_A" approve >/dev/null 2>&1 || rc=$?
+  expect_code 2 "$rc" "bad verdict"
+
+  dir=$(make_case fix-verdict)
+  FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$URL" "$HEAD_A" fix || fail "could not record fix verdict"
+  prime "$dir"
+  append_status "$dir" "$(validated_line)"
+  scan "$dir"
+  assert_contains "$(log_of "$dir")" "second-model review says fix" "latest fix verdict did not refuse"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$URL" "$HEAD_A" merge || fail "could not record revised verdict"
+  scan "$dir"
+  assert_not_contains "$(log_of "$dir")" "would merge " "a permanent refusal was retried"
+  append_status "$dir" "$(validated_line)"
+  scan "$dir"
+  assert_contains "$(log_of "$dir")" "would merge $URL $HEAD_A" "fresh validation after re-review should pass"
+  pass "second-model review is exact-head, exact-PR, latest-record, and fail-closed"
+}
+
+test_test_only_review_exemption() {
+  local dir name
+  for name in suffix directory renamed-source mixed truncated empty unreadable; do
+    dir=$(make_case "test-only-$name")
+    rm "$dir/home/state/review-verdicts.jsonl"
+    case "$name" in
+      suffix) printf '[[{"filename":"src/app.spec.ts"}]]' > "$dir/files.json" ;;
+      directory) printf '[[{"filename":"tests/check.sh"}]]' > "$dir/files.json" ;;
+      renamed-source) printf '[[{"filename":"src/app.spec.ts","previous_filename":"src/app.ts"}]]' > "$dir/files.json" ;;
+      mixed) printf '[[{"filename":"tests/check.sh"}],[{"filename":"src/app.js"}]]' > "$dir/files.json"; edit_view "$dir" '.changedFiles = 2' ;;
+      truncated) printf '[[{"filename":"tests/check.sh"}]]' > "$dir/files.json"; edit_view "$dir" '.changedFiles = 2' ;;
+      empty) printf '[[]]' > "$dir/files.json"; edit_view "$dir" '.changedFiles = 0' ;;
+      unreadable) : > "$dir/files.fail" ;;
+    esac
+    prime "$dir"
+    append_status "$dir" "$(validated_line)"
+    scan "$dir"
+    case "$name" in
+      suffix|directory) assert_contains "$(log_of "$dir")" "would merge $URL $HEAD_A" "$name needs no review" ;;
+      *) assert_not_contains "$(log_of "$dir")" "would merge " "$name must require review" ;;
+    esac
+  done
+  pass "only a complete test-only diff exempts missing review; renamed source and unreadable lists fail closed"
+}
+
+test_pending_retirement() {
+  local dir
+  dir=$(make_case pending-retirement)
+  prime "$dir"
+  edit_view "$dir" '.mergeable = "UNKNOWN"'
+  append_status "$dir" "$(validated_line)"
+  scan "$dir"
+  edit_view "$dir" '.baseRefName = "main"'
+  scan "$dir"
+  write_view "$dir" "$HEAD_A"
+  scan "$dir"
+  assert_not_contains "$(log_of "$dir")" "would merge " "permanent refusal was retried"
+
+  dir=$(make_case pending-head-change)
+  prime "$dir"
+  edit_view "$dir" '.mergeable = "UNKNOWN"'
+  append_status "$dir" "$(validated_line)"
+  scan "$dir"
+  write_view "$dir" "$HEAD_B"
+  scan "$dir"
+  write_view "$dir" "$HEAD_A"
+  scan "$dir"
+  assert_not_contains "$(log_of "$dir")" "would merge " "head change did not retire validation"
+  assert_contains "$(log_of "$dir")" "pending validated head changed" "head change not explained"
+
+  dir=$(make_case moved-head-recovery)
+  prime "$dir"
+  write_view "$dir" "$HEAD_B"
+  append_status "$dir" "$(validated_line)"
+  scan "$dir"
+  assert_present "$dir/home/state/.merge-on-validated.pending" "initial head mismatch must be retained"
+  write_view "$dir" "$HEAD_A"
+  scan "$dir"
+  assert_contains "$(log_of "$dir")" "would merge $URL $HEAD_A" "transient moved-head read did not recover"
+  pass "pending validations retire after permanent refusal or head change, and transient moved-head reads recover"
+}
+
+test_branch_fallback_ambiguity() {
+  local dir
+  dir=$(make_case branch-ambiguity)
+  fm_write_meta "$dir/home/state/task-a.meta" "kind=ship" "yolo=on" "branch=fm/task-a"
+  fm_write_meta "$dir/home/state/task-b.meta" "kind=ship" "yolo=on" "branch=fm/task-a"
+  prime "$dir"
+  append_status "$dir" "$(validated_line)"
+  scan "$dir"
+  assert_contains "$(log_of "$dir")" "more than one task" "ambiguous branch should refuse"
+  assert_not_contains "$(log_of "$dir")" "would merge " "ambiguous branch merged"
+  pass "branch fallback refuses ambiguity"
+}
+
+test_pending_live_merge_and_revalidation() {
+  local dir
+  dir=$(live_case pending-live 0)
+  SCAN_BIN="$dir/bin/fm-merge-on-validated.sh"
+  rm "$dir/home/state/review-verdicts.jsonl"
+  prime "$dir"
+  append_status "$dir" "$(validated_line)"
+  scan "$dir"
+  assert_absent "$dir/merge.args" "missing review reached guarded merge"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$URL" "$HEAD_A" merge || fail "could not record live review"
+  scan "$dir"
+  scan "$dir"
+  assert_equals 1 "$(wc -l < "$dir/merge.args" | tr -d ' ')" "pending live merge did not run exactly once"
+  [ ! -s "$dir/home/state/.merge-on-validated.pending" ] || fail "merged pending record remains"
+  SCAN_BIN=
+
+  dir=$(make_case revalidated-new-head)
+  prime "$dir"
+  edit_view "$dir" '.mergeable = "UNKNOWN"'
+  append_status "$dir" "$(validated_line)"
+  scan "$dir"
+  write_view "$dir" "$HEAD_B"
+  printf 'blob1\n' > "$dir/vision-$HEAD_B"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$URL" "$HEAD_B" merge || fail "could not review new head"
+  append_status "$dir" "$(validated_line "$URL" "$HEAD_B")"
+  scan "$dir"
+  assert_contains "$(log_of "$dir")" "would merge $URL $HEAD_B" "fresh validation did not replace obsolete pending head"
+  assert_not_contains "$(log_of "$dir")" "would merge $URL $HEAD_A" "old head was authorized"
+  pass "pending live merges run once after review and fresh validation can replace an obsolete head"
+}
+
+test_retry_after_unreadable_supporting_facts() {
+  local dir name
+  for name in threads vision; do
+    dir=$(make_case "retry-unreadable-$name")
+    prime "$dir"
+    edit_view "$dir" '.mergeable = "UNKNOWN"'
+    case "$name" in
+      threads) : > "$dir/threads.fail" ;;
+      vision) printf 'BOOM\n' > "$dir/vision-dev" ;;
+    esac
+    append_status "$dir" "$(validated_line)"
+    scan "$dir"
+    rm -f "$dir/threads.fail"
+    printf 'blob1\n' > "$dir/vision-dev"
+    write_view "$dir" "$HEAD_A"
+    scan "$dir"
+    assert_contains "$(log_of "$dir")" "would merge $URL $HEAD_A" "unreadable $name incorrectly retired a transient refusal"
+  done
+  pass "unreadable supporting facts cannot turn transient mergeability into a permanent refusal"
+}
+
+test_retry_after_unreadable_supporting_facts
+test_pending_live_merge_and_revalidation
+test_review_verdict_gate
+test_test_only_review_exemption
+test_pending_retirement
+test_branch_fallback_ambiguity
+test_branch_fallback
+test_prose_is_not_security_authority
+test_pending_retries
 test_off_without_config
 test_invalid_config_is_inert
 test_empty_config_means_dry_run

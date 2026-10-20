@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Firstmate watcher.
+# New complete ship done: lines with one PR URL run fm-done-check.sh --auto
+# before signal triage advances its cursor; its outcomes preserve ordinary wakes.
 # Classifies supervision wakes in bash. In normal mode it absorbs benign wakes
 # and keeps blocking; it queues and exits only for actionable wakes.
 # The no-verb signal and stale path is absorb-only-on-positive-evidence: a wake
@@ -2401,6 +2403,25 @@ watcher_capture() {  # <backend> <target> <lines> [expected-label]
   return "$rc"
 }
 
+# A ship's direct-PR done report must run the checklist even when it bypasses
+# fm-pr-check. Read only the newly classified, complete span, before its cursor
+# advances; a later working line must not hide the earlier done event. Preserve
+# ordinary wake routing on every checklist outcome. Remote mates own their lanes.
+signal_done_checks() {  # <file> <task> <start> <end>
+  local line urls url
+  [ -f "$STATE/$2.meta" ] && [ ! -L "$STATE/$2.meta" ] || return 0
+  [ "$(fm_meta_get "$STATE/$2.meta" kind)" = ship ] || return 0
+  while IFS= read -r line; do
+    [ "$(status_line_verb "$line")" = "done" ] || continue
+    urls=$(printf '%s\n' "$line" | grep -oE 'https://[^[:space:])]+/pull/[0-9]+' | sort -u)
+    [ "$(printf '%s' "$urls" | grep -c .)" = 1 ] || continue
+    url=$urls
+    fm_run_timed 20 env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-done-check.sh" --auto "$2" "$url" >/dev/null 2>&1 \
+      || triage_log "done checklist for $2 returned a refusal or was unreadable; surfacing its status normally"
+  done < <(_fm_status_read_span "$1" "$3" "$(($4 - $3))")
+}
+
 # 0 when any signaled status file carries a captain-relevant event in the bytes
 # appended since this watcher last classified it. The start offset is the
 # classified-position field in that file's .seen-* marker, and fm-classify-lib.sh's
@@ -2441,6 +2462,7 @@ signal_files_actionable() {  # <status-file> ...
       continue
     fi
     endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
+    signal_done_checks "$f" "$task" "$(fm_wake_signal_seen_size "$STATE" "$f")" "$endpoint"
     FM_SIGNAL_SURFACE_ENDPOINTS="${FM_SIGNAL_SURFACE_ENDPOINTS}${f}"$'\t'"${endpoint}"$'\t'"${ident}"$'\n'
     if [ "$needs_decision" -eq 1 ]; then
       FM_SIGNAL_NEEDS_DECISION_FILES="${FM_SIGNAL_NEEDS_DECISION_FILES} ${f}"

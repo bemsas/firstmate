@@ -42,6 +42,9 @@
 # github_branch_rules_unavailable_on_plan owns the narrow plan-unavailable
 # exception; every other unreadable required source refuses.
 # Every failing condition is reported, not just the first.
+# Automated callers may set FM_PR_MERGE_EXPECTED_HEAD to their independently
+# validated/reviewed 40-hex head. GitHub merging then refuses any other live
+# head, or an invalid expected head, before issuing the head-bound merge.
 # The verified head is then passed to gh as
 # --match-head-commit, so a push that lands between that read and the merge
 # fails the merge instead of landing commits nothing verified. Reading that
@@ -1577,6 +1580,14 @@ case "$PROVIDER" in
     [ "$away_status" -eq 0 ] || exit "$away_status"
     refuse_github_queue_while_away || exit 2
     merge_status=0
+    # Automated validation/review callers bind the independent evidence to an
+    # exact head. Preserve that binding through our own fresh forge reads.
+    if [ -n "${FM_PR_MERGE_EXPECTED_HEAD:-}" ] \
+      && { ! fm_pr_head_valid "$FM_PR_MERGE_EXPECTED_HEAD" \
+        || [ "$FM_PR_MERGE_HEAD" != "$FM_PR_MERGE_EXPECTED_HEAD" ]; }; then
+      echo 'error: head moved since validation and second-model review' >&2
+      exit 1
+    fi
     merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       --match-head-commit "$FM_PR_MERGE_HEAD" \
       "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1) || merge_status=$?

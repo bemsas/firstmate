@@ -638,8 +638,11 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 
 ## Done checklist (config/done-check)
 
-The optional local, gitignored `config/done-check` file holds one of `off`, `shadow`, or `on`, and `FM_DONE_CHECK` overrides it; absent, empty, or unrecognized means `off`, which changes nothing.
-When a ship worker reports done with a GitHub PR, `bin/fm-pr-check.sh` runs `bin/fm-done-check.sh` before it arms merge monitoring.
+The optional local, gitignored `config/done-check` file holds one of `off`, `shadow`, or `on`, and `FM_DONE_CHECK` overrides it; absent, empty, or unrecognized means `off`, which disables checklist computation and steering.
+When a ship worker reports done with one GitHub PR URL, `bin/fm-watch.sh` runs `bin/fm-done-check.sh --auto` on the new status span, including a done event followed by a routine status line.
+Automatic ingestion records the canonical `pr=` in ship metadata even when the checklist is off, and records `pr_head=` when the enabled checklist reads it.
+`bin/fm-pr-check.sh` also runs the checklist before arming merge monitoring.
+Secondmate and scout status channels do not bind PRs through this hook, and checklist outcomes preserve normal supervisor wakes.
 `shadow` computes the checklist and appends the verdict to `state/done-check.log` without steering or blocking anything.
 `on` additionally steers the worker back through `fm-send` with the specific failures, at most twice per task; the next failure exits `11` so firstmate escalates, and a bounce or escalation leaves merge monitoring unarmed until the worker reports done on a new head.
 An unreadable fact (forge error, missing worktree ref, no test evidence) is `unknown` and never bounces.
@@ -1727,9 +1730,10 @@ It is not inherited by secondmate homes.
 [`bin/fm-merge-on-validated.sh`](../bin/fm-merge-on-validated.sh) reads the status log of each registered secondmate (`state/<id>.meta` with `kind=secondmate`).
 A new line whose state word is exactly `validated` and that names one GitHub pull request URL followed by `head <40-hex sha>` is checked against the standing dev-merge test, read live and never from the line:
 
-- one yolo ship task in this home records the pull request, and that task is not held for the captain;
+- one yolo ship task in this home records the pull request, or, when no task records it, one unbound ship task matches its live head branch; that task is not held for the captain;
 - the pull request is open, not a draft, based on `dev` and nothing else, and its live head equals the validated sha;
-- nothing is marked security-sensitive: the line, the pull request title, body, or labels say so, or a label contains `security`;
+- the validated line has no security-sensitive marker and no PR label contains `security`; PR title and body prose do not classify sensitivity;
+- a second-model review recorded for this exact PR and head says `merge`, unless the complete diff contains only test/spec files; a `fix` verdict always refuses;
 - at least one check exists and every check is green by `fm_pr_github_checks_not_green`;
 - no reviewer's latest approving-or-blocking review requests changes, and no review thread is unresolved;
 - the pull request is `MERGEABLE`, and `VISION.md` at the head is the same blob as at the base tip.
@@ -1738,7 +1742,10 @@ In `dry-run` the hook only appends `would merge <url> <sha>` or `would not merge
 Compare that log with the supervisor's real merges for a day before switching to `live`.
 In `live` a passing pull request is merged by `bin/fm-pr-merge.sh <task> <url>` and nothing lower-level, with none of its waiver or override flags, so every refusal that script owns still applies.
 Live mode prints one line when a merge landed or `fm-pr-merge.sh` refused a passing pull request; teardown, the backlog record, and any Linear record stay with the supervisor.
-The first scan of a status log starts at its end, so history is never replayed, and a line is never merged twice.
+The first scan of a status log starts at its end, so history is never replayed.
+Transient refusals are retained for later scans without needing a new validation event; permanent refusals and changed heads retire the pending validation.
+The guarded merge preserves the validated and reviewed head through its own forge reads.
+After the independent review, record its verdict with [`bin/fm-review-verdict.sh`](../bin/fm-review-verdict.sh) `<pr-url> <head> merge|fix`; its header owns the append-only review record and replacement rules.
 
 Arm the hook once per home, after writing the config, with `bin/fm-merge-on-validated.sh arm`; `disarm` removes the shim and its trust binding.
 `FM_MERGE_ON_VALIDATED_BUDGET_SECS` (default 20) and `FM_MERGE_ON_VALIDATED_GH_SECS` (default 8) bound a scan and one forge call.

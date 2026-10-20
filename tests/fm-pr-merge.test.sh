@@ -2926,6 +2926,28 @@ test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance
 test_github_conflicting_queue_rules_report_ambiguity
+test_expected_review_head_is_preserved() {
+  local case_dir rc expected
+  for expected in aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb invalid; do
+    case_dir=$(make_case "review-head-$expected")
+    add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    : > "$case_dir/gh-axi.log"
+    rc=0
+    FM_PR_MERGE_EXPECTED_HEAD="$expected" run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    if [ "$expected" = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ]; then
+      expect_code 0 "$rc" "reviewed head"
+      assert_logged_gh_merge "$case_dir" 9 example/repo --squash
+    else
+      [ "$rc" -ne 0 ] || fail "moved or invalid reviewed head was merged"
+      assert_grep 'head moved since validation' "$case_dir/stderr" "missing reviewed-head refusal"
+      assert_no_grep 'pr merge ' "$case_dir/gh.log" "forge merge ran on unreviewed head"
+    fi
+  done
+  pass "automated merge preserves the reviewed head through its own forge reread"
+}
+
+test_expected_review_head_is_preserved
 test_verified_merge_records_pr_and_head
 test_pr_metadata_is_recorded_before_the_forge_call
 test_merge_failure_propagates_after_recording

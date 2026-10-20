@@ -385,6 +385,57 @@ test_pr_check_hook() {
   pass "fm-pr-check stops on a bounce and arms as before when the checklist is off"
 }
 
+test_auto_records_pr() {
+  local head
+  reset_pr
+  head=$(git -C "$REPO" rev-parse HEAD)
+  FM_HOME="$HOME_DIR" "$SCRIPT" --auto task-a "$URL" || fail "auto off binding failed"
+  assert_grep "pr=$URL" "$HOME_DIR/state/task-a.meta" "auto did not bind pr with checklist off"
+  assert_absent "$HOME_DIR/state/done-check.log" "off should not check"
+  env FM_ROOT_OVERRIDE="$ROOT_STUB" FM_HOME="$HOME_DIR" PATH="$FAKEBIN:$PATH" \
+    FM_DONE_CHECK=shadow FM_TEST_HEAD="$head" "$SCRIPT" --auto task-a "$URL" >/dev/null 2>&1 \
+    || fail "auto shadow check failed"
+  assert_grep "pr_head=$head" "$HOME_DIR/state/task-a.meta" "auto did not record forge head"
+  assert_equals 1 "$(grep -c '^pr=' "$HOME_DIR/state/task-a.meta")" "auto duplicated pr field"
+  assert_present "$HOME_DIR/state/done-check.log" "auto never ran checklist"
+  pass "auto binds canonical pr even with checklist off and records head when available"
+}
+
+test_watcher_runs_done_check() {
+  # Reuse the hermetic watcher toolchain; no real backend or model is launched.
+  # shellcheck source=tests/wake-helpers.sh
+  . "$ROOT/tests/wake-helpers.sh"
+  local TMP_ROOT="$T/watcher" dir state fakebin head pid i rc
+  dir=$(make_case auto-done); state="$dir/state"; fakebin="$dir/fakebin"
+  mkdir -p "$dir/home/config" "$dir/home/data"
+  printf 'shadow\n' > "$dir/home/config/done-check"
+  cp "$FAKEBIN/gh" "$fakebin/gh"
+  head=$(git -C "$REPO" rev-parse HEAD)
+  fm_write_meta "$state/ship.meta" "kind=ship" "worktree=$REPO" "base=dev"
+  fm_write_meta "$state/mate.meta" "kind=secondmate"
+  fm_write_meta "$state/scout.meta" "kind=scout"
+  printf 'done [at=1]: %s\nworking [at=2]: later note\n' "$URL" > "$state/ship.status"
+  printf 'done [at=1]: %s\n' "$URL" > "$state/mate.status"
+  printf 'done [at=1]: %s\n' "$URL" > "$state/scout.status"
+  env -u FM_ROOT_OVERRIDE FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    FM_TEST_HEAD="$head" PATH="$fakebin:$PATH" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_SECONDMATE_LIVENESS_SECS=99999999 "$ROOT/bin/fm-watch.sh" > "$dir/out" 2> "$dir/err" &
+  pid=$!
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+  if kill -0 "$pid" 2>/dev/null; then kill "$pid"; wait "$pid" || true; fail "done watcher did not surface: $(cat "$dir/err")"; fi
+  rc=0; wait "$pid" || rc=$?
+  expect_code 0 "$rc" "watcher done signal"
+  assert_grep "pr=$URL" "$state/ship.meta" "watcher did not bind done PR"
+  assert_grep "pr_head=$head" "$state/ship.meta" "watcher did not record done head"
+  assert_equals 1 "$(wc -l < "$state/done-check.log" | tr -d ' ')" "watcher should check only the ship"
+  assert_no_grep 'pr=' "$state/mate.meta" "secondmate must not own child PR"
+  assert_no_grep 'pr=' "$state/scout.meta" "scout must not own PR"
+  assert_contains "$(cat "$dir/out")" 'signal:' "check swallowed normal wake"
+  pass "watcher runs auto checklist on ship done URLs even under a later working line; other roles stay unbound"
+}
+
 test_off_by_default_does_nothing
 test_switch_comes_from_config_file_or_env
 test_clean_pr_passes
@@ -399,3 +450,6 @@ test_bounces_are_bounded
 test_unconfirmed_steer_is_not_counted
 test_unreadable_facts_never_bounce
 test_pr_check_hook
+
+test_auto_records_pr
+test_watcher_runs_done_check
