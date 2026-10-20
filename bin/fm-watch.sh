@@ -3000,6 +3000,9 @@ while :; do
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
+    check_outputs=
+    check_queue_outputs=
+    check_queue_key=
     contribution_check_output=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
@@ -3036,7 +3039,14 @@ while :; do
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
-          run_check_capture "$custom_snapshot" || exit 1
+          if [ "$id" = merge-on-validated ]; then
+            # Give the merge scan its 45s default budget plus cleanup headroom.
+            merge_check_timeout=${FM_CHECK_TIMEOUT:-50}
+            CHECK_TIMEOUT=$merge_check_timeout FM_CHECK_TIMEOUT=$merge_check_timeout \
+              run_check_capture "$custom_snapshot" || exit 1
+          else
+            run_check_capture "$custom_snapshot" || exit 1
+          fi
           out=$FM_CHECK_RESULT
           fm_custom_check_snapshot_cleanup
         else
@@ -3074,7 +3084,6 @@ EOF
             # outcome and no wake; bin/fm-pr-check.sh refuses to arm another.
             retire_merged_pr_poll "$id"
             pr_poll_control_release || exit 1
-            touch "$STATE/.last-check"
             triage_log "retired a merge poll armed on secondmate $id without reporting an outcome"
             continue
           fi
@@ -3100,30 +3109,42 @@ EOF
           fi
           retire_merged_pr_poll "$id"
           pr_poll_control_release || exit 1
-          touch "$STATE/.last-check"
           if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
             triage_log "absorbed duplicate merged PR poll result for $id"
             continue
           fi
-          wake "$reason"
+          check_outputs="${check_outputs:+$check_outputs
+}$reason"
+          continue
         fi
         pr_poll_control_release || exit 1
-        fm_wake_append check "$c" "$reason" || exit 1
-        touch "$STATE/.last-check"
-        wake "$reason"
+        if [ -z "$check_queue_outputs" ]; then check_queue_key=$c; else check_queue_key=state-checks; fi
+        check_queue_outputs="${check_queue_outputs:+$check_queue_outputs
+}$reason"
+        check_outputs="${check_outputs:+$check_outputs
+}$reason"
       fi
       pr_poll_control_release || exit 1
     done
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
-      fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
-      touch "$STATE/.last-check"
-      wake "$reason"
+      if [ -z "$check_queue_outputs" ]; then check_queue_key=unauthenticated-state-checks; else check_queue_key=state-checks; fi
+      check_queue_outputs="${check_queue_outputs:+$check_queue_outputs
+}$reason"
+      check_outputs="${check_outputs:+$check_outputs
+}$reason"
+    fi
+    if [ -n "$contribution_check_output" ]; then
+      check_outputs="${check_outputs:+$check_outputs
+}${contribution_check_output%$'\n'}"
+    fi
+    # Merge outcomes and contribution events already have their own durable
+    # publication owners. Queue only the other results once, after the sweep.
+    if [ -n "$check_queue_outputs" ]; then
+      fm_wake_append check "$check_queue_key" "$check_queue_outputs" || exit 1
     fi
     touch "$STATE/.last-check"
-    if [ -n "$contribution_check_output" ]; then
-      wake "$contribution_check_output"
-    fi
+    [ -z "$check_outputs" ] || wake "$check_outputs"
   fi
 
   # On the first changed signal, linger one grace period and re-scan before

@@ -8,7 +8,10 @@
 # report, decision, or PR the ask refers to, without added speaker labels or
 # direct address) and `{FIRSTMATE_SPEC}`
 # under `## Firstmate spec` (build instructions, which are never the captain's
-# intent). bin/fm-dod-lib.sh owns the no-mistakes `--intent` contract those
+# intent). Ship scaffolds also carry `## Base branch` from --base-branch and
+# empty `## Files in scope` and `## Tests` sections; fill the latter with path
+# globs and executable test commands as bullets before dispatch when required.
+# bin/fm-dod-lib.sh owns the no-mistakes `--intent` contract those
 # subsections feed; bin/fm-spawn.sh refuses leftover placeholders and a
 # `## Captain's intent` line opening with a Captain label or address. Secondmate
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
@@ -749,6 +752,17 @@ case "$MODE" in
 esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
 DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT") || exit 1
+# These sections are consumed by fm-done-check.sh. Fill scope/test lists before
+# dispatch; empty sections declare no requirement rather than fake placeholders.
+TASK_SECTION="$TASK_SECTION
+
+## Base branch
+$BASE_BRANCH
+
+## Files in scope
+
+## Tests"
+
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.

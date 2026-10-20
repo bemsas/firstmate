@@ -157,10 +157,11 @@ if [ "$AUTO" -eq 1 ]; then
   stamp_pr "$HEAD" || unknown_exit "the task PR head could not be recorded"
 fi
 
-# Text of a "## <heading>" section of the brief, heading excluded, up to the next "## ".
+# Text of a "## <heading>" section, up to the next heading at the same or higher level.
 brief_section() {  # <heading>
   [ -f "$BRIEF" ] || return 0
   awk -v want="$1" '
+    /^# / { on = 0; next }
     /^## / { sub(/^## */, ""); sub(/[ \t]+$/, ""); on = (tolower($0) == tolower(want)); next }
     on { print }
   ' "$BRIEF"
@@ -184,7 +185,9 @@ section_items() {  # <heading>
 }
 
 # --- base ---------------------------------------------------------------
-WANT_BASE=${FM_DONE_CHECK_BASE:-$(meta_get base)}
+WANT_BASE=$(meta_get base_branch)
+[ -n "$WANT_BASE" ] || WANT_BASE=$(meta_get base)
+WANT_BASE=${FM_DONE_CHECK_BASE:-$WANT_BASE}
 if [ -z "$WANT_BASE" ]; then
   WANT_BASE=$(brief_section 'Base branch' | sed -e '/^[[:space:]]*$/d' -e 's/`//g' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | head -1)
 fi

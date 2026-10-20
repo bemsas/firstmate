@@ -344,6 +344,37 @@ test_real_host_checkpoint_ends_quietly_at_its_bound() {
   pass "checkpoint: the real host ends its park at the checkpoint bound as a quiet checkpoint"
 }
 
+test_all_checks_run_before_one_wake() {
+  local home name status=0
+  home=$(make_home check-sweep)
+  for name in a-first merge-on-validated z-last; do
+    cat > "$home/state/$name.check.sh" <<'SH'
+#!/usr/bin/env bash
+[ ! -f "$FM_HOME/state/.last-check" ] || exit 1
+printf 'ran\n' >> "$FM_HOME/calls"
+printf 'check result from %s\n' "$0"
+SH
+    if [ "$name" = merge-on-validated ]; then
+      # shellcheck disable=SC2016 # The registered check expands its environment at runtime.
+      printf '%s\n' 'printf "merge timeout=%s\n" "${FM_CHECK_TIMEOUT:-missing}"' >> "$home/state/$name.check.sh"
+    fi
+    chmod 0700 "$home/state/$name.check.sh"
+    FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" "$name" >/dev/null || fail 'register sweep check'
+  done
+  printf 'touch "%s/untrusted-ran"\n' "$home" > "$home/state/unsigned.check.sh"
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=1 "$CHECKPOINT" --seconds 15 >"$home/out" 2>"$home/err" || status=$?
+  expect_code 0 "$status" 'check sweep exit'
+  assert_equals 3 "$(wc -l < "$home/calls" | tr -d ' ')" 'all trusted checks run before cadence advances'
+  assert_contains "$(cat "$home/out")" 'z-last' 'last check is aggregated'
+  assert_contains "$(cat "$home/out")" 'merge timeout=50' 'merge scan receives its 45s budget plus timeout headroom'
+  assert_contains "$(cat "$home/out")" 'rejected unauthenticated' 'rejected check is reported in the same sweep'
+  assert_absent "$home/untrusted-ran" 'unsigned check must remain inert'
+  assert_equals 1 "$(wc -l < "$home/state/.wake-queue" | tr -d ' ')" 'one durable aggregate wake'
+  assert_present "$home/state/.last-check" 'completed sweep advances cadence'
+  pass 'one sweep runs every trusted check and aggregates outputs before advancing cadence'
+}
+test_all_checks_run_before_one_wake
+
 test_quiet_checkpoint_exits_124_cleanly
 test_perl_timeout_fallback_honors_cleanup_bound_before_escalating
 test_announced_recovery_is_not_reannounced_by_next_checkpoint

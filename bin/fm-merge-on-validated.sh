@@ -33,7 +33,9 @@
 #     and no PR label contains "security" (title/body prose is not authority);
 #   - the latest state/review-verdicts.jsonl entry for this PR and exact head
 #     says merge, recorded by fm-review-verdict.sh after a second-model review;
-#     a complete test/spec-only diff exempts a missing verdict, never a fix;
+#     alternatively, the validator attests its review verdict was applied;
+#     a recorded fix always refuses. Without either verdict, only a complete
+#     test/spec-only diff is exempt;
 #   - every check is green by bin/fm-pr-lib.sh's fm_pr_github_checks_not_green,
 #     and at least one check exists;
 #   - no reviewer's latest approving-or-blocking review requests changes, and
@@ -66,7 +68,7 @@
 # the shim and its trust binding and leaves the log and cursor in place.
 #
 # Bounds: scan stops starting new lines once FM_MERGE_ON_VALIDATED_BUDGET_SECS
-# (default 20, cut to FM_CHECK_TIMEOUT minus 5 when that is smaller) is spent,
+# (default 45, cut to FM_CHECK_TIMEOUT minus 5 when that is smaller) is spent,
 # leaving the rest for the next poll; each forge call is bounded by
 # FM_MERGE_ON_VALIDATED_GH_SECS (default 8). A line whose live state cannot be
 # read is retried on later polls and logged as `would not merge` / `not merged`
@@ -81,6 +83,12 @@
 # A new validated event can replace a pending PR's head. Original status text is
 # retained so retry never drops its security marker. Scan budget applies to both
 # retries and new lines; existing pending records are checked first.
+# A VM review attestation is a standalone `review verdict applied` or
+# `review verdict was applied` clause after `head <sha>`, case-insensitive,
+# delimited by a comma, semicolon, pipe, or the end of the line. It authorizes
+# only that validated PR/head, never another head or a recorded fix.
+# The watcher's registered merge check defaults to a 50s timeout so its 45s
+# scan budget is usable; an explicit FM_CHECK_TIMEOUT still bounds the scan.
 set -u
 export LC_ALL=C
 
@@ -238,7 +246,7 @@ find_task() {
   if [ "$found" -eq 0 ]; then
     # The direct-PR path may not have recorded pr= yet. Resolve the live branch
     # only in that case; an explicit PR binding always takes precedence.
-    branch=$(gh_run pr view "$EV_URL" --json headRefName --jq .headRefName) || return 2
+    branch=$(jqf '.headRefName // ""') || return 2
     [ -n "$branch" ] && [ "$branch" != null ] || return 2
     for f in "$STATE"/*.meta; do
       [ -f "$f" ] || continue
@@ -296,7 +304,8 @@ vision_blob() {  # <ref> -> blob sha, or "absent"; returns 1 when unreadable
 # The latest valid verdict for this canonical PR and exact head is authoritative.
 # Test-only exemptions require a complete forge file list, including rename sources.
 check_review_verdict() {
-  local verdict='' files count
+  local verdict='' files count review_text
+  review_text=${EV_LINE#*" head $EV_SHA"}
   if [ -f "$STATE/review-verdicts.jsonl" ]; then
     verdict=$(jq -Rrs --arg pr "$EV_URL" --arg head "$EV_SHA" '
       [split("\n")[] | fromjson? | select(.pr == $pr and .head == $head)
@@ -307,6 +316,12 @@ check_review_verdict() {
     merge) return 0 ;;
     fix) add_reason "second-model review says fix for this head"; return 0 ;;
   esac
+  # A registered validator can attest that its independent review verdict was
+  # applied to this exact validated head. Require a standalone affirmative
+  # clause, so "not applied", instructions, and incidental prose do not count.
+  if printf '%s\n' "$review_text" | grep -qiE '(^|[;|,:])[[:space:]]*review verdict (was )?applied[[:space:]]*([;|,.]|$)'; then
+    return 0
+  fi
   count=$(jqf '.changedFiles // 0')
   if files=$(gh_run api "repos/$FM_PR_OWNER/$FM_PR_REPO/pulls/$FM_PR_NUMBER/files?per_page=100" --paginate --slurp) \
     && printf '%s' "$files" | jq -e --argjson count "$count" '
@@ -330,7 +345,7 @@ check_live() {
   local threads total open vbase vhead
 
   while :; do
-    EV_JSON=$(gh_run pr view "$EV_URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup,reviewDecision,reviews,labels,changedFiles) \
+    EV_JSON=$(gh_run pr view "$EV_URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,headRefName,baseRefName,statusCheckRollup,reviewDecision,reviews,labels,changedFiles) \
       || { EV_REASON="could not read the live pull request"; return 2; }
     mergeable=$(jqf '.mergeable // ""')
     # GitHub answers UNKNOWN for a closed or merged pull request for good, so
@@ -351,6 +366,10 @@ check_live() {
     return 2
   fi
 
+  if [ "$state" = MERGED ]; then
+    add_reason "already merged"
+    return 1
+  fi
   [ "$state" = OPEN ] || add_reason "pull request state is $state, not OPEN"
   [ "$draft" = false ] || add_reason "pull request is a draft or its draft state is unreadable"
   [ "$base" = "$DEV_BASE" ] || add_reason "base is '$base', not $DEV_BASE"
@@ -432,6 +451,7 @@ evaluate() {  # <status-line>
   EV_RETRY=0
   EV_PERMANENT=0
   EV_HEAD_CHANGED=0
+  EV_LINE=$line
   body=${line#*]: }
   urls=$(printf '%s\n' "$body" | grep -oE 'https://[^[:space:])]+/(pull|merge_requests)/[0-9]+' | sort -u)
   nurls=$(printf '%s' "$urls" | grep -c . || true)
@@ -453,27 +473,23 @@ evaluate() {  # <status-line>
   if printf '%s\n' "$line" | grep -qiE 'security[- ]sensitive'; then
     add_reason "marked security-sensitive in the validated line"
   fi
-  local find_rc=0
-  find_task || find_rc=$?
-  if [ "$find_rc" -eq 2 ]; then
-    EV_REASON="could not read the live pull request branch"
-    EV_RETRY=1
-    return 2
-  elif [ "$find_rc" -eq 0 ]; then
-    check_task
-  fi
-  # A structural refusal makes the live reads pointless, and they cost forge calls.
-  if [ -n "$EV_REASON" ] && [ -z "$EV_TASK" ]; then
-    return 1
-  fi
-  local own=$EV_REASON rc=0
+  local own=$EV_REASON rc=0 find_rc=0
   EV_REASON=
+  # Read state first: a merged PR no longer needs a live task in this home.
   check_live || rc=$?
-  if [ "$rc" -eq 2 ]; then
-    return 2
+  [ "$rc" -ne 2 ] || return 2
+  if [ "$(jqf '.state // ""')" != OPEN ]; then
+    return 1
   fi
   if [ -n "$own" ]; then
     EV_REASON="$own${EV_REASON:+; $EV_REASON}"
+  fi
+  find_task || find_rc=$?
+  if [ "$find_rc" -eq 2 ]; then
+    add_retry "could not read the live pull request branch"
+    return 2
+  elif [ "$find_rc" -eq 0 ]; then
+    check_task
   fi
   [ -z "$EV_REASON" ]
 }
@@ -609,6 +625,7 @@ scan_log() {  # <secondmate-id>; returns 1 to stop the whole scan
     case "$line" in
       "validated ["*|"validated:"*)
         if [ "$(budget_left)" -lt "$MIN_LINE_SECS" ]; then
+          log_line "scan budget exhausted; validated line deferred ($id byte $off)"
           stop=1
           break
         fi
@@ -660,9 +677,9 @@ action_scan() {
   fm_lock_try_acquire "$LOCK" || return 0
   trap 'fm_lock_release "$LOCK"' EXIT
 
-  budget=${FM_MERGE_ON_VALIDATED_BUDGET_SECS:-20}
-  check_timeout=${FM_CHECK_TIMEOUT:-30}
-  case "$budget$check_timeout" in *[!0-9]*|'') budget=20; check_timeout=30 ;; esac
+  budget=${FM_MERGE_ON_VALIDATED_BUDGET_SECS:-45}
+  check_timeout=${FM_CHECK_TIMEOUT:-50}
+  case "$budget$check_timeout" in *[!0-9]*|'') budget=45; check_timeout=50 ;; esac
   left=$((check_timeout - 5))
   [ "$left" -ge 5 ] || left=5
   [ "$budget" -le "$left" ] || budget=$left

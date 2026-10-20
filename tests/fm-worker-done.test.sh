@@ -69,22 +69,35 @@ assert_calls() {
   [ "$count" -eq "$expected" ] || fail "$file: expected $expected calls, got $count"
 }
 
+make_case trailing-progress
+printf 'done: https://github.com/example/project/pull/12\nworking: rebasing already\n\n' > "$STATE/job.status"
+process_done
+assert_calls "$FM_HOME/check.calls" 0
+assert_calls "$FM_HOME/capture.calls" 0
+if grep -q '^pr=' "$STATE/job.meta"; then fail 'historical done claimed a PR'; fi
+printf 'paused: waiting on validation\n' >> "$STATE/job.status"
+process_done
+assert_calls "$FM_HOME/check.calls" 0
+pass 'latest working or paused status suppresses historical completions'
+
 make_case shared
-printf 'done [at=123]: ready (https://github.com/example/project/pull/12)\nworking: trailing note\n' > "$STATE/job.status"
+printf 'done [at=123]: ready (https://github.com/example/project/pull/12)\n\n' > "$STATE/job.status"
 snapshot
 mark_surfaced "$STATE/job.status" "$END" "$IDENT"
 wait_file "$STATE/.worker-done-job/example--project--12.1.checked"
-assert_contains "$(cat "$STATE/job.meta")" 'pr=https://github.com/example/project/pull/12' 'shared surface records the done URL before trailing progress'
+assert_grep 'done_checked_at=' "$STATE/job.meta" 'completion records its evaluated byte offset'
 assert_calls "$FM_HOME/capture.calls" 1
 assert_equals 'job https://github.com/example/project/pull/12' "$(cat "$FM_HOME/check.calls")" 'done checker receives its existing task and URL interface'
-# Repeated and concurrent surfaces converge to one capture and one checklist.
 process_done & p1=$!
 process_done & p2=$!
 wait "$p1" || fail 'first duplicate failed'
 wait "$p2" || fail 'second duplicate failed'
 assert_calls "$FM_HOME/capture.calls" 1
 assert_calls "$FM_HOME/check.calls" 1
-pass 'shared surfaced-status path runs all three effects once'
+printf '\n' >> "$STATE/job.status"
+process_done
+assert_calls "$FM_HOME/check.calls" 1
+pass 'shared surfaced-status path evaluates the last nonempty done line once'
 
 make_case concurrent
 printf 'done: https://github.com/example/project/pull/12\n' > "$STATE/job.status"
@@ -95,6 +108,19 @@ wait "$p2" || fail 'second concurrent completion failed'
 assert_calls "$FM_HOME/capture.calls" 1
 assert_calls "$FM_HOME/check.calls" 1
 pass 'concurrent first completions serialize their side effects'
+
+make_case latest-only
+printf 'done: https://github.com/example/project/pull/11\nworking: fixing\ndone: https://github.com/example/project/pull/12\n' > "$STATE/job.status"
+process_done
+assert_equals 'job https://github.com/example/project/pull/12' "$(cat "$FM_HOME/check.calls")" 'only newest done event is checked'
+assert_grep 'pr=https://github.com/example/project/pull/12' "$STATE/job.meta" 'newest done owns the PR binding'
+snapshot
+OLD_END=$END
+printf 'working: more fixes\ndone: https://github.com/example/project/pull/12\n' >> "$STATE/job.status"
+process_done
+bash "$FM_HOME/bin/fm-worker-done.sh" job "$OLD_END" "$IDENT"
+assert_calls "$FM_HOME/check.calls" 2
+pass 'only the latest done is evaluated and a stale captured event cannot replay'
 
 for harness in codex agy claude; do
   make_case "harness-$harness"
@@ -137,7 +163,7 @@ for role in scout secondmate; do
   printf 'kind=%s\n' "$role" > "$STATE/job.meta"
   printf 'done: https://github.com/example/project/pull/12\n' > "$STATE/job.status"
   process_done
-  assert_calls "$FM_HOME/capture.calls" 0
+  if [ "$role" = scout ]; then assert_calls "$FM_HOME/capture.calls" 1; else assert_calls "$FM_HOME/capture.calls" 0; fi
   assert_calls "$FM_HOME/check.calls" 0
   if grep -q '^pr=' "$STATE/job.meta"; then fail "$role claimed a PR"; fi
 done
@@ -151,10 +177,10 @@ process_done
 assert_calls "$FM_HOME/check.calls" 1
 printf 'on\n' > "$FM_CONFIG_OVERRIDE/done-check"
 process_done
-assert_calls "$FM_HOME/check.calls" 2
+assert_calls "$FM_HOME/check.calls" 1
 FM_DONE_CHECK=off process_done
-assert_calls "$FM_HOME/check.calls" 2
-pass 'shadow mode is retained, on rechecks a shadow receipt, and the environment override wins'
+assert_calls "$FM_HOME/check.calls" 1
+pass 'shadow mode is retained, on does not re-evaluate the same done event, and the environment override wins'
 
 make_case unrelated
 cat > "$STATE/job.status" <<'STATUS'
@@ -168,10 +194,17 @@ done: https://github.com/example/../pull/12
 done: https://github.com/example/project/pull/12 https://github.com/example/project/pull/13
 STATUS
 process_done
-assert_calls "$FM_HOME/capture.calls" 0
+assert_calls "$FM_HOME/capture.calls" 1
 assert_calls "$FM_HOME/check.calls" 0
 if grep -q '^pr=' "$STATE/job.meta"; then fail 'unrelated status wrote metadata'; fi
-pass 'progress, local-only completions, and invalid URLs do not trigger work'
+pass 'ambiguous URLs never bind or check a PR but still capture lessons'
+
+make_case local-only
+printf 'done: ready in branch fm/local-only\n' > "$STATE/job.status"
+process_done
+assert_calls "$FM_HOME/capture.calls" 1
+assert_calls "$FM_HOME/check.calls" 0
+pass 'local-only completions capture lessons without a PR'
 
 make_case retry
 printf 'done: https://github.com/example/project/pull/12\n' > "$STATE/job.status"
@@ -182,11 +215,11 @@ assert_contains "$(cat "$FM_HOME/run.log")" 'done check failed (exit 3)' 'checke
 rm "$FM_HOME/capture.fail" "$FM_HOME/check.error"
 process_done
 assert_calls "$FM_HOME/capture.calls" 2
-assert_calls "$FM_HOME/check.calls" 2
+assert_calls "$FM_HOME/check.calls" 1
 process_done
 assert_calls "$FM_HOME/capture.calls" 2
-assert_calls "$FM_HOME/check.calls" 2
-pass 'failed operations retry without duplicating successful operations'
+assert_calls "$FM_HOME/check.calls" 1
+pass 'capture retries but each done event evaluates its checklist at most once'
 
 make_case verdict
 printf 'done: https://github.com/example/project/pull/12\n' > "$STATE/job.status"

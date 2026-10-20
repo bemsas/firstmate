@@ -1745,10 +1745,15 @@ Live mode prints one line when a merge landed or `fm-pr-merge.sh` refused a pass
 The first scan of a status log starts at its end, so history is never replayed.
 Transient refusals are retained for later scans without needing a new validation event; permanent refusals and changed heads retire the pending validation.
 The guarded merge preserves the validated and reviewed head through its own forge reads.
-After the independent review, record its verdict with [`bin/fm-review-verdict.sh`](../bin/fm-review-verdict.sh) `<pr-url> <head> merge|fix`; its header owns the append-only review record and replacement rules.
+When firstmate accepts a clean independent review report, run `FM_HOME=/absolute/home bin/fm-review-verdict.sh <pr-url> <reviewed-head> merge <reviewer>` before marking the review complete.
+Record `fix` instead when the report requires changes.
+Use the report's exact reviewed head, and record a new verdict after reviewing a later head.
+[`bin/fm-review-verdict.sh`](../bin/fm-review-verdict.sh) owns the append-only review record and replacement rules.
+A registered VM validator can also attest that the review verdict was applied with a standalone `review verdict applied` or `review verdict was applied` clause after the validated head, separated from other text by a comma, semicolon, or pipe.
+That attestation counts only for the PR and head on that validated line; a recorded `fix` still refuses, and a non-test-only diff without either verdict remains blocked and logs the missing review.
 
 Arm the hook once per home, after writing the config, with `bin/fm-merge-on-validated.sh arm`; `disarm` removes the shim and its trust binding.
-`FM_MERGE_ON_VALIDATED_BUDGET_SECS` (default 20) and `FM_MERGE_ON_VALIDATED_GH_SECS` (default 8) bound a scan and one forge call.
+`FM_MERGE_ON_VALIDATED_BUDGET_SECS` (default 45) and `FM_MERGE_ON_VALIDATED_GH_SECS` (default 8) bound a scan and one forge call.
 The script header owns the exact test, cursor, retry, and log mechanics.
 
 ## Mail plane (.env)

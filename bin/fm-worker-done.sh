@@ -2,22 +2,19 @@
 # Process completion work for a successfully surfaced status snapshot.
 # Usage: fm-worker-done.sh <task-id> <captured-byte-endpoint> <file-identity>
 # Called detached by mark_surfaced in fm-push-transition-lib.sh for every harness
-# and runtime. Only ship done events carrying one canonical GitHub pull URL qualify.
+# and runtime. Only the last nonempty line of the captured snapshot may act.
+# Scouts and ships capture lessons, including local-only ships with no PR URL.
+# Only ships bind/check a canonical, unambiguous GitHub pull URL.
 # Existing nonempty pr= metadata is preserved under the shared metadata lock.
 # Capture uses the optional home-local data/secondbrain/tools/capture.py and its
-# wiki/sources/source-task-<id>.md card as the existing-capture receipt.
-# Successful capture is also receipted in state/.worker-done-<id>/captured.
-# The checklist switch follows fm-done-check.sh: FM_DONE_CHECK overrides
-# config/done-check; on and shadow invoke it, off/absent do not. --auto retains
-# PR-head stamping when the URL matches the recorded PR; a different existing
-# PR binding is preserved by using its ordinary <id> <url> interface instead.
-# Checklist exits 10 and 11
-# are completed bounce/escalation verdicts; execution errors remain retryable.
-# Per-event checklist receipts bound to the status file identity and a task lock
-# make repeated/concurrent surfaces converge without reusing an old task's
-# receipt. Failed operations have no success receipt and retry on a later
-# surface. Commands are bounded to 300 seconds each and failures go to stderr
-# (the detached caller appends stdout/stderr to state/worker-done.log).
+# wiki/sources/source-task-<id>.md card or a successful capture receipt.
+# FM_DONE_CHECK overrides config/done-check; on/shadow invoke the checker.
+# Before evaluating a done line, atomically claim its byte endpoint in metadata
+# as done_checked_at= with done_checked_ident= identifying the status file.
+# Each event is attempted at most once, even after errors or mode changes;
+# another done event can be checked again. Capture failures remain retryable.
+# A per-task lock serializes claims, capture, and checks. Commands are bounded
+# to 300 seconds each; the detached caller appends errors to worker-done.log.
 # FM_HOME and FM_STATE/DATA/CONFIG_OVERRIDE select the owning home's paths.
 set -u
 
@@ -49,7 +46,8 @@ snapshot_current() {
     && [ "$(_fm_open_decisions_file_ident "$STATUS")" = "$IDENT" ]
 }
 snapshot_current || exit 0
-[ "$(sed -n 's/^kind=//p' "$META")" = ship ] || exit 0
+KIND=$(sed -n 's/^kind=//p' "$META")
+case "$KIND" in ship|scout) ;; *) exit 0 ;; esac
 fm_lock_acquire_wait_bounded "$LOCK" 5 || { log_failure 'task lock unavailable'; exit 1; }
 trap 'fm_lock_release "$META_LOCK"; fm_lock_release "$LOCK"' EXIT
 trap 'exit 143' HUP INT TERM
@@ -61,6 +59,48 @@ fi
 SNAPSHOT=$(_fm_status_read_span "$STATUS" 0 "$END") \
   || { log_failure 'cannot read captured status span'; exit 1; }
 snapshot_current || exit 0
+# Keep the event's endpoint independent of trailing blank status lines.
+LINE_NUMBER=0
+DONE_END=0
+OFFSET=0
+LAST_LINE=
+export LC_ALL=C
+while IFS= read -r line; do
+  LINE_NUMBER=$((LINE_NUMBER + 1))
+  OFFSET=$((OFFSET + ${#line} + 1))
+  if [[ "$line" = *[![:space:]]* ]]; then
+    LAST_LINE=$line
+    DONE_END=$OFFSET
+    DONE_LINE_NUMBER=$LINE_NUMBER
+  fi
+done <<< "$SNAPSHOT"
+[ "$(status_line_verb "$LAST_LINE")" = 'done' ] || exit 0
+LINE_NUMBER=$DONE_LINE_NUMBER
+
+claim_done() {
+  local checked ident tmp rc=0
+  fm_lock_acquire_wait_bounded "$META_LOCK" 5 || return 1
+  if snapshot_current; then
+    checked=$(sed -n 's/^done_checked_at=//p' "$META")
+    ident=$(sed -n 's/^done_checked_ident=//p' "$META")
+    case "$checked" in ''|*[!0-9]*) checked=0 ;; esac
+    if [ "$ident" = "$IDENT" ] && [ "$checked" -ge "$DONE_END" ]; then
+      rc=1
+    else
+      tmp=$(mktemp "$META.tmp.XXXXXX") || rc=1
+      if [ "$rc" -eq 0 ]; then
+        awk '!/^done_checked_(at|ident)=/ {print}' "$META" > "$tmp" \
+          && printf 'done_checked_at=%s\ndone_checked_ident=%s\n' "$DONE_END" "$IDENT" >> "$tmp" \
+          && mv -f "$tmp" "$META" || rc=1
+        rm -f "$tmp"
+      fi
+    fi
+  else
+    rc=1
+  fi
+  fm_lock_release "$META_LOCK"
+  return "$rc"
+}
 
 record_pr() {  # <url>
   local url=$1 line existing='' tmp rc=0
@@ -112,6 +152,7 @@ check_done() {  # <url>
   fi
   mode=$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
   case "$mode" in on|shadow) ;; *) return 0 ;; esac
+  claim_done || return 0
   # Owner cannot contain --, so this delimiter is unambiguous with repo names.
   fm_pr_url_parse "$url" || return 1
   receipt="$RECEIPTS/$FM_PR_OWNER--$FM_PR_REPO--$FM_PR_NUMBER.$LINE_NUMBER.checked"
@@ -139,13 +180,9 @@ done_url() {  # <done-line>; refuse ambiguous PR ownership.
   done
   [ -n "$URL" ]
 }
-LINE_NUMBER=0
-while IFS= read -r line; do
-  LINE_NUMBER=$((LINE_NUMBER + 1))
-  [ "$(status_line_verb "$line")" = 'done' ] || continue
-  done_url "$line" || continue
-  record_pr "$URL" || continue
-  capture_lessons
-  snapshot_current || exit 0
-  check_done "$URL"
-done <<< "$SNAPSHOT"
+capture_lessons
+[ "$KIND" = ship ] || exit 0
+done_url "$LAST_LINE" || exit 0
+record_pr "$URL" || exit 1
+snapshot_current || exit 0
+check_done "$URL"

@@ -25,6 +25,7 @@ Register or re-hold through `bin/fm-captain-hold.sh hold`, which is idempotent p
 After inventorying the whole report and review surface, run `bin/fm-captain-hold.sh complete` with every captain-held task id, or with `--none` only when the reviewed surface leaves nothing waiting on the captain.
 A completed investigation and an ended visual review use this same owner and completion command; a visual tool, including Lavish, never owns a parallel completion policy.
 Run the command in the originating work's authoritative `FM_HOME`; secondmate-owned work registers in that secondmate home's backlog, and a question already held anywhere is never re-registered as a second row.
+When accepting a second-model PR review report, first record its exact reviewed head with `bin/fm-review-verdict.sh` before completing the review; [the merge-on-validated configuration](../../../docs/configuration.md#merge-on-validated-configmerge-on-validated) owns the command and verdict rules.
 Do not close a captain-held task merely because the originating investigation completed, its report was archived, its visual review ended, or its task was torn down.
 Holding the work item the question gates is safe for exactly that reason: cleanup keeps such a row open with the finished work's deliverable recorded and returns it to the queue, so it still reads as the captain's own call.
 Only `answer` with the captain's words or an evidence-backed `reconcile close` may resolve it.

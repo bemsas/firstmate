@@ -414,7 +414,7 @@ test_watcher_runs_done_check() {
   fm_write_meta "$state/ship.meta" "kind=ship" "worktree=$REPO" "base=dev"
   fm_write_meta "$state/mate.meta" "kind=secondmate"
   fm_write_meta "$state/scout.meta" "kind=scout"
-  printf 'done [at=1]: %s\nworking [at=2]: later note\n' "$URL" > "$state/ship.status"
+  printf 'done [at=1]: %s\n' "$URL" > "$state/ship.status"
   printf 'done [at=1]: %s\n' "$URL" > "$state/mate.status"
   printf 'done [at=1]: %s\n' "$URL" > "$state/scout.status"
   env -u FM_ROOT_OVERRIDE FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
@@ -439,8 +439,34 @@ test_watcher_runs_done_check() {
   assert_no_grep 'pr=' "$state/mate.meta" "secondmate must not own child PR"
   assert_no_grep 'pr=' "$state/scout.meta" "scout must not own PR"
   assert_contains "$(cat "$dir/out")" 'signal:' "check swallowed normal wake"
-  pass "watcher runs auto checklist on ship done URLs even under a later working line; other roles stay unbound"
+  pass "watcher runs auto checklist on latest ship done URLs; other roles stay unbound"
 }
+
+test_base_metadata_keys() {
+  reset_pr
+  commit_file bin/tool.sh two
+  printf 'base=dev\nbase_branch=main\n' >> "$HOME_DIR/state/task-a.meta"
+  check FM_DONE_CHECK=on FM_TEST_BASE=main
+  assert_equals pass "$(result_of base)" 'base_branch takes priority over legacy base'
+  sed '/^base_branch=/d' "$HOME_DIR/state/task-a.meta" > "$T/meta"
+  mv "$T/meta" "$HOME_DIR/state/task-a.meta"
+  check FM_DONE_CHECK=on FM_TEST_BASE=main
+  assert_equals fail "$(result_of base)" 'legacy base remains a fallback'
+  sed '/^base=/d' "$HOME_DIR/state/task-a.meta" > "$T/meta"
+  mv "$T/meta" "$HOME_DIR/state/task-a.meta"
+  pass 'base metadata uses base_branch before legacy base'
+}
+test_top_level_heading_ends_checklist_section() {
+  reset_pr
+  commit_file bin/tool.sh two
+  write_brief '## Files in scope' '- `bin/`' '' '## Tests' '- `bash tests/a.test.sh`' '' '# Setup' '1. Create a branch' '# Rules' '2. Keep work isolated'
+  printf '{"head_sha":"%s","tests":[{"cmd":"bash tests/a.test.sh","exit":0}]}\n' "$(git -C "$REPO" rev-parse HEAD)" > "$HOME_DIR/data/task-a/receipt.json"
+  check FM_DONE_CHECK=on
+  assert_equals pass "$(result_of tests)" 'top-level setup and rules must not become test commands'
+  pass 'checklist sections stop at the next top-level heading'
+}
+test_top_level_heading_ends_checklist_section
+test_base_metadata_keys
 
 test_off_by_default_does_nothing
 test_switch_comes_from_config_file_or_env

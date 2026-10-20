@@ -267,7 +267,7 @@ test_refusal_reasons() {
     ".headRefOid = \"$HEAD_B\""
   refuses draft "draft" '.isDraft = true'
   refuses closed "state is CLOSED" '.state = "CLOSED"'
-  refuses merged "state is MERGED" '.state = "MERGED"'
+  refuses merged "already merged" '.state = "MERGED"'
   refuses check-red "checks not green: ci" '.statusCheckRollup[0].conclusion = "FAILURE"'
   refuses check-pending "checks not green: ci" \
     '.statusCheckRollup[0].status = "IN_PROGRESS" | .statusCheckRollup[0].conclusion = null'
@@ -471,7 +471,7 @@ test_closed_pull_request_is_not_reread_for_unknown() {
   prime "$dir"
   append_status "$dir" "$(validated_line)"
   scan "$dir"
-  assert_contains "$(log_of "$dir")" "state is MERGED, not OPEN" "merged unknown: not refused"
+  assert_contains "$(log_of "$dir")" "already merged" "merged unknown: not refused"
   assert_equals "1" "$(grep -c '^pr view' "$dir/gh.log")" \
     "merged unknown: a merged pull request was re-read while waiting for its mergeable answer"
   pass "only an open pull request is re-read for an UNKNOWN mergeable answer"
@@ -639,9 +639,10 @@ test_review_verdict_gate() {
   FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$OTHER_URL" "$HEAD_A" merge || fail "could not record other PR review"
   scan "$dir"
   assert_not_contains "$(log_of "$dir")" "would merge " "another PR authorized merge"
-  FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$URL" "$HEAD_A" merge || fail "could not record review"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$URL" "$HEAD_A" merge independent-review || fail "could not record review"
   scan "$dir"
   assert_contains "$(log_of "$dir")" "would merge $URL $HEAD_A" "exact-head merge verdict did not release wait"
+  assert_equals independent-review "$(jq -r '.reviewer // empty' "$dir/home/state/review-verdicts.jsonl" | tail -1)" "review acceptance records the reviewer"
   assert_equals 3 "$(wc -l < "$dir/home/state/review-verdicts.jsonl" | tr -d ' ')" "helper lost a record"
   rc=0
   FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$URL" bad merge >/dev/null 2>&1 || rc=$?
@@ -791,6 +792,96 @@ test_retry_after_unreadable_supporting_facts() {
   done
   pass "unreadable supporting facts cannot turn transient mergeability into a permanent refusal"
 }
+
+test_merged_without_task_and_vm_review() {
+  local dir text
+  dir=$(make_case merged-without-task)
+  rm "$dir/home/state/task-a.meta"
+  edit_view "$dir" '.state = "MERGED" | .mergeable = "UNKNOWN"'
+  prime "$dir"
+  append_status "$dir" "$(validated_line)"
+  scan "$dir"
+  assert_contains "$(log_of "$dir")" 'already merged' 'retired task must not mask an already merged PR'
+  assert_not_contains "$(log_of "$dir")" 'no task' 'merged PR should not look up a task'
+  for text in 'review verdict applied' 'review verdict was applied' 'review verdict was not applied' 'checks green'; do
+    dir=$(make_case "vm-review-$(printf '%s' "$text" | tr ' ' '-')")
+    rm "$dir/home/state/review-verdicts.jsonl"
+    prime "$dir"
+    append_status "$dir" "$(validated_line "$URL" "$HEAD_A" "$text")"
+    scan "$dir"
+    case "$text" in
+      'review verdict applied'|'review verdict was applied')
+        assert_contains "$(log_of "$dir")" "would merge $URL $HEAD_A" 'explicit applied review should satisfy gate' ;;
+      *) assert_contains "$(log_of "$dir")" 'missing second-model merge verdict' 'no positive review must remain blocked' ;;
+    esac
+  done
+  dir=$(make_case vm-review-fix)
+  FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$URL" "$HEAD_A" fix || fail 'record fix'
+  prime "$dir"
+  append_status "$dir" "$(validated_line "$URL" "$HEAD_A" 'review verdict applied')"
+  scan "$dir"
+  assert_contains "$(log_of "$dir")" 'second-model review says fix' 'VM applied marker must not override explicit fix'
+  pass 'merged PR state precedes task lookup and explicit VM applied review is accepted safely'
+}
+test_default_budget_covers_slow_prior_pr() {
+  local dir real_date
+  dir=$(make_case budget)
+  real_date=$(command -v date)
+  cat > "$dir/fakebin/date" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = +%s ]; then
+  now=\$("$real_date" +%s)
+  shift_secs=\$(cat "$dir/clock-shift" 2>/dev/null || echo 0)
+  echo \$((now + shift_secs))
+else
+  exec "$real_date" "\$@"
+fi
+SH
+  mv "$dir/fakebin/gh" "$dir/fakebin/gh-real"
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "$1 $2" = 'pr view' ]; then
+  shift_secs=$(cat "$FM_FAKE_CASE/clock-shift" 2>/dev/null || echo 0)
+  echo $((shift_secs + 12)) > "$FM_FAKE_CASE/clock-shift"
+fi
+exec "$FM_FAKE_CASE/fakebin/gh-real" "$@"
+SH
+  chmod +x "$dir/fakebin/date" "$dir/fakebin/gh"
+  prime "$dir"
+  append_status "$dir" "$(validated_line)"
+  append_status "$dir" "$(validated_line)"
+  scan "$dir"
+  assert_equals 2 "$(grep -c 'would merge ' "$dir/home/state/merge-on-validated.log")" 'scan handles a second validation after a simulated 12s first PR'
+  assert_equals "$(wc -c < "$dir/home/state/vm-mate.status" | tr -d ' ')" "$(awk '{print $2}' "$dir/home/state/.merge-on-validated.cursor")" 'scan reaches both validated lines'
+  pass '45s default budget processes the next validation after a slow PR read'
+}
+test_vm_review_live_guard() {
+  local dir name text
+  for name in missing applied fix; do
+    dir=$(live_case "vm-review-live-$name" 0)
+    rm "$dir/home/state/review-verdicts.jsonl"
+    text='checks green'
+    if [ "$name" != missing ]; then text='checks green; review verdict was applied; checks green'; fi
+    if [ "$name" = fix ]; then
+      FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$URL" "$HEAD_A" fix independent-review || fail 'record blocking review'
+    fi
+    SCAN_BIN="$dir/bin/fm-merge-on-validated.sh" prime "$dir"
+    append_status "$dir" "$(validated_line "$URL" "$HEAD_A" "$text")"
+    SCAN_BIN="$dir/bin/fm-merge-on-validated.sh" scan "$dir"
+    if [ "$name" = applied ]; then
+      assert_equals "task-a $URL" "$(cat "$dir/merge.args")" 'applied review reaches guarded merge'
+    else
+      assert_absent "$dir/merge.args" 'missing or blocking review must never call merge'
+      if [ "$name" = missing ]; then
+        assert_contains "$(log_of "$dir")" 'not merged: missing second-model merge verdict' 'live skip clearly names missing review'
+      fi
+    fi
+  done
+  pass 'live mode requires a review and a VM applied marker never overrides fix'
+}
+test_vm_review_live_guard
+test_default_budget_covers_slow_prior_pr
+test_merged_without_task_and_vm_review
 
 test_retry_after_unreadable_supporting_facts
 test_pending_live_merge_and_revalidation
