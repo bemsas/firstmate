@@ -707,6 +707,20 @@ A line with no recommendation, a recommendation the guard rules reject, a judge 
 `bin/fm-judge-first.py`'s header owns the decision order, guard rules, and dedupe by decision identity; `bin/fm-procevent-remote-reply.sh` owns the call site.
 The file is not inherited by secondmate homes.
 
+## Finished-worker pane retirement (config/pane-retire)
+
+A Herdr ship worker that has finished keeps its terminal pane until teardown, which runs only after its PR lands, so a dead shell or an idle agent can sit open for hours.
+`bin/fm-pane-retire.sh` closes just that pane once the work is safe, ahead of landing.
+It is manual by default: with no flag it prints a dry-run listing of every task with the reason each pane is kept or eligible, and `--apply` prints the same listing and then closes the eligible panes.
+The optional local, gitignored `config/pane-retire` file opts this home into the automatic form: when it holds `on`, the watcher runs `fm-pane-retire.sh --auto` at most once per `FM_PANE_RETIRE_INTERVAL` seconds (default `600`).
+Absent, empty, or any other value leaves the automatic form off, and an invalid interval falls back to the default.
+`FM_PANE_RETIRE_MIN_AGE` is how many seconds an idle agent's `done` line must have aged before its pane may close (default `120`).
+The flag is a home-local preference and is not inherited by secondmate homes, which retire panes only for their own crew.
+A pane closes only when the last status is `done`, no steering message is waiting, the delivery no longer depends on the pane (a recorded PR for this exact head, or a head a remote-tracking ref contains), the worktree is clean, the recorded pane is the one Herdr reports under that id, and the agent is provably gone or idle by process proof.
+The close is the exact-pane focus-preserving helper that [`herdr-backend.md`](herdr-backend.md) describes, run under the task and session locks, and a Treehouse slot is first made a durable lease so the freed process lease cannot hand the worktree to another task.
+The step never edits task metadata, the status log, the worktree, or the branch, so `bin/fm-control.sh relaunch` re-creates the pane in the recorded worktree when a review fix needs the worker again, and teardown after landing accepts the already-closed pane.
+`bin/fm-pane-retire.sh`'s header owns the exact guards and output, and `tests/fm-pane-retire.test.sh` covers each one.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked [`.no-mistakes.yaml`](../.no-mistakes.yaml) sets `test.evidence.store_in_repo: true` and runs the canonical [shell/workflow lint](../bin/fm-lint.sh) followed by the [Pi production-consumer typecheck](../tests/fm-pi-primary-types.test.sh) in the compiler-owning lint phase.

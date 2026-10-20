@@ -454,6 +454,12 @@ Any of these preserves the candidate and lets session startup continue with at m
 - An unreadable check.
 - Any error.
 
+A finished ship worker's pane can also be retired before its PR lands, by `bin/fm-pane-retire.sh`; [`configuration.md`](configuration.md#finished-worker-pane-retirement-configpane-retire) owns its guards and opt-in.
+It reuses the same exact-pane focus-preserving close helper, called with the observed agent state as its required state under the task's spawn lock and the shared presentation lock.
+A dead agent counts only when `fm_backend_herdr_pane_shell_tree_proof` reads shells alone below the pane shell, which also accepts the nested `treehouse get` login shell that the strict lone-idle-shell proof rejects on every crew pane.
+A live agent counts only when its status is idle or done and the foreground process group is the harness alone.
+A pane in a projected workspace is left for teardown, which owns the presentation journal.
+
 ### Operational compromises
 
 - Grouping is best-effort; only an exact same-identity version 2 binding survives a Herdr restart in place.

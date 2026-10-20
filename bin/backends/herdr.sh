@@ -2241,6 +2241,76 @@ EOF
   printf 'shell'
 }
 
+# fm_backend_herdr_pane_shell_tree_proof: succeed only when <pane_id> provably
+# holds nothing but shells: fm_backend_herdr_pane_process_state reads `shell`
+# (every foreground process is a recognized shell and no harness descends from
+# the pane shell) AND every process anywhere below the pane shell in the real
+# process table is itself a recognized shell or the `treehouse get` wrapper
+# that spawned the nested worktree shell.
+# This is the proof fm_backend_herdr_pane_idle_shell_pid cannot give for the
+# crew shape, where a nested `treehouse get` login shell sits under the pane's
+# top shell and so is never the foreground group's leader. It is weaker than
+# that proof by exactly that nesting, and stronger than the process-state read
+# by also refusing a backgrounded server, test run, or watcher, so a pane close
+# never ends work the agent left running. A shell with a persistent helper
+# child (gitstatusd, a zsh-async worker) never passes and is left open.
+# Transient prompt helpers settle under the same bounded retry as the idle-shell
+# proof; a genuinely busy pane fails every sample. Prints the pane shell pid.
+fm_backend_herdr_pane_shell_tree_proof() {  # <session> <pane_id>
+  local attempt=0 max_attempts=${FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS:-10}
+  while :; do
+    if fm_backend_herdr_pane_shell_tree_sample "$1" "$2"; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$max_attempts" ] || return 1
+    sleep 0.1
+  done
+}
+
+# fm_backend_herdr_pane_shell_tree_sample: one strict observation for
+# fm_backend_herdr_pane_shell_tree_proof, which owns the contract.
+fm_backend_herdr_pane_shell_tree_sample() {  # <session> <pane_id>
+  local session=$1 pane_id=$2 info shell_pid ps_bin rows pid comm
+  [ "$(fm_backend_herdr_pane_process_state_sample "$session" "$pane_id")" = shell ] || return 1
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) || return 1
+  shell_pid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
+  ps_bin=${FM_HERDR_PS_BIN:-ps}
+  command -v "$ps_bin" >/dev/null 2>&1 || return 1
+  rows=$(LC_ALL=C "$ps_bin" -axo pid=,ppid=,comm= 2>/dev/null) || return 1
+  printf '%s\n' "$rows" | awk -v shell="$shell_pid" '$1 == shell { found = 1 } END { exit(found ? 0 : 1) }' || return 1
+  while IFS=$'\t' read -r pid comm; do
+    [ -n "$pid" ] || continue
+    comm=$(printf '%s' "$comm" | tr -d '[:space:]')
+    comm=${comm#-}
+    comm=${comm##*/}
+    case "$comm" in sh|bash|zsh|dash|ksh|fish|treehouse) ;; *) return 1 ;; esac
+  done <<EOF
+$(printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
+  {
+    pid[NR] = $1; ppid[NR] = $2
+    line = $0
+    sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+/, "", line)
+    comm[NR] = line
+  }
+  END {
+    want[shell] = 1
+    changed = 1
+    while (changed) {
+      changed = 0
+      for (n = 1; n <= NR; n++) {
+        if ((ppid[n] in want) && !(pid[n] in want)) { want[pid[n]] = 1; changed = 1 }
+      }
+    }
+    for (n = 1; n <= NR; n++) {
+      if ((pid[n] in want) && pid[n] != shell) printf "%s\t%s\n", pid[n], comm[n]
+    }
+  }')
+EOF
+  printf '%s\n' "$shell_pid"
+}
+
 # fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
 # dead|no-agent|stale-agent|live|unknown, from the JSON body of two read-only
 # calls plus, for a registered agent, the pane's process-level view - never

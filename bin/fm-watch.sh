@@ -2739,6 +2739,29 @@ reconcile_requests_detached() {
   RECONCILE_REQUEST_PID=$!
 }
 
+# Finished-worker pane retirement (config/pane-retire, default off). The sweep
+# is bin/fm-pane-retire.sh --auto; it decides everything itself and closes a pane
+# only on its own full proof, so the watcher only paces it. It runs detached for
+# the reason home_summary_refresh_detached gives: a slow Herdr read must never
+# stand between a poll and the liveness beacon.
+PANE_RETIRE_INTERVAL=${FM_PANE_RETIRE_INTERVAL:-600}
+case "$PANE_RETIRE_INTERVAL" in
+  ''|*[!0-9]*|0) PANE_RETIRE_INTERVAL=600 ;;
+esac
+PANE_RETIRE_PID=
+pane_retire_detached() {
+  if [ -n "$PANE_RETIRE_PID" ]; then
+    if kill -0 "$PANE_RETIRE_PID" 2>/dev/null; then
+      return 0
+    fi
+    wait "$PANE_RETIRE_PID" 2>/dev/null || true
+    PANE_RETIRE_PID=
+  fi
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-pane-retire.sh" --auto </dev/null >/dev/null 2>&1 &
+  PANE_RETIRE_PID=$!
+}
+
 PR_POLL_CONTROL_LOCK=
 PR_POLL_PUBLISH_LOCK=
 
@@ -2899,6 +2922,12 @@ while :; do
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
+  fi
+
+  if [ -f "$CONFIG/pane-retire" ] \
+     && [ "$(age_of "$STATE/.last-pane-retire")" -ge "$PANE_RETIRE_INTERVAL" ]; then
+    touch "$STATE/.last-pane-retire"
+    pane_retire_detached
   fi
 
   # Bearings publishes reconcile asks as local one-shot request files and
