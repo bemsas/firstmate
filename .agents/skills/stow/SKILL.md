@@ -133,6 +133,9 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    Route a read-only ownership constraint to its primary owner, and make every other unresolved excess a concrete captain decision that names the safe action still required.
    Never end a pass over budget as an accepted exception.
 
+After curating `data/captain.md`, `data/learnings.md`, or `data/memory-archive.md`, resolve `home_root` to `$FM_HOME` when set and otherwise to the Firstmate code root.
+If that home's `data/secondbrain/tools/sync_hot_memory.py` exists, run `python3 "$home_root/data/secondbrain/tools/sync_hot_memory.py"` to refresh its derived notes and queue local recall indexing.
+
 A net increase is allowed only for a genuinely new current fact with no stronger owner.
 Before allowing it, consolidate enough lower-priority material to remain within budget.
 Never describe the session as reset-safe while the memory total is over budget or an exception is unresolved.
