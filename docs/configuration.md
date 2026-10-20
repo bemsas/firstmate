@@ -684,6 +684,18 @@ fi
 
 `bin/fm-watch.sh`'s `wedge_guard_evidence` and `wedge_defer_guard` own the exact invocation, deferral record, and fail-open boundaries.
 
+## Judge-first (config/judge-first)
+
+The optional local, gitignored `config/judge-first` file opts this home into running every new `needs-decision:` and `blocked:` line a remote secondmate mirrors into this home's status stream through the private decision judge (`data/fleet-bridge/judge.py`) before it reaches the supervisor.
+Absent means the hook does nothing.
+Present and empty, or holding any value other than `on`, means shadow: the hook computes each verdict, appends it to `judge-log.jsonl` beside `judge.py`, and sends nothing.
+Only the exact word `on` answers an auto verdict, through `bin/fm-send.sh` with `--resolve-key`, journaled before the send and never retried.
+Deleting the file is the kill switch.
+`bin/fm-judge-first.sh summary [--since <epoch>]` lists the shadow verdicts so a day of them can be compared with the supervisor's own answers.
+A line with no recommendation, a recommendation the guard rules reject, a judge failure or timeout, an unknown judge policy, or (in `on` mode) a missing second opinion always keeps the ordinary wake.
+`bin/fm-judge-first.py`'s header owns the decision order, guard rules, and dedupe by decision identity; `bin/fm-procevent-remote-reply.sh` owns the call site.
+The file is not inherited by secondmate homes.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked [`.no-mistakes.yaml`](../.no-mistakes.yaml) sets `test.evidence.store_in_repo: true` and runs the canonical [shell/workflow lint](../bin/fm-lint.sh) followed by the [Pi production-consumer typecheck](../tests/fm-pi-primary-types.test.sh) in the compiler-owning lint phase.

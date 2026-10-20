@@ -67,6 +67,8 @@
 #     bin/fm-pending-reply-lib.sh, because a report that exists remotely but has
 #     not been mirrored yet must not be mistaken for a report the mate never
 #     wrote (see WINDOW_CLOSED_EMPTY below)
+# With config/judge-first present, the lines an ingest newly appends also pass
+# through bin/fm-judge-first.sh (best-effort, after the ingest lock is released).
 # Line framing and size bounding belong to bin/fm-remote-delta-read.sh, which
 # delivers only whole lines and breaks continuity on an over-long one.
 set -u
@@ -517,6 +519,15 @@ stage_mirror_lines() { # <source> <rewritten> <source-record> <status> <status-a
   ' "$1"
 }
 
+# Judge-first (opt-in via config/judge-first): hand the lines this ingest just
+# appended to bin/fm-judge-first.sh, which owns every decision about them. It is
+# best-effort by contract - any failure leaves the ordinary wake, so it can never
+# fail or reorder the ingest.
+judge_first_hook() { # <id> <appended-lines-file>
+  [ -f "$FM_HOME/config/judge-first" ] && [ -s "$2" ] || return 0
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-judge-first.sh" ingest "$1" "$2" >/dev/null 2>&1 || true
+}
+
 cmd_ingest() {
   local id=${1:-} result=${2:-} seq=${3:-} class blank payload normalized_payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
   local actual_bytes actual_hash line doc local_doc appended=0 cursor_already=0 lock status_file source_record tmp
@@ -676,6 +687,7 @@ EOF
     write_cursor "$id" "$to" "$to_hash" || { fm_lock_release "$lock"; die "cannot commit remote reply cursor"; }
   fi
   fm_lock_release "$lock"
+  judge_first_hook "$id" "$status_additions"
   trap - EXIT
   rm -rf -- "$tmp"
   printf 'ingested: %s appended=%s offset=%s\n' "$id" "$appended" "$to"
