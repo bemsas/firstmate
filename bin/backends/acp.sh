@@ -73,7 +73,7 @@ fm_backend_acp_agent_state() {  # <target>
   local id
   id=$(fm_backend_acp_task_id "$1") || { printf 'unreadable'; return 0; }
   case "$(fm_backend_acp_harness state "$id" 2>/dev/null)" in
-    running | idle | blocked | starting) printf 'alive' ;;
+    running | idle | blocked) printf 'alive' ;;
     exited | dead) printf 'dead' ;;
     missing) printf 'missing' ;;
     *) printf 'unreadable' ;;

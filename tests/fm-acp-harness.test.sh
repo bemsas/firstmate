@@ -15,6 +15,18 @@ HARNESS="$ROOT/bin/fm-acp-harness.py"
 FAKE_AGENT="$ROOT/tests/assets/fm-acp-fake-agent.py"
 TMP_ROOT=$(fm_test_tmproot fm-acp-harness)
 
+# Reap only fixture-owned ACP runs even when an assertion fails.
+cleanup_acp() {
+  local file tid
+  for file in "$TMP_ROOT"/*/home/state/*.acp.json; do
+    [ -f "$file" ] || continue
+    tid=${file##*/}; tid=${tid%.acp.json}
+    FM_HOME="${file%/state/*}" python3 -I "$HARNESS" stop "$tid" >/dev/null 2>&1 || true
+  done
+  fm_test_cleanup
+}
+trap cleanup_acp EXIT
+
 new_world() { # <name> -> sets HOME_DIR WT_DIR PROJ_DIR; FM_HOME and FAKE_DIR exported
   local name=$1
   HOME_DIR="$TMP_ROOT/$name/home"
@@ -24,7 +36,7 @@ new_world() { # <name> -> sets HOME_DIR WT_DIR PROJ_DIR; FM_HOME and FAKE_DIR ex
   fm_git_worktree "$PROJ_DIR" "$WT_DIR" "wt-$name"
   mkdir -p "$TMP_ROOT/$name/fake"
   export FM_HOME="$HOME_DIR" FAKE_DIR="$TMP_ROOT/$name/fake"
-  unset FAKE_NO_LOAD FAKE_IGNORE_EOF
+  unset FAKE_NO_LOAD FAKE_IGNORE_EOF FAKE_LOAD_FAIL
 }
 
 h() { python3 -I "$HARNESS" "$@"; }
@@ -49,6 +61,165 @@ spawn_fake() { # <id> <brief-text> [extra spawn args...]
     --agent-cmd "python3 $FAKE_AGENT" "$@" >/dev/null
 }
 group_gone() { ! kill -0 -- "-$1" 2>/dev/null; }
+
+crew_state() {
+  FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" bash "$ROOT/bin/fm-crew-state.sh" "$1"
+}
+
+test_acp_current_state() {
+  new_world current
+  spawn_fake t1 "HANG"
+  wait_for 10 "running" state_is t1 running
+  local out
+  printf 'done [at=1]: premature claim\n' >> "$HOME_DIR/state/t1.status"
+  out=$(crew_state t1)
+  assert_contains "$out" "state: working" "a live ACP turn must be working from protocol state"
+  assert_contains "$out" "source: acp" "ACP must not depend on pane hooks or a validation run"
+  h cancel t1
+  wait_for 10 "cancelled idle" state_is t1 idle
+  wait_for 10 "premature done refusal" grep -q 'report.md is missing' "$HOME_DIR/state/t1.status"
+  printf 'resolved [at=1]: premature done withdrawn; missing-report blocker cleared\n' >> "$HOME_DIR/state/t1.status"
+  printf 'paused [at=1]: external check pending\n' >> "$HOME_DIR/state/t1.status"
+  assert_contains "$(crew_state t1)" "state: paused" "idle ACP must reconcile its declared wait"
+  h steer t1 "PERM-OUT"
+  wait_for 10 "permission" state_is t1 blocked
+  assert_contains "$(crew_state t1)" "state: parked" "a queued permission must be parked even during a turn"
+  h answer t1 1 reject
+  wait_for 10 "idle after permission" state_is t1 idle
+  wait_for 10 "unreported turn block" grep -q 'without a done/failed/blocked status line' "$HOME_DIR/state/t1.status"
+  assert_contains "$(crew_state t1)" "state: blocked" "a turn with no terminal declaration is blocked"
+  h steer t1 "DONE"
+  wait_for 15 "completed exit" state_is t1 exited
+  assert_contains "$(crew_state t1)" "state: done" "verified completion must survive process exit"
+  cp "$HOME_DIR/state/t1.acp.json" "$TMP_ROOT/completed-state.json"
+  python3 - "$HOME_DIR/state/t1.acp.json" <<'CHECK'
+import json, sys, time
+p = sys.argv[1]
+r = json.load(open(p))
+r.update(state="starting", pid=None, pid_start=None, agent_pid=None, ready=False, updated_at=int(time.time()))
+json.dump(r, open(p, "w"))
+CHECK
+  assert_contains "$(crew_state t1)" 'state: unknown' "a launch reservation without processes is not proof of work"
+  out=$(bash -c '. "$1"; fm_backend_agent_state acp acp:t1' _ "$ROOT/bin/fm-backend.sh")
+  assert_equals unreadable "$out" "the adapter must not prove an agent alive from a starting reservation"
+  cp "$TMP_ROOT/completed-state.json" "$HOME_DIR/state/t1.acp.json"
+  pass "crew-state: ACP running, permission, idle declaration, and completed exit use process/protocol state"
+}
+
+test_ship_done_gate() {
+  new_world shipgate
+  spawn_fake t1 "hello" --no-report-gate
+  wait_for 10 "idle" state_is t1 idle
+  # Ship spawning remains disabled; prepare the metadata shape for the future pilot.
+  sed -i.bak 's/kind=scout/kind=ship/' "$HOME_DIR/state/t1.meta"
+  printf 'mode=local-only\nbranch=wt-shipgate\n' >> "$HOME_DIR/state/t1.meta"
+  printf 'uncommitted\n' > "$WT_DIR/untracked.txt"
+  h steer t1 "NOREPORT"
+  wait_for 10 "dirty ship refusal" grep -q 'worktree is dirty' "$HOME_DIR/state/t1.status"
+  assert_equals idle "$(h state t1)" "a done claim with dirt must preserve the agent"
+  assert_contains "$(crew_state t1)" "state: blocked" "a rejected done must be blocked"
+  git -C "$WT_DIR" add untracked.txt
+  git -C "$WT_DIR" -c user.name=Test -c user.email=test@example.test commit -qm 'test: save work' || fail 'fixture commit failed'
+  h steer t1 "NOREPORT"
+  wait_for 15 "ship completion" state_is t1 exited
+  assert_equals "done" "$(json_field t1 exit_reason)" "clean shared branch head must pass without a scout report"
+  assert_equals "$(git -C "$WT_DIR" rev-parse HEAD)" "$(json_field t1 done_head)" "accepted head must be recorded"
+  assert_absent "$HOME_DIR/data/t1/report.md" "ship completion must use its delivery contract instead of a scout report"
+  pass "ship gate: dirty work stays alive, committed shared local head exits and records the accepted head"
+}
+
+control() {
+  FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" bash "$ROOT/bin/fm-control.sh" "$@"
+}
+
+test_control_relaunch() {
+  new_world control
+  spawn_fake t1 "remember BANANA"
+  wait_for 10 "idle" state_is t1 idle
+  local session pid out rc=0
+  session=$(json_field t1 session_id); pid=$(json_field t1 pid)
+  printf 'preserve this\n' > "$WT_DIR/local.txt"
+  out=$(control t1 relaunch --model changed 2>&1) && fail "ACP profile change must refuse"
+  assert_contains "$out" "profile changes are unsupported" "refusal must explain the preserved profile"
+  assert_equals "$pid" "$(json_field t1 pid)" "profile refusal must leave the old harness running"
+  out=$(control t1 relaunch --note 'continue after review' 2>&1) || fail "ACP control relaunch failed: $out"
+  assert_contains "$out" 'relaunched t1' "the public control path must confirm recovery"
+  wait_for 10 "resumed idle" state_is t1 idle
+  assert_not_equals "$pid" "$(json_field t1 pid)" "relaunch must wait for a replacement pid, not stale ready=true"
+  assert_equals "$session" "$(json_field t1 session_id)" "relaunch must load the saved session"
+  assert_equals 'preserve this' "$(cat "$WT_DIR/local.txt")" "relaunch must preserve uncommitted work"
+  python3 - "$HOME_DIR/state/t1.events.jsonl" "$WT_DIR" <<'CHECK' || fail 'session/load did not use the recorded worktree'
+import json, sys
+calls = [json.loads(l)['f'] for l in open(sys.argv[1])]
+assert any(f.get('method') == 'session/load' and f['params']['cwd'] == sys.argv[2] for f in calls)
+CHECK
+  assert_contains "$(cat "$FAKE_DIR/$session.json")" 'continue after review' "the recovery note must reach the loaded conversation"
+  h stop t1
+  out=$(control t1 relaunch --note 'DONE' 2>&1) || fail "a resumed task that immediately finishes must succeed: $out"
+  wait_for 15 "resumed completion" state_is t1 exited
+  assert_contains "$out" 'relaunched t1' "auto-exit after a successful resume must not become a launch timeout"
+  FAKE_NO_LOAD=1 control t1 relaunch --note 'fresh fallback' >/dev/null || fail 'control fresh-session fallback failed'
+  wait_for 10 "fresh idle" state_is t1 idle
+  assert_not_equals "$session" "$(json_field t1 session_id)" "loadSession=false must get a fresh session"
+  session=$(json_field t1 session_id)
+  assert_contains "$(cat "$FAKE_DIR/$session.json")" 'fresh fallback' "fresh session must also receive the note"
+  h stop t1
+  FAKE_LOAD_FAIL=1 control t1 relaunch > "$TMP_ROOT/load-failure.log" 2>&1 || rc=$?
+  assert_not_equals 0 "$rc" "failed session/load must not report a successful relaunch"
+  assert_grep 'session/load failed' "$HOME_DIR/state/t1.acp/harness.log" "failed load must retain actionable evidence"
+  assert_equals "$WT_DIR" "$(json_field t1 worktree)" "failed relaunch must retain the worktree record"
+  pass "control relaunch: load saved session and cwd, preserve work, refuse profile changes, handle no-load and failed-load agents"
+}
+
+test_ship_unrecorded_and_pushed_heads() {
+  new_world shiphead
+  spawn_fake t1 "hello"
+  wait_for 10 "idle" state_is t1 idle
+  sed -i.bak 's/kind=scout/kind=ship/' "$HOME_DIR/state/t1.meta"
+  printf 'mode=local-only\n' >> "$HOME_DIR/state/t1.meta"
+  git -C "$WT_DIR" checkout -q --detach
+  printf 'new content\n' > "$WT_DIR/content.txt"
+  git -C "$WT_DIR" add content.txt
+  git -C "$WT_DIR" -c user.name=Test -c user.email=test@example.test commit -qm 'test: detached work' || fail 'fixture commit failed'
+  h steer t1 "NOREPORT"
+  wait_for 10 "unrecorded head refusal" grep -q 'unreachable outside the worker copy' "$HOME_DIR/state/t1.status"
+  assert_equals idle "$(h state t1)" "a clean detached head must not be accepted merely because another branch exists"
+  sed -i.bak 's/mode=local-only/mode=no-mistakes/' "$HOME_DIR/state/t1.meta"
+  h steer t1 "NOREPORT"
+  wait_for 10 "validation handoff refusal" grep -q 'validation handoff, not a completed delivery' "$HOME_DIR/state/t1.status"
+  assert_equals idle "$(h state t1)" "a pre-validation done must not terminate a ship agent"
+  # Publishing into this fixture's bare remote makes the exact head durable.
+  sed -i.bak 's/mode=no-mistakes/mode=direct-PR/' "$HOME_DIR/state/t1.meta"
+  git -C "$WT_DIR" push -q origin HEAD:refs/heads/delivery || fail 'fixture push failed'
+  h steer t1 "NOREPORT"
+  wait_for 15 "pushed head accepted" state_is t1 exited
+  assert_equals "$(git -C "$WT_DIR" rev-parse HEAD)" "$(json_field t1 done_head)" "the durable head must be recorded on exit"
+  pass "ship gate: a clean unrecorded detached head stays alive; the same head pushed to the fixture remote exits"
+}
+
+test_acp_state_failure_and_binding() {
+  new_world deadstate
+  spawn_fake t1 "HANG"
+  wait_for 10 "running" state_is t1 running
+  local pid out
+  pid=$(json_field t1 pid)
+  # Metadata is caller authority: do not resume in a different recorded checkout.
+  sed -i.bak "s|^worktree=.*|worktree=$PROJ_DIR|" "$HOME_DIR/state/t1.meta"
+  out=$(control t1 relaunch 2>&1) && fail 'mismatched recovery worktree must refuse'
+  assert_contains "$out" 'worktree disagree' "a mismatch must be diagnosed before stopping"
+  assert_equals "$pid" "$(json_field t1 pid)" "mismatch refusal must preserve the live harness"
+  assert_contains "$(crew_state t1)" 'state: unknown' "a mismatched state file must not classify another checkout"
+  sed -i.bak "s|^worktree=.*|worktree=$WT_DIR|" "$HOME_DIR/state/t1.meta"
+  kill -9 "$(json_field t1 agent_pid)"
+  wait_for 15 "agent death" state_is t1 dead
+  assert_contains "$(crew_state t1)" 'state: failed' "a dead process must override stale working status"
+  assert_equals dead "$(json_field t1 state)" "JSON state must expose the computed process verdict"
+  printf '{broken\n' > "$HOME_DIR/state/t1.acp.json"
+  assert_contains "$(crew_state t1)" 'state: unknown' "corrupt state is unreadable, never proof of completion"
+  pass "ACP state: metadata binding and process death outrank stale status; corrupt state fails closed"
+}
 
 test_permission_policy_and_queue() {
   new_world perm
@@ -128,6 +299,8 @@ test_kill_then_resume_loads_the_session() {
   kill -9 "$pid"
   kill -9 -- "-$pgid"
   wait_for 10 "dead state" state_is t1 dead
+  assert_equals dead "$(json_field t1 state)" "JSON must not expose stale running after the harness dies"
+  assert_contains "$(crew_state t1)" 'state: failed' "a dead harness must override its unfinished turn"
   h resume t1 >/dev/null
   wait_for 10 "resumed run to idle" state_is t1 idle
   assert_equals "$session" "$(json_field t1 session_id)" "resume must keep the saved session id"
@@ -265,6 +438,12 @@ EOF
   h stop sc2
   pass "fm-send, fm-peek, and fm-crew-state accept a live acp scout"
 }
+
+test_acp_current_state
+test_ship_done_gate
+test_control_relaunch
+test_ship_unrecorded_and_pushed_heads
+test_acp_state_failure_and_binding
 
 test_permission_policy_and_queue
 test_cancel_returns_cancelled_and_answers_pending

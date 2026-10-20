@@ -14,14 +14,20 @@ and the operator view; this header owns the command surface.
         state/<id>.meta, start a detached harness for the task, wait until the
         brief was delivered, and print one `ready` line.
   fm-acp-harness.py lease  <id> <project>      print a leased worktree path
-  fm-acp-harness.py state  <id> [--json]       running|idle|blocked|starting|exited|dead|missing
+  fm-acp-harness.py state  <id> [--json]
+        running|idle|blocked|starting|stopping|exited|dead|missing|unreadable
+        JSON always reports the computed state, never the saved state word.
   fm-acp-harness.py tail   <id> [-n N] [-f]    readable view of events.jsonl
   fm-acp-harness.py steer  <id> TEXT           prompt the agent (queued while a turn runs)
   fm-acp-harness.py cancel <id>                session/cancel; pending permissions get `cancelled`
   fm-acp-harness.py permissions <id>           list queued permission requests
   fm-acp-harness.py answer <id> <n> allow|reject
   fm-acp-harness.py stop   <id>                EOF, 5 s, SIGTERM the group, SIGKILL; idempotent
-  fm-acp-harness.py resume <id>                restart a dead run and session/load the saved id
+  fm-acp-harness.py resume <id> [--worktree PATH] [--note TEXT] [--restart]
+        Restart a dead run and session/load the saved id in its recorded worktree.
+        --worktree binds recovery to the caller's metadata; a mismatch refuses.
+        --restart stops a live run after validating recovery inputs.
+        A note starts a continuation turn.
 
 Files, all under the firstmate home (FM_HOME, default: the code root):
   state/<id>.acp.json      state file: pids, sessionId, command, turn, cost
@@ -30,8 +36,11 @@ Files, all under the firstmate home (FM_HOME, default: the code root):
   state/<id>.status        the lines fm-watch.sh already reads
   state/<id>.turn-ended    touched at every stopReason, like the harness stop hooks
 
-Exit rule: a turn that ends with a last status line of `done` (and, for a scout,
-data/<id>/report.md present) or `failed` closes the agent and the harness exits.
+Exit rule: `failed` closes the agent. A `done` closes it only after the scout
+report gate or, for kind=ship in metadata, a clean worktree plus the delivery
+gate owned by fm-dod-lib.sh (never a pre-validation handoff). Ship completion
+records done_head. A refused gate appends blocked and keeps the harness alive.
+Ship spawning through fm-spawn remains disabled during the scout pilot.
 """
 import argparse, fcntl, json, os, queue, re, shlex, signal, subprocess, sys, threading, time
 
@@ -96,6 +105,52 @@ def last_status_verb(p):
         with open(p.status) as f: lines = [l for l in f.read().splitlines() if l.strip()]
     except OSError: return ""
     return re.split(r"[\s:\[]", lines[-1], 1)[0] if lines else ""
+
+
+def read_meta(p, path=None):
+    with open(path or p.meta) as f:
+        return dict(line.rstrip("\n").split("=", 1) for line in f if "=" in line)
+
+
+def done_gate(p, cfg):
+    """Return (refusal, accepted head); the existing delivery owner checks reachability."""
+    try:
+        try: meta = read_meta(p)
+        except FileNotFoundError:
+            # fm-spawn publishes its staged metadata after the first prompt.
+            # A fast scout may already finish while that publication is pending.
+            try: meta = read_meta(p, cfg.get("meta_out"))
+            except FileNotFoundError: meta = read_meta(p)  # rename raced the read
+        kind = meta.get("kind")
+        if kind == "scout":
+            return ((f"data/{p.id}/report.md is missing", None)
+                    if cfg.get("report_gate", True) and not os.path.isfile(p.report) else (None, None))
+        if kind != "ship": return "task kind is not scout or ship", None
+        wt = cfg["worktree"]
+        if os.path.realpath(meta.get("worktree", "")) != os.path.realpath(wt):
+            return "metadata and harness worktree disagree", None
+        mode = meta.get("mode")
+        if mode not in ("local-only", "direct-PR", "no-mistakes"):
+            return "ship delivery mode is missing or unsupported", None
+        r = subprocess.run(["git", "-C", wt, "status", "--porcelain", "--untracked-files=all"],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode: return "worktree status cannot be read", None
+        if r.stdout: return "worktree is dirty", None
+        r = subprocess.run(["bash", "-c", '''
+            . "$1/fm-dod-lib.sh"
+            line=$(last_status_line "$2")
+            fm_dod_should_gate_ship_done ship "$3" "$line" || {
+                echo 'done is a validation handoff, not a completed delivery'; exit 1;
+            }
+            fm_dod_accept_ship_done ship "$3" "$4" "$5" "$line" "$6" "$7" "$8"
+        ''', "acp-done", os.path.join(ROOT, "bin"), p.status, mode, wt,
+            meta.get("project", ""), p.state, p.id, p.meta], capture_output=True, text=True, timeout=45)
+        if r.returncode: return r.stdout.strip() or "delivery gate could not be verified", None
+        head = subprocess.run(["git", "-C", wt, "rev-parse", "--verify", "HEAD"],
+                              capture_output=True, text=True, check=True, timeout=10).stdout.strip()
+        return None, head
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        return f"done gate could not be verified: {e}", None
 
 
 def proc_start(pid):
@@ -325,9 +380,11 @@ class Daemon:
         self.save(turn_open=False, stop_reason=stop, state="idle", usage_last=(res.get("result") or {}).get("usage"))
         if self.finishing: return
         verb = last_status_verb(self.p)
-        if verb == "done" and not os.path.isfile(self.p.report) and self.cfg.get("report_gate", True):
-            append_status(self.p, "blocked", f"done reported but data/{self.p.id}/report.md is missing; harness stays up for a steer")
+        refusal, head = done_gate(self.p, self.cfg) if verb == "done" else (None, None)
+        if refusal:
+            append_status(self.p, "blocked", f"done reported but {refusal}; harness stays up for a steer")
         elif verb in TERMINAL:
+            if head: self.save(done_head=head)
             self.exit_reason = verb; self.finishing = True
         elif stop in ("refusal", "max_tokens", "max_turn_requests") or "error" in res:
             append_status(self.p, "failed", f"turn ended with {stop}"); self.exit_reason = "failed"; self.finishing = True
@@ -398,9 +455,10 @@ class Daemon:
             self.handshake()
             note = ("The harness was restarted and your previous turn was cut off. Continue the task from where "
                     "you stopped; your status file and the worktree show what you already did.")
+            resume_note = self.cfg.pop("resume_note", "")
             if not self.resume: self.start_turn(self.cfg["brief"])
-            elif not self.loaded: self.start_turn(self.cfg["brief"] + "\n\n" + note)   # fresh session, no history
-            elif was_open: self.start_turn(note)
+            elif not self.loaded: self.start_turn(self.cfg["brief"] + "\n\n" + (resume_note or note))   # fresh session, no history
+            elif was_open or resume_note: self.start_turn(resume_note or note)
             else: self.save(state="idle")
             self.save(ready=True)
             while not self.finishing:
@@ -475,11 +533,17 @@ def check_isolated(wt, project):
 
 def status_of(p):
     cfg = read_json(p.acp)
-    if cfg is None: return "missing", {}
-    if cfg.get("state") in ("exited", "dead"): return cfg["state"], cfg
+    if cfg is None: return ("unreadable" if os.path.lexists(p.acp) else "missing"), {}
+    if not isinstance(cfg, dict) or cfg.get("task") != p.id or not cfg.get("worktree"):
+        return "unreadable", {}
+    if cfg.get("state") in ("exited", "dead"):
+        if alive(cfg.get("pid"), cfg.get("pid_start")): return "stopping", cfg
+        if alive(cfg.get("agent_pid"), cfg.get("agent_start")): return "dead", cfg
+        return cfg["state"], cfg
     if not alive(cfg.get("pid"), cfg.get("pid_start")):
         return ("starting" if cfg.get("state") == "starting" and now() - cfg.get("updated_at", 0) < 90 else "dead"), cfg
     if cfg.get("state") == "starting": return "starting", cfg
+    if not alive(cfg.get("agent_pid"), cfg.get("agent_start")): return "dead", cfg
     if os.path.isdir(p.pending) and any(n.endswith(".json") for n in os.listdir(p.pending)): return "blocked", cfg
     return ("running" if cfg.get("turn_open") else "idle"), cfg
 
@@ -497,12 +561,12 @@ def send_cmd(p, wait=10, **cmd):
 def start_daemon(p, resume):
     p.ensure()
     log = open(p.log, "a")
-    subprocess.Popen([sys.executable, os.path.abspath(__file__), "_run", p.id] + (["--resume"] if resume else []),
+    child = subprocess.Popen([sys.executable, os.path.abspath(__file__), "_run", p.id] + (["--resume"] if resume else []),
                      stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)
     end = now() + 90
     while now() < end:
         cfg = read_json(p.acp, {})
-        if cfg.get("ready"): return cfg
+        if cfg.get("ready") and cfg.get("pid") == child.pid: return cfg
         if cfg.get("state") in ("exited", "dead"): break
         time.sleep(0.2)
     die(f"harness for {p.id} did not become ready; see {p.log}")
@@ -518,7 +582,8 @@ def cmd_spawn(a):
     agent_cmd = shlex.split(a.agent_cmd) if a.agent_cmd else AGENTS.get(a.agent) or die(f"unknown agent {a.agent}")
     cfg = {"task": a.id, "worktree": wt, "project": os.path.realpath(a.project), "agent": a.agent, "agent_cmd": agent_cmd,
            "model": a.model, "brief": brief, "max_cost": a.max_cost, "allow_fetch": a.allow_fetch,
-           "read_roots": a.read_root, "report_gate": not a.no_report_gate, "state": "starting", "updated_at": int(now())}
+           "read_roots": a.read_root, "report_gate": not a.no_report_gate, "meta_out": a.meta_out,
+           "state": "starting", "updated_at": int(now())}
     p.ensure()
     write_atomic(p.acp, json.dumps(cfg, indent=1) + "\n")
     meta = [f"window=acp:{a.id}", f"endpoint_task_id={a.id}", f"worktree={wt}", f"project={cfg['project']}",
@@ -531,7 +596,7 @@ def cmd_spawn(a):
 
 def cmd_state(a):
     st, cfg = status_of(Paths(a.id))
-    if a.json: print(json.dumps({"state": st, **cfg}, indent=1, sort_keys=True))
+    if a.json: print(json.dumps({**cfg, "state": st}, indent=1, sort_keys=True))
     else: print(st)
     return 0 if st in ("running", "idle", "blocked", "starting") else 1
 
@@ -589,8 +654,8 @@ def cmd_stop(a):
     if st in ("running", "idle", "blocked"):
         write_atomic(os.path.join(p.cmd, f"{time.time_ns()}-stop.json"), json.dumps({"kind": "stop"}))
         end = now() + 20
-        while status_of(p)[0] in ("running", "idle", "blocked") and now() < end: time.sleep(0.1)
-        if status_of(p)[0] in ("running", "idle", "blocked"):
+        while status_of(p)[0] in ("running", "idle", "blocked", "stopping") and now() < end: time.sleep(0.1)
+        if status_of(p)[0] in ("running", "idle", "blocked", "stopping"):
             kill_group(cfg["agent_pgid"]); os.kill(cfg["pid"], signal.SIGTERM)
         cfg = read_json(p.acp, {})
     elif cfg.get("agent_pgid") and alive(cfg.get("agent_pid"), cfg.get("agent_start")):
@@ -603,8 +668,25 @@ def cmd_stop(a):
 def cmd_resume(a):
     p = Paths(a.id)
     st, cfg = status_of(p)
-    if st in ("running", "idle", "blocked", "starting"): die(f"harness for {a.id} is already {st}")
-    if st == "missing": die(f"no state for {a.id}")
+    if st not in (("running", "idle", "blocked", "exited", "dead") if a.restart else ("exited", "dead")):
+        die(f"cannot resume {a.id} (state {st})")
+    meta = read_meta(p)
+    wt = cfg["worktree"]
+    if os.path.realpath(meta.get("worktree", "")) != os.path.realpath(wt) or (
+            a.worktree and os.path.realpath(a.worktree) != os.path.realpath(wt)):
+        die("metadata and harness worktree disagree; refusing resume")
+    check_isolated(wt, cfg["project"])
+    if a.restart and st in ("running", "idle", "blocked"):
+        was_open = cfg.get("turn_open", False)
+        cmd_stop(a)
+        cfg = read_json(p.acp)
+        cfg["turn_open"] = was_open
+    with open(p.lock, "a") as lock:
+        try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError: die(f"a harness already runs task {p.id}")
+        if status_of(p)[0] not in ("exited", "dead"): die("task state changed before resume")
+        cfg.update(state="starting", ready=False, pid=None, pid_start=None, updated_at=int(now()), resume_note=a.note or "")
+        write_atomic(p.acp, json.dumps(cfg, indent=1) + "\n")
     cfg = start_daemon(p, resume=True)
     print(f"resumed id={a.id} session={cfg.get('session_id')} pid={cfg.get('pid')}")
 
@@ -620,7 +702,9 @@ def main():
     x = sub.add_parser("state"); x.add_argument("id"); x.add_argument("--json", action="store_true")
     x = sub.add_parser("tail"); x.add_argument("id"); x.add_argument("-n", type=int, default=40); x.add_argument("-f", dest="follow", action="store_true")
     x = sub.add_parser("steer"); x.add_argument("id"); x.add_argument("text", nargs="+")
-    for name in ("cancel", "permissions", "stop", "resume"): x = sub.add_parser(name); x.add_argument("id")
+    for name in ("cancel", "permissions", "stop"): x = sub.add_parser(name); x.add_argument("id")
+    x = sub.add_parser("resume"); x.add_argument("id"); x.add_argument("--worktree"); x.add_argument("--note")
+    x.add_argument("--restart", action="store_true")
     x = sub.add_parser("answer"); x.add_argument("id"); x.add_argument("n", type=int); x.add_argument("decision", choices=["allow", "reject"])
     x = sub.add_parser("_run"); x.add_argument("id"); x.add_argument("--resume", action="store_true")
     a = ap.parse_args()

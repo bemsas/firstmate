@@ -24,7 +24,7 @@
 # Output is one stable, parseable, token-tight line firstmate can read every
 # heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|acp|status-log|remote-endpoint|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -327,6 +327,44 @@ fi
 # endpoint-existence predicate.
 TASK_BACKEND=$(fm_backend_of_meta "$META")
 BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
+# ACP has no pane or vendor busy hooks. Its process-bound protocol record is
+# authoritative, including completion after exit; an unverified done line must
+# never substitute for the harness's accepted completion gate.
+if [ "$TASK_BACKEND" = acp ]; then
+  [ "$BACKEND_TARGET" = "acp:$ID" ] || emit unknown acp "invalid endpoint binding"
+  fm_backend_source acp || emit unknown acp "adapter unavailable"
+  ACP_RECORD=$(fm_backend_acp_harness state "$ID" --json 2>/dev/null | python3 -c '
+import json, os, sys
+try:
+    rec = json.load(sys.stdin)
+    if os.path.realpath(rec.get("worktree", "")) != os.path.realpath(sys.argv[1]):
+        raise ValueError("worktree mismatch")
+    print(rec["state"] + ":" + str(rec.get("exit_reason", "")))
+except (ValueError, KeyError, TypeError):
+    print("unreadable:")
+' "$WT")
+  case "${ACP_RECORD%%:*}" in
+    running) emit working acp "turn running" ;;
+    blocked) emit parked acp "permission pending" ;;
+    idle)
+      ACP_LOG_STATE=$(map_log_state "$LOG_LINE")
+      case "$ACP_LOG_STATE" in
+        parked|blocked|paused|failed)
+          emit "$ACP_LOG_STATE" acp "$(status_line_note "$LOG_LINE")" ;;
+      esac
+      emit parked acp "idle; awaiting a steer"
+      ;;
+    exited)
+      case "${ACP_RECORD#*:}" in
+        done) emit "done" acp "completion gate accepted; agent exited" ;;
+        stopped) emit paused acp "agent stopped; session retained for relaunch" ;;
+        *) emit failed acp "harness exited (${ACP_RECORD#*:})" ;;
+      esac
+      ;;
+    dead) emit failed acp "harness or agent process died; relaunch required" ;;
+    *) emit unknown acp "harness state unavailable (${ACP_RECORD%%:*})" ;;
+  esac
+fi
 EXPECTED_LABEL="fm-$ID"
 pane_readable() {  # <target>
   case "$TASK_BACKEND" in

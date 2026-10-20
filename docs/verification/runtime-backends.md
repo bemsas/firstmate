@@ -2894,3 +2894,21 @@ Without Firstmate's hooks, Herdr reported the question panel as `blocked`, which
 This live proof covers the watcher and queue boundary; it does not establish live daemon-consumer delivery.
 `bin/fm-test-run.sh tests/fm-daemon.test.sh` exercises that consumer routing separately with portable regressions for busy escalation and busy-bookkeeping failures in away and quiet mode.
 Repeat the hooked-worker check above before publication if watcher or task-inbox busy code changes; `bin/fm-test-run.sh tests/fm-task-inbox.test.sh` refreshes the portable ladder regressions.
+
+
+## ACP pilot integration
+
+Verified on 2026-10-20 with Linux, Python 3.14.7, and Bash 5.3.15.
+The scripted ACP v1 agent exercises Firstmate's process-bound state classification, session-load relaunch and fallback, immediate completion after relaunch, and ship completion gates.
+The same regression also checks scout spawning, steering, teardown, and process-group cleanup.
+Ship spawning remains disabled; this verification uses prepared ship metadata to exercise its exit gate.
+Live vendor compatibility and a watcher rollout remain outside this check.
+The [ACP backend guide](../acp-backend.md) owns current setup and limits.
+
+Refresh with `bash bin/fm-test-run.sh tests/fm-acp-harness.test.sh`.
+Captured result:
+
+```text
+# all fm-acp-harness tests passed
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=49842
+```

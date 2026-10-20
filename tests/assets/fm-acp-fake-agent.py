@@ -75,6 +75,10 @@ def main():
             out({"id": rid, "result": {"protocolVersion": 1, "agentInfo": {"name": "fake", "version": "0"},
                  "agentCapabilities": {"loadSession": os.environ.get("FAKE_NO_LOAD") != "1"}}})
         elif meth in ("session/new", "session/load"):
+            if meth == "session/load" and os.environ.get("FAKE_LOAD_FAIL") == "1":
+                out({"id": rid, "error": {"code": -32000, "message": "saved session unavailable"}})
+                continue
+            assert m["params"]["cwd"] == os.getcwd(), "session cwd must match the agent process cwd"
             sid = m["params"].get("sessionId") or f"fake-{time.time_ns()}"
             if meth == "session/new": json.dump([], open(hist(sid), "w"))
             else:

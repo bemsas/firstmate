@@ -9,6 +9,11 @@
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
 #
+# ACP relaunch resumes the recorded session in the recorded worktree via
+# session/load (fresh session with the saved brief when unsupported). It accepts
+# an optional --note, refuses profile changes, and never uses pane controls.
+# The harness validates recovery inputs before stopping a live ACP run.
+#
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
 # for a kind=secondmate target so the reply returns through the status path.
@@ -1455,6 +1460,26 @@ do_relaunch() {
   local exit_result state note_line
   local -a spawn_args
 
+  if [ "$BACKEND" = acp ]; then
+    # This pilot path intentionally does not enable pane exit/stop capabilities
+    # for ACP: those verbs type keys and commands that it cannot deliver.
+    [ "$KIND" = scout ] || [ "$KIND" = ship ] || die "ACP relaunch supports ship and scout tasks only"
+    [ "$HARNESS_SET" = 0 ] || [ "$NEW_HARNESS" = "$RECORDED_HARNESS" ] \
+      || die "ACP relaunch preserves the recorded harness; profile changes are unsupported"
+    [ "$MODEL_SET" = 0 ] || [ "$NEW_MODEL" = "$(fm_meta_get "$META" model)" ] \
+      || die "ACP relaunch preserves the recorded model; profile changes are unsupported"
+    [ "$EFFORT_SET" = 0 ] || [ "$NEW_EFFORT" = "$(fm_meta_get "$META" effort)" ] \
+      || die "ACP relaunch preserves the recorded effort; profile changes are unsupported"
+    safe_checkpoint
+    fm_backend_source acp || die "ACP adapter unavailable"
+    fm_backend_acp_harness resume "$ID" --worktree "$WT" --note "$NOTE" --restart \
+      || die "ACP session resume failed; recorded worktree and task metadata retained"
+    # resume confirms the new pid's completed handshake. A resumed task can
+    # already have completed and exited by now, so requiring it to remain alive
+    # would turn successful exit-on-done into a spurious relaunch timeout.
+    echo "relaunched $ID harness=$RECORDED_HARNESS backend=acp endpoint=$T worktree=$WT session=loaded-or-fresh"
+    return
+  fi
   require_state_verified_backend relaunch
   resolve_relaunch_profile
 
