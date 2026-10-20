@@ -2,13 +2,16 @@
 # Process completion work for a successfully surfaced status snapshot.
 # Usage: fm-worker-done.sh <task-id> <captured-byte-endpoint> <file-identity>
 # Called detached by mark_surfaced in fm-push-transition-lib.sh for every harness
-# and runtime. Only done events carrying a canonical GitHub pull URL qualify.
+# and runtime. Only ship done events carrying one canonical GitHub pull URL qualify.
 # Existing nonempty pr= metadata is preserved under the shared metadata lock.
 # Capture uses the optional home-local data/secondbrain/tools/capture.py and its
 # wiki/sources/source-task-<id>.md card as the existing-capture receipt.
 # Successful capture is also receipted in state/.worker-done-<id>/captured.
-# config/done-check=on enables the sibling fm-done-check.sh <id> <url> interface;
-# off, shadow, and absent configs do not invoke it. Checklist exits 10 and 11
+# The checklist switch follows fm-done-check.sh: FM_DONE_CHECK overrides
+# config/done-check; on and shadow invoke it, off/absent do not. --auto retains
+# PR-head stamping when the URL matches the recorded PR; a different existing
+# PR binding is preserved by using its ordinary <id> <url> interface instead.
+# Checklist exits 10 and 11
 # are completed bounce/escalation verdicts; execution errors remain retryable.
 # Per-event checklist receipts bound to the status file identity and a task lock
 # make repeated/concurrent surfaces converge without reusing an old task's
@@ -46,6 +49,7 @@ snapshot_current() {
     && [ "$(_fm_open_decisions_file_ident "$STATUS")" = "$IDENT" ]
 }
 snapshot_current || exit 0
+[ "$(sed -n 's/^kind=//p' "$META")" = ship ] || exit 0
 fm_lock_acquire_wait_bounded "$LOCK" 5 || { log_failure 'task lock unavailable'; exit 1; }
 trap 'fm_lock_release "$META_LOCK"; fm_lock_release "$LOCK"' EXIT
 trap 'exit 143' HUP INT TERM
@@ -97,22 +101,25 @@ capture_lessons() {
 }
 
 check_done() {  # <url>
-  local url=$1 mode='' line receipt rc=0
-  if [ -f "$CONFIG/done-check" ]; then
+  local url=$1 mode=${FM_DONE_CHECK-} line receipt rc=0
+  local -a args=("$ID" "$url")
+  if [ -z "$mode" ] && [ -f "$CONFIG/done-check" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in ''|'#'*) continue ;; esac
       mode=$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
       break
     done < "$CONFIG/done-check"
   fi
-  [ "$mode" = on ] || return 0
+  mode=$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+  case "$mode" in on|shadow) ;; *) return 0 ;; esac
   # Owner cannot contain --, so this delimiter is unambiguous with repo names.
   fm_pr_url_parse "$url" || return 1
   receipt="$RECEIPTS/$FM_PR_OWNER--$FM_PR_REPO--$FM_PR_NUMBER.$LINE_NUMBER.checked"
-  [ "$(cat "$receipt" 2>/dev/null)" != "$IDENT $url" ] || return 0
-  fm_run_timed 300 bash "$SCRIPT_DIR/fm-done-check.sh" "$ID" "$url" || rc=$?
+  [ "$(cat "$receipt" 2>/dev/null)" != "$IDENT $mode $url" ] || return 0
+  [ "$(sed -n 's/^pr=//p' "$META")" != "$url" ] || args=(--auto "${args[@]}")
+  fm_run_timed 300 bash "$SCRIPT_DIR/fm-done-check.sh" "${args[@]}" || rc=$?
   case "$rc" in
-    0|10|11) printf '%s %s\n' "$IDENT" "$url" > "$receipt" || log_failure 'cannot record checklist receipt'
+    0|10|11) printf '%s %s %s\n' "$IDENT" "$mode" "$url" > "$receipt" || log_failure 'cannot record checklist receipt'
              [ "$rc" -eq 0 ] || log_failure "checklist returned bounce/escalation (exit $rc)" ;;
     *) log_failure "done check failed (exit $rc)" ;;
   esac
@@ -120,13 +127,23 @@ check_done() {  # <url>
 
 # shellcheck disable=SC2016 # Backticks delimit Markdown code, never shell code.
 URL_RE='(^|[[:space:]<(`])(https://github\.com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/pull/[1-9][0-9]*)([[:space:]>),.;`]|$)'
+done_url() {  # <done-line>; refuse ambiguous PR ownership.
+  local rest=$1 candidate
+  URL=''
+  while [[ "$rest" =~ $URL_RE ]]; do
+    candidate=${BASH_REMATCH[2]}
+    rest=${rest#*"$candidate"}
+    fm_pr_url_parse "$candidate" || continue
+    [ -z "$URL" ] || [ "$URL" = "$candidate" ] || return 1
+    URL=$candidate
+  done
+  [ -n "$URL" ]
+}
 LINE_NUMBER=0
 while IFS= read -r line; do
   LINE_NUMBER=$((LINE_NUMBER + 1))
   [ "$(status_line_verb "$line")" = 'done' ] || continue
-  [[ "$line" =~ $URL_RE ]] || continue
-  URL=${BASH_REMATCH[2]}
-  fm_pr_url_parse "$URL" || continue
+  done_url "$line" || continue
   record_pr "$URL" || continue
   capture_lessons
   snapshot_current || exit 0

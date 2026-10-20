@@ -33,6 +33,7 @@ if (home / 'capture.fail').exists():
 PY
   cat > "$FM_HOME/bin/fm-done-check.sh" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" != --auto ] || shift
 printf '%s %s\n' "$1" "$2" >> "$FM_HOME/check.calls"
 if [ -f "$FM_HOME/check.gated" ]; then
   : > "$FM_HOME/check.started"
@@ -119,7 +120,7 @@ assert_calls "$FM_HOME/capture.calls" 0
 assert_calls "$FM_HOME/check.calls" 1
 pass 'an existing capture card and PR metadata are respected'
 
-for mode in off shadow absent; do
+for mode in off absent; do
   make_case "mode-$mode"
   printf '%s\n' "$mode" > "$FM_CONFIG_OVERRIDE/done-check"
   [ "$mode" != absent ] || rm "$FM_CONFIG_OVERRIDE/done-check"
@@ -129,7 +130,31 @@ for mode in off shadow absent; do
   assert_calls "$FM_HOME/capture.calls" 0
   assert_calls "$FM_HOME/check.calls" 0
 done
-pass 'capture needs lessons and only config on invokes the checklist'
+pass 'capture needs lessons and off/absent configs skip the checklist'
+
+for role in scout secondmate; do
+  make_case "role-$role"
+  printf 'kind=%s\n' "$role" > "$STATE/job.meta"
+  printf 'done: https://github.com/example/project/pull/12\n' > "$STATE/job.status"
+  process_done
+  assert_calls "$FM_HOME/capture.calls" 0
+  assert_calls "$FM_HOME/check.calls" 0
+  if grep -q '^pr=' "$STATE/job.meta"; then fail "$role claimed a PR"; fi
+done
+pass 'scouts and secondmates cannot claim ship completions'
+
+make_case shadow
+printf 'shadow\n' > "$FM_CONFIG_OVERRIDE/done-check"
+printf 'done: https://github.com/example/project/pull/12\n' > "$STATE/job.status"
+process_done
+process_done
+assert_calls "$FM_HOME/check.calls" 1
+printf 'on\n' > "$FM_CONFIG_OVERRIDE/done-check"
+process_done
+assert_calls "$FM_HOME/check.calls" 2
+FM_DONE_CHECK=off process_done
+assert_calls "$FM_HOME/check.calls" 2
+pass 'shadow mode is retained, on rechecks a shadow receipt, and the environment override wins'
 
 make_case unrelated
 cat > "$STATE/job.status" <<'STATUS'
@@ -140,6 +165,7 @@ done: https://github.com/example/project/pull/12/files
 done: https://github.com/example/project/pull/12bad
 done: https://github.com/example/project/pull/0
 done: https://github.com/example/../pull/12
+done: https://github.com/example/project/pull/12 https://github.com/example/project/pull/13
 STATUS
 process_done
 assert_calls "$FM_HOME/capture.calls" 0

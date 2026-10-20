@@ -406,9 +406,9 @@ test_watcher_runs_done_check() {
   # shellcheck source=tests/wake-helpers.sh
   . "$ROOT/tests/wake-helpers.sh"
   local TMP_ROOT="$T/watcher" dir state fakebin head pid i rc
-  dir=$(make_case auto-done); state="$dir/state"; fakebin="$dir/fakebin"
+  dir=$(make_case "auto-done-$1"); state="$dir/state"; fakebin="$dir/fakebin"
   mkdir -p "$dir/home/config" "$dir/home/data"
-  printf 'shadow\n' > "$dir/home/config/done-check"
+  printf '%s\n' "$1" > "$dir/home/config/done-check"
   cp "$FAKEBIN/gh" "$fakebin/gh"
   head=$(git -C "$REPO" rev-parse HEAD)
   fm_write_meta "$state/ship.meta" "kind=ship" "worktree=$REPO" "base=dev"
@@ -427,6 +427,12 @@ test_watcher_runs_done_check() {
   if kill -0 "$pid" 2>/dev/null; then kill "$pid"; wait "$pid" || true; fail "done watcher did not surface: $(cat "$dir/err")"; fi
   rc=0; wait "$pid" || rc=$?
   expect_code 0 "$rc" "watcher done signal"
+  # Wake delivery is detached from completion work; wait for its receipt.
+  for ((i=0; i<300; i++)); do
+    [ ! -f "$state/.worker-done-ship/acme--widget--7.1.checked" ] || break
+    sleep 0.1
+  done
+  [ "$i" -lt 300 ] || fail "completion did not finish: $(cat "$state/worker-done.log" 2>/dev/null)"
   assert_grep "pr=$URL" "$state/ship.meta" "watcher did not bind done PR"
   assert_grep "pr_head=$head" "$state/ship.meta" "watcher did not record done head"
   assert_equals 1 "$(wc -l < "$state/done-check.log" | tr -d ' ')" "watcher should check only the ship"
@@ -452,4 +458,5 @@ test_unreadable_facts_never_bounce
 test_pr_check_hook
 
 test_auto_records_pr
-test_watcher_runs_done_check
+test_watcher_runs_done_check on
+test_watcher_runs_done_check shadow
