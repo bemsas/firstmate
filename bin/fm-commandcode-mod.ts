@@ -1,6 +1,8 @@
 // fm-commandcode-mod.ts - Firstmate's Command Code worker mod: the semantic
 // busy-state writer for one task incarnation (bin/fm-busy-lib.sh owns the
 // contract; bin/fm-busy-event.sh is the only writer this mod calls).
+// The mutating beforeToolCall hook also invokes fm-worker-pretool-check.py,
+// which owns the worker tool policy; observing event handlers cannot block.
 //
 // Loaded per process by bin/fm-spawn.sh with `--mod <this file>` and four
 // `--mod-option` values, so nothing is written into the captain's Command Code
