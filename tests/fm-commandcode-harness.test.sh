@@ -108,7 +108,7 @@ else
   mkdir -p "$state"
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" worker)
   opts=$(jq -cn --arg w "$ROOT/bin/fm-busy-event.sh" --arg s "$state" --arg g "$gen" '{fmWriter: $w, fmState: $s, fmId: "worker", fmGen: $g}')
-  [ "$(drive_mod list -)" = 'onSessionEnd run_end run_start' ] || fail "mod registers the wrong lifecycle: $(drive_mod list -)"
+  [ "$(drive_mod list -)" = 'beforeToolCall onSessionEnd run_end run_start' ] || fail "mod registers the wrong lifecycle: $(drive_mod list -)"
   drive_mod run_start - "$opts" >/dev/null || fail 'run_start drive failed'
   [ "$(fm_busy_classify tmux fake:w commandcode worker "$state")" = 'busy commandcode-mod' ] || fail 'run_start did not open busy'
   drive_mod run_end end_turn "$opts" >/dev/null || fail 'run_end drive failed'

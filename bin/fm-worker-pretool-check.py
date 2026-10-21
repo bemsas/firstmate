@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Worker pre-tool guardrail. Read one JSON hook payload from stdin.
 
-Usage: fm-worker-pretool-check.py [--root WORKTREE] [--cursor] [--kimi]
+Usage: fm-worker-pretool-check.py [--root WORKTREE] [--cursor] [--kimi] [--polytoken]
 Exit 2 blocks vendor/basisone writes and git worktree add/remove/prune/move.
 Read tools remain available. Shell commands touching protected paths are allowed
 only for known read operations; this is a tool-call seatbelt, not an OS sandbox.
 --kimi scopes the global hook to an authenticated Firstmate worker pointer.
+--polytoken emits that harness's native allow outcome.
 """
 
 import argparse
@@ -27,7 +28,7 @@ def protected(value, cwd, parents=False):
         parts = candidate.parts
         if any(parts[i:i + 2] == ("vendor", "basisone") for i in range(len(parts) - 1)):
             return True
-        if parents and candidate == Path(cwd).resolve() / "vendor":
+        if parents and candidate.name == "vendor":
             return True
     return False
 
@@ -56,7 +57,7 @@ def paths(value):
             yield from paths(child)
 
 
-READ_TOOLS = {"read", "readfile", "read_file", "read_text_file", "glob", "grep",
+READ_TOOLS = {"read", "readfile", "read_file", "file_read", "read_text_file", "glob", "grep",
               "list", "ls", "list_directory", "search", "search_file_content"}
 READ_COMMANDS = {"cat", "head", "tail", "ls", "pwd", "rg", "grep", "wc", "stat",
                  "file", "test", "[", "diff", "less", "more", "readlink", "realpath"}
@@ -154,7 +155,7 @@ def reason(payload, root):
                 return denied
         if name not in READ_TOOLS and any(protected(p, cwd, parents=True) for p in paths(args)):
             return "worker edits to vendor/basisone are blocked"
-    if name not in READ_TOOLS:
+    if "patch" in name:
         for text in strings(args):
             for match in re.finditer(r"^(?:\*\*\* (?:Add|Update|Delete|Move to) File: |\*\*\* Move to: |(?:rename|copy) (?:from|to) )(.+)$", text, re.M):
                 if protected(match[1], cwd):
@@ -181,6 +182,7 @@ def main():
     parser.add_argument("--root")
     parser.add_argument("--cursor", action="store_true")
     parser.add_argument("--kimi", action="store_true")
+    parser.add_argument("--polytoken", action="store_true")
     options = parser.parse_args()
     try:
         payload = json.load(sys.stdin)
@@ -196,6 +198,8 @@ def main():
         return 2
     if options.cursor:
         print('{"permission":"allow"}')
+    elif options.polytoken:
+        print('{"outcome":"allow"}')
     else:
         print("{}")
     return 0

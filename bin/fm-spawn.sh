@@ -4187,7 +4187,7 @@ fi
 # locks, the slot claim, the atomic record publication, and the backlog transition.
 # Everything below this block is the pane path and never runs for an acp task.
 spawn_acp_scout() {
-  local harness="$FM_ROOT/bin/fm-acp-harness.py" meta_tmp="$STATE/.$ID.meta.spawn.${BASHPID:-$$}"
+  local harness="$FM_ROOT/bin/fm-acp-harness.py" meta_tmp="$STATE/.$ID.meta.spawn.${BASHPID:-$$}" guard_exclude
   if [ "$HARNESS" != opencode ]; then
     echo "error: backend=acp supports only --harness opencode in the pilot, not '$HARNESS'" >&2
     exit 1
@@ -4203,6 +4203,14 @@ spawn_acp_scout() {
     SPAWN_SLOT_CLAIMED=1
   fi
   freshen_spawn_worktree_base "$WT" || { spawn_acp_return_slot; exit 1; }
+  python3 "$FM_ROOT/bin/fm-worker-guardrails.py" opencode "$WT" "$STATE" "$ID" || {
+    spawn_acp_return_slot
+    exit 1
+  }
+  guard_exclude=$(git -C "$WT" rev-parse --git-path info/exclude) || exit 1
+  case "$guard_exclude" in /*) ;; *) guard_exclude="$WT/$guard_exclude" ;; esac
+  grep -qxF '.opencode/plugins/fm-worker-guardrails.js' "$guard_exclude" 2>/dev/null \
+    || printf '%s\n' '.opencode/plugins/fm-worker-guardrails.js' >>"$guard_exclude"
   SPAWN_META_TMP=$meta_tmp
   # The same envelope the pane launches carry around the rendered launch brief.
   "$FM_ROOT/bin/fm-operational-input.sh" encode launch-brief <"$BRIEF" >"$meta_tmp.brief" || {

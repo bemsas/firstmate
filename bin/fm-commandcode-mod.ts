@@ -26,6 +26,7 @@
 // generation-bound and the agent's own lifecycle must never break on it.
 
 import {spawnSync} from 'node:child_process';
+import {dirname, join} from 'node:path';
 
 const OPTIONS = ['fmWriter', 'fmState', 'fmId', 'fmGen'] as const;
 
@@ -61,6 +62,15 @@ export default function (cmd: any): void {
 	});
 
 	cmd.hooks({
+		beforeToolCall: ({toolName, input}: any, ctx: any) => {
+			const writer = option('fmWriter');
+			if (!writer || !option('fmId') || !option('fmGen')) return;
+			const result = spawnSync('python3', [join(dirname(writer), 'fm-worker-pretool-check.py')], {
+				input: JSON.stringify({tool_name: toolName, tool_input: input, cwd: ctx?.cwd}),
+				encoding: 'utf8', timeout: 10000,
+			});
+			if (result.status !== 0) return {block: true, additionalContext: result.stderr?.trim() || 'worker guardrail failed'};
+		},
 		onSessionEnd: () => {
 			apply('idle', 'session-end');
 		},

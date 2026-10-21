@@ -486,7 +486,7 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [ki
       if grep -qsF "/$id.inbox" "$wt/.polytoken/facets/firstmate-worker.md"; then
         printf '%s\n' "$wt/.polytoken/facets/firstmate-worker.md"
       fi
-      printf '%s\n' "$state/$id.polytoken-busy.sh"
+      printf '%s\n' "$state/$id.polytoken-busy.sh" "$state/$id.polytoken-guardrails.sh"
       ;;
   esac
 }
@@ -504,6 +504,7 @@ fm_control_harness_wiring_dirs() {  # <harness> <state-dir> <id>
   local harness=${1-} state=${2-} id=${3-}
   [ -n "$state" ] && [ -n "$id" ] || return 1
   case "$harness" in
+    cursor) printf '%s\n' "$state/$id.cursor-guardrails" ;;
     polytoken)
       printf '%s\n' "$state/$id.polytoken-config"
       printf '%s\n' "$state/$id.polytoken-sessions"

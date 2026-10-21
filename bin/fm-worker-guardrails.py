@@ -34,6 +34,19 @@ def install(harness, worktree, state, task):
         path, event = state / f"{task}.gemini-settings.json", "BeforeTool"
         # Gemini matchers are regexes, unlike Claude's wildcard matcher.
         group[0]["matcher"] = ".*"
+    elif harness == "devin":
+        path, event = state / f"{task}.devin-config.json", "PreToolUse"
+        group[0].pop("matcher")
+    elif harness == "polytoken":
+        script = state / f"{task}.polytoken-guardrails.sh"
+        script.write_text("#!/usr/bin/env bash\n" + command + " --polytoken || exit 2\n")
+        script.chmod(0o700)
+        path = wt / ".polytoken/hooks.json"
+        value = json.loads(path.read_text())
+        value = [entry for entry in value if not isinstance(entry, dict) or entry.get("name") != "fm-worker-guardrails"]
+        value.append({"name": "fm-worker-guardrails", "event": "pre_tool_use", "handler": {"bash": str(script)}})
+        write_json(path, value)
+        return
     elif harness == "grok":
         path, event = wt / ".grok/hooks/fm-worker-guardrails.json", "PreToolUse"
         group[0]["matcher"] = ".*"
@@ -92,7 +105,7 @@ function fmInstallWorkerGuard(pi: any) {
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(source)
         return
-    elif harness == "kimi":
+    elif harness in {"kimi", "commandcode"}:
         # Its global guarded PreToolUse entry is installed by the same
         # format-preserving installer that owns its Stop hook and token store.
         return
@@ -100,7 +113,12 @@ function fmInstallWorkerGuard(pi: any) {
         print(f"WORKER_GUARDRAILS: {harness}: no enabled blocking tool-hook surface; brief restrictions still apply", file=sys.stderr)
         return
     value = json.loads(path.read_text()) if path.exists() else {}
-    value.setdefault("hooks", {})[event] = group
+    hooks = value.setdefault("hooks", {})
+    existing = hooks.get(event, [])
+    existing = [entry for entry in existing if not any(
+        "fm-worker-pretool-check.py" in hook.get("command", "") for hook in entry.get("hooks", [])
+    )]
+    hooks[event] = existing + group
     write_json(path, value)
 
 

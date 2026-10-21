@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tomllib
 
@@ -38,6 +39,7 @@ for tool in ("Edit", "Write", "write_file", "StrReplaceFile", "Delete", "edit"):
         for key in ("file_path", "path", "filePath", "target_file"):
             run({"tool_name": tool, "tool_input": {key: path}}, 2)
     run({"tool_name": tool, "tool_input": {"path": "src/a.py", "content": "vendor/basisone is frozen"}}, 0)
+run({"tool_name": "Write", "tool_input": {"path": "src/example", "content": "*** Update File: vendor/basisone/a"}}, 0)
 for tool in ("Read", "read_file", "ReadFile"):
     run({"tool_name": tool, "tool_input": {"path": "vendor/basisone/a.py"}}, 0)
 for field in ("tool_input", "toolInput"):
@@ -99,8 +101,9 @@ for harness, event, config in (
     ("gemini", "BeforeTool", state / "t.gemini-settings.json"),
     ("grok", "PreToolUse", wt / ".grok/hooks/fm-worker-guardrails.json"),
     ("cursor", "preToolUse", state / "t.cursor-guardrails/hooks/hooks.json"),
+    ("devin", "PreToolUse", state / "t.devin-config.json"),
 ):
-    if harness in {"claude", "gemini"}:
+    if harness in {"claude", "gemini", "devin"}:
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(json.dumps({"hooks": {"Stop": [{"preserve": True}]}}))
     subprocess.run([sys.executable, str(install), harness, str(wt), str(state), "t"], check=True)
@@ -108,7 +111,7 @@ for harness, event, config in (
     subprocess.run([sys.executable, str(install), harness, str(wt), str(state), "t"], check=True)
     assert config.read_bytes() == first
     value = json.loads(first)
-    if harness in {"claude", "gemini"}:
+    if harness in {"claude", "gemini", "devin"}:
         assert value["hooks"]["Stop"] == [{"preserve": True}]
     entry = value["hooks"][event][0]
     command = entry["command"] if harness == "cursor" else entry["hooks"][0]["command"]
@@ -122,6 +125,28 @@ for harness, event, config in (
     assert unavailable.returncode == 2, f"{harness} evaluator failure must block"
     print(f"ok - {harness} generated hook executes the shared policy idempotently")
 
+poly_hooks = wt / ".polytoken/hooks.json"
+poly_hooks.parent.mkdir()
+poly_hooks.write_text('[{"name":"fm-busy-stop","event":"stop","handler":{"bash":"/unused"}}]')
+for _ in range(2):
+    subprocess.run([sys.executable, str(install), "polytoken", str(wt), str(state), "t"], check=True)
+poly = json.loads(poly_hooks.read_text())
+assert len(poly) == 2 and poly[0]["name"] == "fm-busy-stop"
+for name, args, expected in (("file_edit_search_replace", {"path": "vendor/basisone/a"}, 2),
+                             ("shell", {"command": "git worktree prune"}, 2),
+                             ("file_read", {"path": "vendor/basisone/a"}, 0)):
+    result = subprocess.run([poly[1]["handler"]["bash"]], input=json.dumps({"tool_name": name, "input": args}),
+                            text=True, capture_output=True)
+    assert result.returncode == expected, result.stderr
+    if expected == 0:
+        assert json.loads(result.stdout) == {"outcome": "allow"}
+print("ok - Polytoken no-argv handler blocks edits and worktree mutations, preserves lifecycle hooks")
+
+node = shutil.which("node")
+if not node or subprocess.run([node, "--experimental-strip-types", "-e", ""], capture_output=True).returncode:
+    print("skip - generated native callbacks require Node with TypeScript stripping")
+    sys.exit(0)
+
 for harness in ("pi", "pi-signed", "omp", "opencode"):
     extension = state / f"t.{'omp' if harness == 'omp' else 'pi'}-ext.ts"
     extension.write_text("export default function (pi: any) {\n}\n")
@@ -130,7 +155,7 @@ for harness in ("pi", "pi-signed", "omp", "opencode"):
     first = module.read_bytes()
     subprocess.run([sys.executable, str(install), harness, str(wt), str(state), "t"], check=True)
     assert module.read_bytes() == first, f"{harness} repeated install changed the extension"
-    subprocess.run(["node", "--input-type=module", "-", str(module), harness], input=r'''
+    subprocess.run([node, "--experimental-strip-types", "--input-type=module", "-", str(module), harness], input=r'''
 import { pathToFileURL } from 'node:url';
 const mod = await import(pathToFileURL(process.argv[2]));
 const harness = process.argv[3];
@@ -152,5 +177,23 @@ for (const [tool, args, blocked] of [
 }
 ''', text=True, check=True)
     print(f"ok - {harness} generated native callback executes the shared policy")
+
+subprocess.run([node, "--experimental-strip-types", "--input-type=module", "-", str(root)], input=r'''
+import { pathToFileURL } from 'node:url';
+const root = process.argv[2];
+const mod = await import(pathToFileURL(root + '/bin/fm-commandcode-mod.ts'));
+let hooks;
+mod.default({addFlag: () => {}, on: () => {}, hooks: h => { hooks = h; },
+  getFlag: name => name === 'fmWriter' ? root + '/bin/fm-busy-event.sh' : 'test'});
+for (const [toolName, input, blocked] of [
+  ['write', {path: 'vendor/basisone/x'}, true],
+  ['shell_command', {command: 'git worktree prune'}, true],
+  ['read', {path: 'vendor/basisone/x'}, false],
+]) {
+  const result = await hooks.beforeToolCall({toolName, input}, {cwd: root});
+  if (Boolean(result?.block) !== blocked) throw Error('Command Code unexpected tool decision');
+}
+''', text=True, check=True)
+print("ok - Command Code mutating hook blocks through its existing per-process mod")
 PY
 pass "worker guardrail executable policy and generated adapter callbacks"
