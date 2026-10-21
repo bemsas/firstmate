@@ -433,10 +433,11 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [ki
         printf '%s\n' "$wt/.claude/settings.local.json"
       fi
       ;;
-    opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" ;;
+    opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" "$wt/.opencode/plugins/fm-worker-guardrails.js" ;;
     pi|pi-signed) printf '%s\n' "$state/$id.pi-ext.ts" ;;
     omp) printf '%s\n' "$state/$id.omp-ext.ts" ;;
     grok)
+      printf '%s\n' "$wt/.grok/hooks/fm-worker-guardrails.json"
       printf '%s\n' "$wt/.fm-grok-turnend"
       printf '%s\n' "$state/$id.grok-turnend-token"
       ;;
@@ -452,7 +453,11 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [ki
       printf '%s\n' "$state/$id.muse-session"
       printf '%s\n' "$state/$id.muse-session-current"
       ;;
-    cursor) printf '%s\n' "$state/$id.cursor-session" ;;
+    cursor)
+      printf '%s\n' "$state/$id.cursor-session" \
+        "$state/$id.cursor-guardrails/hooks/hooks.json" \
+        "$state/$id.cursor-guardrails/.cursor-plugin/plugin.json"
+      ;;
     # gemini's busy-state and turn-end hooks live in a firstmate-owned
     # settings file the launch reaches through GEMINI_CLI_SYSTEM_SETTINGS_PATH,
     # so retiring that one file retires the whole incarnation's wiring. Nothing

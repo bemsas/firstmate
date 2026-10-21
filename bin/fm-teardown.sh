@@ -3666,6 +3666,17 @@ fi
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
+if [ "$KIND" != secondmate ] && teardown_owns_worktree && [ -d "$WT" ]; then
+  # Guardrail artifacts are task-owned; project settings and plugins stay intact.
+  rm -f "$WT/.grok/hooks/fm-worker-guardrails.json" \
+    "$WT/.opencode/plugins/fm-worker-guardrails.js"
+fi
+if [ "$KIND" != secondmate ]; then
+  rm -f "$STATE/$ID.cursor-guardrails/hooks/hooks.json" \
+    "$STATE/$ID.cursor-guardrails/.cursor-plugin/plugin.json"
+  rmdir "$STATE/$ID.cursor-guardrails/hooks" "$STATE/$ID.cursor-guardrails/.cursor-plugin" \
+    "$STATE/$ID.cursor-guardrails" 2>/dev/null || true
+fi
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1

@@ -146,7 +146,7 @@ assert_meta_profile() {
 }
 
 test_no_profile_keeps_claude_profile_defaults() {
-  local rec id out status expected launch
+  local rec id out status expected launch guard
   id=profile-off-z1
   rec=$(make_spawn_case profile-off claude "$id")
   read_case_record "$rec"
@@ -160,6 +160,10 @@ test_no_profile_keeps_claude_profile_defaults() {
   launch=$(cat "$LAUNCH_LOG")
   expected=$(claude_expected_launch "$launch" "$HOME_DIR" "$id" --dangerously-skip-permissions)
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  guard=$(jq -er '.hooks.PreToolUse[0].hooks[0].command' "$WT_DIR/.claude/settings.local.json") \
+    || fail "spawn did not register its worker tool guard"
+  out=$(printf '%s\n' '{"tool_name":"Bash","tool_input":{"command":"git worktree prune"}}' | bash -c "$guard" 2>&1)
+  expect_code 2 "$?" "spawn-generated guard did not block worktree administration: $out"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
 
@@ -781,7 +785,7 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   expect_code 0 "$status" "cursor spawn with a model-qualified reasoning class should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-grok-4.5-high high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--trust --yolo --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
+  assert_contains "$launch" "--trust --yolo --plugin-dir '$HOME_DIR/state/$id.cursor-guardrails' --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
     "cursor launch did not carry trust, autonomy, model, and exact workspace flags"
   # The executable is RESOLVED, never named: `cursor` is not the CLI, so a
   # literal `cursor agent` command cannot run on a machine that has only the

@@ -11,6 +11,8 @@
 # hook payload, checks for a .fm-kimi-turnend pointer before registry work, and
 # touches a task turn-end marker only when the pointer names a Firstmate-created
 # token in $HOME/.kimi-code/fm-turn-end.d/.
+# The same owned config region also registers the worker PreToolUse guard;
+# fm-worker-pretool-check.py --kimi authenticates that pointer before enforcing.
 #
 # Usage:
 #   fm-kimi-turnend-hook.sh install
@@ -42,9 +44,13 @@ if [ "$ACTION" = install ] && ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
-python3 - "$ACTION" "$HOME/.kimi-code" <<'PY'
+FM_KIMI_HOOK_SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd -P) \
+  python3 - "$ACTION" "$HOME/.kimi-code" <<'PY'
 import os
+import json
+from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 import sys
@@ -156,6 +162,9 @@ def locate_region(data: bytes):
 
 
 def block(marker: bytes) -> bytes:
+    # Python runs on stdin; pass the owning tracked script directory explicitly.
+    guard = Path(os.environ["FM_KIMI_HOOK_SCRIPT_DIR"]) / "fm-worker-pretool-check.py"
+    guard_command = shlex.join(["python3", str(guard), "--kimi"])
     return b"\n".join(
         (
             marker,
@@ -164,6 +173,11 @@ def block(marker: bytes) -> bytes:
             b'matcher = "^$"',
             b'command = "bash \\"$HOME/.kimi-code/fm-turn-end.sh\\" >/dev/null 2>&1 || true"',
             b"timeout = 1",
+            b"[[hooks]]",
+            b'event = "PreToolUse"',
+            b'matcher = ".*"',
+            ("command = " + json.dumps(guard_command)).encode(),
+            b"timeout = 10",
             END,
             b"",
         )

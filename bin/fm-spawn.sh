@@ -504,6 +504,9 @@
 # A claude secondmate gets no Stop busy hook; its home's tracked Stop guard is its
 # only Stop writer, through the .fm-busy-stop pointer in that home. A home whose
 # guard predates that pointer keeps the ordinary Stop idle hook instead.
+# Worker pre-tool guardrails are installed alongside them by fm-worker-guardrails.py;
+# its header owns enabled adapters and coverage gaps, and fm-worker-pretool-check.py
+# owns the policy. Secondmates retain their own supervisor tool authority.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # Kimi 2.0.0 also gates a fresh worktree on an interactive folder-trust dialog,
@@ -2538,7 +2541,7 @@ launch_template() {
   # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
   # only reads the environment. Cursor exposes no effort flag, so the shared
   # effort axis is deliberately omitted and stays in task metadata only.
-  cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __CURSORGUARD____MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # gemini (Google Gemini CLI): a positional query starts the supervised
   # interactive session and auto-submits it, so the brief rides the launch
   # command exactly as it does for claude and grok (verified: a multi-line
@@ -5853,6 +5856,17 @@ EOF
     fi
     ;;
   esac
+if [ "$KIND" != secondmate ]; then
+  if [ "$RAW_LAUNCH" -eq 0 ]; then
+    python3 "$FM_ROOT/bin/fm-worker-guardrails.py" "$HARNESS" "$WT" "$STATE_REAL" "$ID" || exit 1
+    case "$HARNESS" in
+    grok) exclude_path '.grok/hooks/fm-worker-guardrails.json' ;;
+    opencode) exclude_path '.opencode/plugins/fm-worker-guardrails.js' ;;
+    esac
+  else
+    echo "WORKER_GUARDRAILS: raw launch: tool-hook installation is not guaranteed" >&2
+  fi
+fi
 
 # Per-task git hooksPath that strips AI commit trailers at the commit object.
 # Installed for every kind, including secondmate, unless the home opts in to
@@ -6172,7 +6186,14 @@ LAUNCH=${LAUNCH//__OMPWORKERCFG__/$sq_ompcfg}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
 pi | pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
-cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
+cursor)
+  LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"}
+  CURSOR_GUARD_FLAG=
+  if [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+    CURSOR_GUARD_FLAG="--plugin-dir $(shell_quote "$STATE_REAL/$ID.cursor-guardrails") "
+  fi
+  LAUNCH=${LAUNCH//__CURSORGUARD__/"$CURSOR_GUARD_FLAG"}
+  ;;
 gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
 omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
 devin)
