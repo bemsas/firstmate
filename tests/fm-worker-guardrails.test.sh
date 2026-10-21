@@ -117,6 +117,9 @@ for harness, event, config in (
                               ({"tool_name": "Read", "tool_input": {"path": "vendor/basisone/x"}}, 0)):
         result = subprocess.run(command, shell=True, input=json.dumps(payload), text=True, capture_output=True)
         assert result.returncode == expected, (harness, result.stderr)
+    unavailable = subprocess.run(command, shell=True, input='{}', text=True,
+                                 env=dict(os.environ, PATH="/nonexistent"), capture_output=True)
+    assert unavailable.returncode == 2, f"{harness} evaluator failure must block"
     print(f"ok - {harness} generated hook executes the shared policy idempotently")
 
 for harness in ("pi", "pi-signed", "omp", "opencode"):

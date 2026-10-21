@@ -26,7 +26,7 @@ def write_json(path, value):
 def install(harness, worktree, state, task):
     wt, state = Path(worktree), Path(state)
     command = shlex.join(["python3", str(CHECK), "--root", str(wt)])
-    handler = {"type": "command", "command": command, "timeout": 10}
+    handler = {"type": "command", "command": command + " || exit 2", "timeout": 10}
     group = [{"matcher": "*", "hooks": [handler]}]
     if harness == "claude":
         path, event = wt / ".claude/settings.local.json", "PreToolUse"
@@ -42,7 +42,7 @@ def install(harness, worktree, state, task):
         write_json(plugin / ".cursor-plugin/plugin.json", {
             "name": "fm-worker-guardrails", "version": "1.0.0", "hooks": "hooks/hooks.json",
         })
-        handler["command"] += " --cursor"
+        handler["command"] = command + " --cursor || exit 2"
         write_json(plugin / "hooks/hooks.json", {"version": 1, "hooks": {"preToolUse": [handler]}})
         return
     elif harness in {"pi", "pi-signed", "omp", "opencode"}:
