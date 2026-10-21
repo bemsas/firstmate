@@ -37,6 +37,9 @@ write_judge_stub() { # <dir>
   cat > "$1/judge.py" <<'PY'
 import json, os, sys, time
 card = json.load(sys.stdin)
+if '--record-langfuse' in sys.argv:
+    print('{}')
+    sys.exit(0)
 with open(os.environ['STUB_CALLS'], 'a') as fh:
     fh.write(card['decision_id'] + '\n')
 if os.environ.get('STUB_SLEEP'):
@@ -456,3 +459,122 @@ test_non_decision_lines_are_ignored
 test_summary
 test_live_send_through_real_fm_send
 test_adapter_wiring
+
+# Slice 1 parser and final-verdict telemetry regressions.
+python3 - "$(dirname "$0")/../bin/fm-judge-first.py" <<'PY'
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+HOOK = Path(sys.argv.pop()).resolve()
+spec = importlib.util.spec_from_file_location('hook', HOOK)
+hook = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hook)
+
+
+def synth(body):
+    return hook.synthesize({'body': body, 'key': None}, 'mate')
+
+
+class HookTests(unittest.TestCase):
+    def test_numbered_defects_and_trailing_recommendation(self):
+        body = ('Defect https://github.com/example/repo/pull/42: (1) production-build '
+                'switch; (2) migration probe closes bypasses. Options: '
+                '(a) repair the tests (recommended); (b) bypass the pipeline; (c) deploy to production.')
+        result = synth(body)
+        self.assertEqual(result['card']['recommended'], 'a')
+        self.assertEqual([x['value'] for x in result['card']['options']], ['a', 'b', 'c'])
+        self.assertEqual(hook.guard_rules(result), [])
+        reply = hook.answer_text(result, {})
+        self.assertIn('https://github.com/example/repo/pull/42', reply)
+        self.assertNotIn('bypass the pipeline', reply)
+
+    def test_recommendation_formats(self):
+        for body in ('Options: (A, recommended) repair tests; (B) wait.',
+                     'Options: (a) repair tests (recommended - bounded); (b) wait.',
+                     'Options: (a) repair tests; (b) wait. Recommend (a).',
+                     '(1) repair tests (recommended); (2) wait.'):
+            with self.subTest(body=body):
+                result = synth(body)
+                self.assertEqual(result['card']['recommended'], '1' if body.startswith('(1)') else 'a')
+                self.assertEqual(len(result['card']['options']), 2)
+
+    def test_no_recommendation(self):
+        for body in ('The gate is blocked. Waiting for direction.',
+                     'Options: (a) repair; (b) wait. Do not recommend either.',
+                     'Options: (a) repair; (b) wait. Recommend C.',
+                     'Options: (a) repair; (b) wait.',
+                     'Options: (a) repair (recommended); (b) wait (recommended).'):
+            self.assertIsNone(synth(body)['card']['recommended'])
+
+    def test_action_guards(self):
+        for action, rule in [('bypass the pipeline', 'pipeline_bypass'),
+                             ('skip validation', 'pipeline_bypass'),
+                             ('run database migrations', 'shared_state'),
+                             ('deploy to production', 'restricted_topic'),
+                             ('change billing', 'restricted_topic'),
+                             ('git reset --hard', 'irreversible_destructive')]:
+            with self.subTest(action=action):
+                self.assertIn(rule, hook.guard_rules(synth(f'Options: (a) {action} (recommended); (b) wait.')))
+        self.assertEqual(hook.guard_rules(synth('Options: (a) fix the UI (Manage billing only, no purchase links) (recommended); (b) wait.')), [])
+
+    def test_ingest_final_export_and_dedupe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home/'config').mkdir()
+            (home/'config/judge-first').write_text('on')
+            judge = home/'judge.py'
+            judge.write_text('''import json, os, sys
+from pathlib import Path
+packet = json.load(sys.stdin)
+if '--record-langfuse' in sys.argv:
+    if os.environ.get('EXPORT_FAIL'):
+        sys.exit(1)
+    log = Path(os.environ['FM_JUDGE_LOG'])
+    assert log.exists() and log.read_text().strip(), 'export preceded journal'
+    with open(os.environ['EXPORTS'], 'a') as f:
+        f.write(json.dumps(packet) + '\\n')
+    print('{}')
+else:
+    print(json.dumps({'auto': True, 'chosen': packet['recommended'], 'rules_hit': [],
+                      'policy': 'recommended-v1', 'second_opinion': {'agree': not packet['title'].startswith('missing')}}))
+''')
+            send = home/'send.sh'
+            send.write_text('#!/bin/sh\nprintf "sent\\n" >> "$SENDS"\n')
+            send.chmod(0o755)
+            env = dict(os.environ, FM_HOME=tmp, FM_JUDGE_PY=str(judge),
+                       FM_JUDGE_LOG=str(home/'journal'), FM_SEND_BIN=str(send),
+                       EXPORTS=str(home/'exports'), SENDS=str(home/'sends'))
+            lines = '\n'.join([
+                'blocked [key=safe] [at=1]: Options: (a) fix tests (recommended); (b) wait.',
+                'blocked [key=none] [at=200]: Waiting for direction.',
+                'blocked [key=risky] [at=400]: Options: (a) bypass the pipeline (recommended); (b) wait.',
+                'blocked [key=missing] [at=600]: Options: (a) fix tests (recommended); (b) wait.'])
+            def ingest():
+                return subprocess.run([sys.executable, str(HOOK), 'ingest', 'mate', '-'],
+                                      input=lines, env=env, text=True, capture_output=True, check=True)
+            result = ingest()
+            self.assertIn('auto=1 escalate=3', result.stdout)
+            rows = [json.loads(x) for x in (home/'exports').read_text().splitlines()]
+            self.assertEqual(len(rows), 4)
+            self.assertEqual([r['verdict']['auto'] for r in rows], [True, False, False, False])
+            self.assertEqual(rows[-1]['verdict']['rules_hit'], ['second_opinion_missing'])
+            self.assertEqual((home/'sends').read_text(), 'sent\n')
+            self.assertEqual(len((home/'journal').read_text().splitlines()), 5)
+            self.assertIn('deduped=4', ingest().stdout)
+            self.assertEqual(len((home/'exports').read_text().splitlines()), 4)
+            self.assertEqual((home/'sends').read_text(), 'sent\n')
+            # Export failure cannot turn the durable send path into an outage.
+            (home/'journal').unlink()
+            env['EXPORT_FAIL'] = '1'
+            self.assertIn('auto=1 escalate=3', ingest().stdout)
+            self.assertEqual((home/'sends').read_text(), 'sent\nsent\n')
+
+
+unittest.main()
+PY

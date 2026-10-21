@@ -31,7 +31,9 @@
 # Every verdict is appended to judge-log.jsonl beside judge.py, in the existing
 # {card, verdict, at} shape plus hook fields; this script is the only writer
 # for hook-judged cards because judge.py runs --opinion-only (no journal write,
-# no Langfuse write). The journal row is written, and fsynced, BEFORE any send.
+# no Langfuse write). After fsync, --record-langfuse exports the final hook
+# verdict, including local escalations, without another evaluation or journal row.
+# Telemetry failures never prevent the ordinary decision/send path.
 #
 # Environment (tests and relocated homes): FM_HOME, FM_JUDGE_PY, FM_JUDGE_LOG,
 # FM_JUDGE_FIRST_BUDGET (total judge seconds per ingest, default 40),
@@ -101,6 +103,7 @@ def key_family(key):
 
 
 MARK = re.compile(r'\(\s*([A-Za-z0-9])\s*(?:,\s*recommended\s*)?\)')
+TRAIL_REC = re.compile(r'\(\s*recommended(?:\s*[;:,\-].*?)?\)', re.I)
 SENTENCE = re.compile(r'(?<=[.;!?])\s+(?=[A-Z(])')
 NEGATED = re.compile(r"\b(?:not|never|no|don't|do not|cannot|can't)\s+(?:\w+\s+){0,2}recommend", re.I)
 REC_LETTER = re.compile(r'(?i:recommend\w*)\s*[:\-]?\s*(?:\(([A-Za-z0-9])\)|([A-Z0-9]))(?=[.:,;)]|$|\s+(?:if|else|and|or|because|since|\())')
@@ -108,19 +111,22 @@ REC_LETTER = re.compile(r'(?i:recommend\w*)\s*[:\-]?\s*(?:\(([A-Za-z0-9])\)|([A-
 
 def split_options(body):
     """Enumerated options "(a) ... (b) ..." -> (preamble, [(letter, text, flagged)])."""
+    anchor = re.search(r'\bOptions\s*:\s*', body, re.I)
+    context = body[:anchor.start()].strip() if anchor else ''
+    body = body[anchor.end():] if anchor else body
     # A "Recommend (a)" reference to an option is not an option marker itself.
     marks = [m for m in MARK.finditer(body) if not re.search(r'(?i)recommend\w*\s*[:\-]?\s*$', body[max(0, m.start() - 24):m.start()])]
     letters = [m.group(1).lower() for m in marks]
     if len(marks) < 2 or len(set(letters)) != len(letters):
-        return body, []
+        return (context + ' ' + body).strip(), []
     options = []
     for i, m in enumerate(marks):
         end = marks[i + 1].start() if i + 1 < len(marks) else len(body)
         text = body[m.end():end].strip(' ;,')
         if i + 1 == len(marks):
             text = SENTENCE.split(text, 1)[0].strip()
-        options.append((m.group(1).lower(), text, 'recommended' in m.group(0).lower()))
-    return body[:marks[0].start()].strip(), options
+        options.append((m.group(1).lower(), text, 'recommended' in m.group(0).lower() or bool(TRAIL_REC.search(text))))
+    return (context + ' ' + body[:marks[0].start()]).strip(), options
 
 
 def recommendation_sentence(body):
@@ -137,19 +143,21 @@ def synthesize(parsed, secondmate):
     rec_sentence = recommendation_sentence(body)
     negated = bool(rec_sentence and NEGATED.search(rec_sentence))
     letter = None
-    for letter_, _text, flagged in options:
-        if flagged:
-            letter = letter_
+    flagged_letters = [value for value, _text, flagged in options if flagged]
+    if len(flagged_letters) > 1:
+        negated = True  # Conflicting recommendations are never an auto-choice.
+    elif flagged_letters:
+        letter = flagged_letters[0]
     if letter is None and rec_sentence and not negated:
         m = REC_LETTER.search(rec_sentence)
         if m:
             letter = (m.group(1) or m.group(2)).lower()
     by_letter = {l: t for l, t, _f in options}
     selected = ''
-    if options and letter in by_letter:
+    if options and letter in by_letter and not negated:
         card_options = [{'value': l, 'label': t} for l, t, _f in options]
         recommended, selected, question = letter, by_letter[letter], preamble
-    elif rec_sentence and not negated and not letter:
+    elif not options and rec_sentence and not negated and not letter:
         card_options = [{'value': 'recommended', 'label': rec_sentence}, {'value': 'other', 'label': 'Any other path'}]
         recommended, selected, question = 'recommended', rec_sentence, body
     else:
@@ -168,19 +176,19 @@ def synthesize(parsed, secondmate):
 
 # ---- guard rules: the gaps the backtest found --------------------------------
 # These add to judge.py's own hard rules and only ever escalate. They scan the
-# selected option and the context before the options (the recommended action
-# and what it touches), never the alternatives the mate did not recommend.
+# selected action plus the card title for topical guards, never defect narrative
+# or alternatives. Destructive/security context keeps its existing guard.
 
 # (rule, pattern, scope): "both" scans the selected option and its context,
-# "selected" only the recommended action (a past-tense abort in the context is
-# the situation, not the ask).
+# "selected" only scans the recommended action; "action" adds the card title.
+# A past-tense abort in the context is the situation, not the ask.
 GUARD = [
     ('irreversible_destructive', r"force[- ]with[- ]lease|\brewrit\w*\s+(?:the\s+|this\s+)?(?:branch(?:'s)?\s+)?history|history\s+rewrite|\breset\s+--hard", 'both'),
     ('irreversible_destructive', r'\babort(?:s|ing)?\b', 'selected'),
-    ('pipeline_bypass', r'\bskip\w*\s*(?:the\s+)?(?:\w+\s+)?(?:step|document|review|rebase|gate|tests?|checks?)\b|--skip\b|\bbypass\w*\b|--no-verify\b', 'selected'),
+    ('pipeline_bypass', r'\b(?:bypass|skip\w*)\s+(?:the\s+)?(?:\w+\s+)?(?:pipeline|validation|no-mistakes|document|review|rebase|gate|tests?|checks?|ci)\b|--skip\b|--no-verify\b', 'action'),
     ('security_access', r'\brevocation\b|\bbot[- ]protection\b|\bturnstile\b|\bcaptcha\b|\bdisabl\w*\b.{0,30}\b(?:auth\w*|protection|verification|mfa|2fa)\b', 'both'),
-    ('shared_state', r'\bmigrat\w+|\bshared\s+(?:vm\s+)?staging\b|\bstaging\s+(?:refresh|database|postgres)\b|\brebuild\w*\b.{0,40}\b(?:staging|production|prod)\b', 'both'),
-    ('restricted_topic', r'\blegal\b|\bseller\s+identity\b|\bvat\b|\bpricing\b|\bbilling\b|\brefund\b|\bpaid\s+launch\b|\bproduction\b|\bprod\b', 'both'),
+    ('shared_state', r'\b(?:run|apply|execute)\b[^\n.;]{0,30}\bmigrat\w*|\bmigrat(?:e|ing)\b[^\n.;]{0,30}\b(?:database|db|postgres|staging|production)\b|\bshared\s+(?:vm\s+)?staging\b|\bstaging\s+(?:refresh|database|postgres)\b|\brebuild\w*\b.{0,40}\b(?:staging|production|prod)\b', 'action'),
+    ('restricted_topic', r'\blegal\b|\bseller\s+identity\b|\bvat\b|\bpricing\b|\b(?:change|enable|disable|configure|activate|update|raise)\b[^\n.;]{0,30}\b(?:vat|pricing|billing)\b|\brefund\b|\bpaid\s+launch\b|\b(?:deploy|push|write|migrate|point)\b[^\n.;]{0,30}\b(?:production|prod)\b|\b(?:production|prod)\s+(?:db|database|env|secret|credentials|cutover|switch)\b', 'action'),
 ]
 CONDITIONAL = re.compile(r'\bif\b.*\b(?:else|otherwise|unless)\b|\beither\b.*\bor\b|\bdepending\s+on\b|\bwhether\b', re.I)
 BUNDLE_ID = re.compile(r'\b[DQ]\d{1,2}\b')
@@ -191,8 +199,13 @@ def guard_rules(synth):
     hits = []
     selected = synth['selected'].lower()
     both = (synth['selected'] + ' ' + synth['preamble']).lower()
+    action = (synth['selected'] + ' ' + synth['card'].get('title', '')).lower()
     for name, pattern, scope in GUARD:
-        if re.search(pattern, selected if scope == 'selected' else both) and name not in hits:
+        target = {'selected': selected, 'both': both, 'action': action}[scope]
+        # A generic refresh authorization names its target only in the context.
+        if name == 'shared_state' and re.search(r'\b(?:authori[sz]e|perform|run)\s+(?:the\s+)?(?:documented\s+)?refresh\b', selected):
+            target = both
+        if re.search(pattern, target) and name not in hits:
             hits.append(name)
     body = synth['body']
     if BUNDLE_RANGE.search(body) or len(set(BUNDLE_ID.findall(body))) > 2:
@@ -229,6 +242,17 @@ def append_log(entry):
         return True
     except OSError:
         return False
+
+
+def record_langfuse(row):
+    """Export the durable final verdict; never evaluate or append another row."""
+    try:
+        subprocess.run([sys.executable, JUDGE_PY, '-', '--record-langfuse'],
+                       input=json.dumps({k: row[k] for k in ('card', 'verdict', 'at')}),
+                       capture_output=True, text=True, timeout=CALL_TIMEOUT,
+                       cwd=os.path.dirname(JUDGE_PY))
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 def prior_cluster(rows, secondmate, identity, at):
@@ -290,7 +314,9 @@ def answer_text(synth, verdict):
     if len(label) > 300:
         label = label[:297] + '...'
     agreed = isinstance(verdict.get('second_opinion'), dict) and verdict['second_opinion'].get('agree') is True
-    return 'judge auto-decided (recommended%s): %s - %s' % (', Jev agreed' if agreed else '', synth['card']['recommended'], label)
+    urls = list(dict.fromkeys(re.findall(r'https://github\.com/[^/\s]+/[^/\s]+/pull/\d+', synth['body'])))
+    context = (' [' + ', '.join(urls) + ']') if urls else ''
+    return 'judge auto-decided (recommended%s): %s - %s%s' % (', Jev agreed' if agreed else '', synth['card']['recommended'], label, context)
 
 
 def send_answer(secondmate, keys, text):
@@ -365,6 +391,8 @@ def ingest(secondmate, lines):
             summary['error'] += len(cluster)
             continue
         rows.extend(rows_out)
+        for row in rows_out:
+            record_langfuse(row)
         if action == 'auto':
             result = send_answer(secondmate, keys, text)
             final = 'sent' if result['ok'] else 'send-failed'
