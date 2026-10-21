@@ -56,6 +56,16 @@ for command in ("echo x > vendor/basisone/a", "sed -i s/x/y/ vendor/basisone/a",
                 "cat vendor/basisone/a\nrm vendor/basisone/b",
                 "git diff --output=vendor/basisone/a", "rg --pre='touch x' vendor/basisone"):
     run({"tool_name": "Bash", "tool_input": {"command": command}}, 2)
+for command in ("cat > pr-body.md <<'EOF'\nFix the parser so it doesn't break on apostrophes.\nEOF\n",
+                "cat <<'EOF' | wc -l > count\nfirst line's words\nEOF\n",
+                "cat <<-EOF >> notes.md\n\tkeep the vendor's naming\n\tEOF\n",
+                "echo 'unclosed quote"):
+    run({"tool_name": "Bash", "tool_input": {"command": command}}, 0)
+for command in ("cat > vendor/basisone/x <<'EOF'\ndon't\nEOF\n",
+                "bash <<'EOF'\ngit worktree add /tmp/nope\nEOF\n",
+                "cat > notes.md <<EOF\nsee vendor/basisone helpers\nEOF\n",
+                "echo 'unclosed && git worktree add /tmp/nope"):
+    run({"tool_name": "Bash", "tool_input": {"command": command}}, 2)
 run({"tool_name": "Bash", "cwd": str(wt / "vendor/basisone"), "tool_input": {"command": "touch a"}}, 2)
 run({"tool_name": "Bash", "tool_input": {"cmd": ["git", "worktree", "prune"]}}, 2)
 for operation in ("Update File", "Delete File", "Add File"):
@@ -65,7 +75,7 @@ allowed = run({"tool_name": "Write", "tool_input": {"path": "src/a.py"}}, 0, "--
 assert json.loads(allowed.stdout) == {"permission": "allow"}
 invalid = subprocess.run([sys.executable, str(check)], input="{", text=True, capture_output=True)
 assert invalid.returncode == 2
-print("ok - policy blocks edits, patches, shell writes and worktree mutations; permits reads and scoped edits")
+print("ok - policy blocks edits, patches, shell writes and worktree mutations; permits reads, scoped edits and heredoc data")
 
 # Kimi's hook is globally installed but must be inert outside worker tokens.
 home = tmp / "user-home"

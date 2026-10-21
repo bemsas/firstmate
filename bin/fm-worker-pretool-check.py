@@ -84,13 +84,117 @@ def git_words(words):
     return words[i:]
 
 
+def strip_heredocs(command):
+    """Split here-document bodies out of the command text.
+
+    Returns (text, bodies): text keeps every operator and word outside the
+    bodies, bodies lists each literal chunk a << or <<- operator feeds, so
+    heredoc data with unbalanced quotes never breaks tokenisation.
+    """
+    out = []
+    bodies = []
+    pending = []
+    quote = None
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                out.append(command[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            out.append(ch)
+            out.append(command[i + 1])
+            i += 2
+            continue
+        if ch == "#" and (not out or out[-1] in " \t\n;&|<>()"):
+            while i < n and command[i] != "\n":
+                i += 1
+            continue
+        if ch == "<" and command.startswith("<<", i):
+            if command.startswith("<<<", i):
+                out.append("<<<")
+                i += 3
+                continue
+            j = i + 2
+            tabs = command.startswith("-", j)
+            if tabs:
+                j += 1
+            while j < n and command[j] in " \t":
+                j += 1
+            if j < n and command[j] in {"'", '"'}:
+                close = command.find(command[j], j + 1)
+                if close == -1:
+                    out.append(ch)
+                    i += 1
+                    continue
+                delimiter = command[j + 1:close]
+                j = close + 1
+            else:
+                end = j
+                while end < n and command[end] not in " \t\n;&|<>()":
+                    end += 1
+                delimiter = command[j:end]
+                j = end
+            if delimiter:
+                pending.append((delimiter.replace("\\", ""), tabs))
+            out.append(command[i:j])
+            i = j
+            continue
+        if ch == "\n" and pending:
+            out.append(ch)
+            i += 1
+            for delimiter, tabs in pending:
+                body_start = i
+                while i < n:
+                    body_stop = i
+                    line_end = command.find("\n", i)
+                    line, after = ((command[i:], n) if line_end == -1
+                                   else (command[i:line_end], line_end + 1))
+                    i = after
+                    probe = line.lstrip("\t") if tabs else line
+                    if probe.endswith("\r"):
+                        probe = probe[:-1]
+                    if probe == delimiter:
+                        bodies.append(command[body_start:body_stop])
+                        break
+                else:
+                    bodies.append(command[body_start:n])
+            pending = []
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out), bodies
+
+
+def conservative_reason(command):
+    """Raw-text fallback when the lexer still cannot tokenise the command."""
+    if re.search(r"\bvendor/+basisone(?:/|\b)", command):
+        return "worker edits to vendor/basisone are blocked"
+    if re.search(r"\bgit\b[^;\n&|]*\bworktree\s+(?:add|remove|prune|move)\b", command):
+        return "workers cannot administer git worktrees"
+    return None
+
+
 def shell_reason(command, cwd, depth=0):
     if depth > 8:
         return "shell nesting exceeds the worker guardrail limit"
+    stripped, bodies = strip_heredocs(command)
     try:
-        words = tokens(command)
+        words = tokens(stripped)
     except ValueError:
-        return "cannot parse shell command for worker guardrails"
+        return conservative_reason(command)
     # Scan each command, including commands behind env, command, sudo and shell
     # operators. Quoted shell scripts are inspected recursively, never executed.
     for i, word in enumerate(words):
@@ -111,6 +215,12 @@ def shell_reason(command, cwd, depth=0):
         for word in words
     )
     if not mentions:
+        # Heredoc bodies are data, but they can feed interpreters or hide
+        # paths, so each stripped body is inspected like a quoted shell script.
+        for body in bodies:
+            denied = shell_reason(body, cwd, depth + 1)
+            if denied:
+                return denied
         return None
     # Redirections, substitutions and unknown interpreters with a protected
     # path are not proven read-only. Require explicit read commands throughout.
