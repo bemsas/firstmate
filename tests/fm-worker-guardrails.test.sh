@@ -125,6 +125,108 @@ for harness, event, config in (
     assert unavailable.returncode == 2, f"{harness} evaluator failure must block"
     print(f"ok - {harness} generated hook executes the shared policy idempotently")
 
+# Codex's private home preserves configuration, never opens auth, and grants
+# no trust until the real vendor has identified the generated hook.
+codex_source = tmp / "codex source"
+codex_source.mkdir()
+os.mkfifo(codex_source / "auth.json")
+(codex_source / "rules").mkdir()
+(codex_source / "rules/local.rules").write_text("# preserved rule\n")
+(codex_source / "AGENTS.md").write_text("Preserved user instructions.\n")
+source_config = '\n'.join([
+    'approval_policy="on-request"', 'sandbox_mode="workspace-write"',
+    'model_auto_compact_token_limit=10000', 'model_instructions_file="instructions.txt"',
+    '[sandbox_workspace_write]', 'network_access=false', 'writable_roots=["/scoped"]',
+    '[features]', 'hooks=false', 'shell_tool=false',
+    '[hooks.state."unrelated"]', 'trusted_hash="old"',
+    '[mcp_servers.docs]', 'command="docs"',
+]) + "\n"
+(codex_source / "config.toml").write_text(source_config)
+worker = root / "bin/fm-codex-worker.py"
+codex_env = dict(os.environ, CODEX_HOME=str(codex_source))
+private = state / "codex.codex-home"
+for _ in range(2):
+    result = subprocess.run([sys.executable, str(worker), "prepare", str(wt), str(state), "codex"],
+                            env=codex_env, text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    config = tomllib.loads((private / "config.toml").read_text())
+    assert config["approval_policy"] == "on-request"
+    assert config["sandbox_mode"] == "workspace-write"
+    assert config["model_auto_compact_token_limit"] == 10000
+    assert config["model_instructions_file"] == str(codex_source / "instructions.txt")
+    assert config["sandbox_workspace_write"] == {"network_access": False, "writable_roots": ["/scoped"]}
+    assert config["features"] == {"hooks": True, "shell_tool": False}
+    assert config["mcp_servers"]["docs"] == {"command": "docs"}
+    assert config["hooks"] == {}
+    assert (private / "auth.json").is_symlink()
+    assert os.readlink(private / "auth.json") == str(codex_source / "auth.json")
+    assert (private.stat().st_mode & 0o777) == 0o700
+    assert ((private / "config.toml").stat().st_mode & 0o777) == 0o600
+    command = json.loads((private / "hooks.json").read_text())["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    for cmd, expected in (("git worktree prune", 2), ("git status --short", 0)):
+        result = subprocess.run(command, shell=True, input=json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}}),
+                                text=True, capture_output=True)
+        assert result.returncode == expected, result.stderr
+    (private / "runtime-owned").write_text("retire on reprepare")
+assert (codex_source / "config.toml").read_text() == source_config
+# Invalid vendor discovery must fail before trust publication or worker exec.
+fake_codex = tmp / "codex-protocol"
+fake_codex.write_text("""#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+home = Path(os.environ["CODEX_HOME"])
+if "app-server" not in sys.argv:
+    (home / "worker-executed").touch()
+    sys.exit(0)
+path = home / "hooks.json"
+command = json.loads(path.read_text())["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+for line in sys.stdin:
+    msg = json.loads(line)
+    if msg.get("method") == "initialize":
+        print(json.dumps({"id": msg["id"], "result": {}}), flush=True)
+    elif msg.get("method") == "hooks/list":
+        hook = {"key": str(path) + ":pre_tool_use:0:0", "eventName": "preToolUse",
+                "handlerType": "command", "command": command, "matcher": ".*", "async": False,
+                "timeoutSec": 10, "enabled": True, "isManaged": False, "source": "user",
+                "sourcePath": str(path), "pluginId": None, "currentHash": "sha256:" + "a" * 64}
+        if os.environ["FM_BAD_HOOK"] == "command":
+            hook["command"] = "touch unexpected"
+        else:
+            hook["currentHash"] = "invalid"
+        print(json.dumps({"id": msg["id"], "result": {"data": [{"errors": [], "hooks": [hook]}]}}), flush=True)
+""")
+fake_codex.chmod(0o700)
+for bad in ("command", "hash"):
+    result = subprocess.run([sys.executable, str(worker), "launch", str(private), str(wt), str(fake_codex)],
+                            env=dict(codex_env, FM_BAD_HOOK=bad), text=True, capture_output=True, timeout=10)
+    assert result.returncode != 0, bad
+    assert "state" not in tomllib.loads((private / "config.toml").read_text())["hooks"]
+    assert not (private / "worker-executed").exists()
+subprocess.run([sys.executable, str(worker), "remove", str(private)], check=True)
+assert not private.exists()
+assert (codex_source / "auth.json").is_fifo()
+assert (codex_source / "rules/local.rules").exists()
+for secret_config in ('[mcp_servers.private]\nargs=["--api-key", "fixture-sensitive-value"]\n',
+                      '[mcp_servers.private.http_headers]\nAuthorization="fixture-sensitive-value"\n',
+                      '[model_providers.private]\nexperimental_bearer_token="fixture-sensitive-value"\n',
+                      '[mcp_servers.private]\nurl="https://user:fixture-sensitive-value@example.invalid"\n'):
+    (codex_source / "config.toml").write_text(secret_config)
+    result = subprocess.run([sys.executable, str(worker), "prepare", str(wt), str(state), "codex"],
+                            env=codex_env, text=True, capture_output=True)
+    assert result.returncode != 0
+    assert "fixture-sensitive-value" not in result.stdout + result.stderr
+    assert not private.exists()
+# A nested source home must never be removed while regenerating the target.
+nested = private / "original"
+nested.mkdir(parents=True)
+(nested / "config.toml").write_text('approval_policy="never"\n')
+result = subprocess.run([sys.executable, str(worker), "prepare", str(wt), str(state), "codex"],
+                        env=dict(os.environ, CODEX_HOME=str(nested)), text=True, capture_output=True)
+assert result.returncode != 0
+assert (nested / "config.toml").exists()
+subprocess.run([sys.executable, str(worker), "remove", str(private)], check=True)
+print("ok - Codex private setup preserves safety, references auth without reading, refuses inline secrets, cleans up links")
+
 poly_hooks = wt / ".polytoken/hooks.json"
 poly_hooks.parent.mkdir()
 poly_hooks.write_text('[{"name":"fm-busy-stop","event":"stop","handler":{"bash":"/unused"}}]')

@@ -677,6 +677,23 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   pass "fm-control relaunch: switching harness is one ordinary relaunch, and the old wiring goes with the old agent"
 }
 
+test_codex_private_home_is_retired_on_harness_switch() {
+  local dir
+  dir=$(new_case codexhome rl-codex-home)
+  add_ship_task "$dir" rl-codex-home codex
+  mkdir -p "$dir/home/state/rl-codex-home.codex-home" "$dir/original-codex/rules"
+  printf 'preserve\n' > "$dir/original-codex/auth.json"
+  printf 'preserve\n' > "$dir/original-codex/rules/local.rules"
+  ln -s "$dir/original-codex/auth.json" "$dir/home/state/rl-codex-home.codex-home/auth.json"
+  ln -s "$dir/original-codex/rules" "$dir/home/state/rl-codex-home.codex-home/rules"
+  printf 'zsh' > "$dir/fake/command"
+  run_spawn "$dir" rl-codex-home --relaunch --harness claude >/dev/null
+  [ ! -e "$dir/home/state/rl-codex-home.codex-home" ] || fail "relaunch retained private Codex home"
+  [ -f "$dir/original-codex/auth.json" ] || fail "relaunch followed auth symlink"
+  [ -f "$dir/original-codex/rules/local.rules" ] || fail "relaunch followed rule symlink"
+  pass "fm-spawn --relaunch: switching away from Codex retires only its private home"
+}
+
 test_refused_relaunch_onto_polytoken_keeps_the_project_hook_layer() {
   local dir out rc
   dir=$(new_case polytokenownhooks rl45)
@@ -2809,6 +2826,7 @@ test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_note_inbox_listing_is_safe_on_empty_inbox
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
+test_codex_private_home_is_retired_on_harness_switch
 test_refused_relaunch_onto_polytoken_keeps_the_project_hook_layer
 test_refused_polytoken_profile_leaves_the_running_agent
 test_relaunch_from_a_raw_polytoken_launch_keeps_the_project_layers

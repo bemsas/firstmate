@@ -3404,7 +3404,7 @@ cleanup_firstmate_home_children() {
       "$sub_state/.$child_id.branch-outcome-index"
     chmod u+w "$sub_state/$child_id.git-hooks" 2>/dev/null || true
     rm -rf "$sub_state/$child_id.git-hooks" "$sub_state/$child_id.push-guard" \
-      "$sub_state/$child_id.cursor-guardrails" \
+      "$sub_state/$child_id.cursor-guardrails" "$sub_state/$child_id.codex-home" \
       "$sub_state/$child_id.polytoken-config" \
       "$sub_state/$child_id.polytoken-sessions" \
       "$sub_state/$child_id.polytoken-sessions-v1"
@@ -3675,6 +3675,7 @@ if [ "$KIND" != secondmate ] && teardown_owns_worktree && [ -d "$WT" ]; then
     "$WT/.opencode/plugins/fm-worker-guardrails.js"
 fi
 if [ "$KIND" != secondmate ]; then
+  rm -rf "$STATE/$ID.codex-home"
   rm -f "$STATE/$ID.cursor-guardrails/hooks/hooks.json" \
     "$STATE/$ID.cursor-guardrails/.cursor-plugin/plugin.json"
   rmdir "$STATE/$ID.cursor-guardrails/hooks" "$STATE/$ID.cursor-guardrails/.cursor-plugin" \

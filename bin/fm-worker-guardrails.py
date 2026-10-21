@@ -4,8 +4,8 @@
 Usage: fm-worker-guardrails.py HARNESS WORKTREE STATE TASK
 Called only for workers, never secondmates. Uses existing lifecycle artifacts
 where possible; Cursor gets a private plugin so project hooks stay untouched.
-Codex's worker hook engine is disabled by its launch policy; muse, rovo and agy
-have no enabled blocking tool-hook surface. These adapters print a coverage gap.
+Codex uses the same handler through fm-codex-worker.py's task-private home.
+Muse, rovo and agy have no enabled blocking surface and print a coverage gap.
 The evaluator's CLI header owns the policy and its limits.
 """
 
@@ -23,10 +23,15 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n")
 
 
+def command_handler(worktree):
+    command = shlex.join(["python3", str(CHECK), "--root", str(worktree)])
+    return {"type": "command", "command": command + " || exit 2", "timeout": 10}
+
+
 def install(harness, worktree, state, task):
     wt, state = Path(worktree), Path(state)
     command = shlex.join(["python3", str(CHECK), "--root", str(wt)])
-    handler = {"type": "command", "command": command + " || exit 2", "timeout": 10}
+    handler = command_handler(wt)
     group = [{"matcher": "*", "hooks": [handler]}]
     if harness == "claude":
         path, event = wt / ".claude/settings.local.json", "PreToolUse"
@@ -104,6 +109,9 @@ function fmInstallWorkerGuard(pi: any) {
 """
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(source)
+        return
+    elif harness == "codex":
+        # The launch wrapper installs this handler into a task-private home.
         return
     elif harness in {"kimi", "commandcode"}:
         # Its global guarded PreToolUse entry is installed by the same

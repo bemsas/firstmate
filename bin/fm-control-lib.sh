@@ -504,6 +504,7 @@ fm_control_harness_wiring_dirs() {  # <harness> <state-dir> <id>
   local harness=${1-} state=${2-} id=${3-}
   [ -n "$state" ] && [ -n "$id" ] || return 1
   case "$harness" in
+    codex) printf '%s\n' "$state/$id.codex-home" ;;
     cursor) printf '%s\n' "$state/$id.cursor-guardrails" ;;
     polytoken)
       printf '%s\n' "$state/$id.polytoken-config"

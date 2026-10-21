@@ -1,97 +1,145 @@
 #!/usr/bin/env bash
-# Live guard for the codex crewmate launch's hook posture.
-#
-# The verdict here comes from the installed codex, not from a stub: a stub can
-# only confirm the assumption already written into it, and what this guard
-# protects is exactly a vendor-owned surface. Codex blocks a fresh crewmate
-# launch on an unanswerable "Hooks need review" modal whenever the machine's
-# ~/.codex/hooks.json or a project's .codex/hooks.json carries a hook it has no
-# persisted trust for, so the crewmate launch disables codex's hook layer
-# outright (bin/fm-spawn.sh's launch template owns the flag).
-#
-# The guard replays the REAL launch flags fm-spawn builds - captured from a
-# spawn driven through a fake pane - against the installed codex and asks codex
-# itself whether hooks ended up disabled. If a codex release renames or drops
-# the feature, the flag becomes a hard "Unknown feature flag" error and this
-# guard fails naming the harness and version instead of letting the modal
-# silently come back.
-#
-# It spends no model tokens (`codex features list` resolves configuration only),
-# so it runs by default wherever codex is installed.
-set -u
-
-# shellcheck source=tests/fixtures.sh
-. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
-
-fm_live_gate default-on FM_CODEX_HOOK_LAYER_LIVE codex
-
+# Installed Codex hook discovery and enforcement, with a loopback Responses
+# fixture, no credentials or provider tokens. Runs by default when installed.
+# The fake Git executable makes a failing guard harmless to any real worktree.
+set -eu
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+fm_live_gate default-on FM_CODEX_HOOK_LAYER_LIVE codex python3
 CODEX_VERSION=$(codex --version 2>&1)
 TMP_ROOT=$(fm_test_tmproot fm-codex-hook-layer-live)
+trap fm_test_cleanup EXIT
+python3 - "$ROOT" "$TMP_ROOT" "$CODEX_VERSION" <<'PY'
+import http.server
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import threading
+import tomllib
 
-# capture_codex_launch <name> <extra fm-spawn args...>: spawns a codex crewmate
-# against a fake pane and echoes the literal launch command firstmate sent.
-capture_codex_launch() {
-  local name=$1
-  shift
-  local case_dir home proj wt fakebin launchlog id
-  case_dir="$TMP_ROOT/$name"
-  home="$case_dir/home"
-  proj="$case_dir/project"
-  wt="$case_dir/wt"
-  launchlog="$case_dir/launch.log"
-  id="codex-hook-layer-$name"
-  fakebin=$(fm_test_make_spawn_fakebin "$case_dir/fake")
-  fm_test_spawn_home "$home" codex
-  fm_test_spawn_brief "$home" "$id"
-  fm_git_worktree "$proj" "$wt" "wt-$name"
-  : > "$launchlog"
-  FM_FAKE_LAUNCH_LOG="$launchlog" \
-    fm_test_run_spawn "$home" "$wt" "$fakebin" "$id" "$proj" "$@" >/dev/null 2>&1 ||
-    fail "codex $CODEX_VERSION: fm-spawn could not build a crewmate launch"
-  cat "$launchlog"
-}
+root, tmp = map(Path, sys.argv[1:3])
+version = sys.argv[3]
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("worker", root / "bin/fm-codex-worker.py")
+worker = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(worker)
+wt, state, original = tmp / "work tree", tmp / "state", tmp / "original"
+(wt / "vendor/basisone").mkdir(parents=True)
+state.mkdir()
+original.mkdir()
+# A FIFO rather than a credential file: any accidental auth read would hang.
+# The real Codex uses the local provider and requires no authentication.
+os.mkfifo(original / "auth.json")
+(original / "AGENTS.md").write_text("Use only this test fixture.\n")
+(original / "rules").mkdir()
+(original / "rules/test.rules").write_text('prefix_rule(pattern=["fake"], decision="forbidden")\n')
+(original / "hooks.json").write_text(json.dumps({"hooks": {"SessionStart": [{"hooks": [
+    {"type": "command", "command": "touch unrelated-hook-ran"}]}]}}))
+(wt / ".codex").mkdir()
+(wt / ".codex/hooks.json").write_text(json.dumps({"hooks": {"SessionStart": [{"hooks": [
+    {"type": "command", "command": "touch project-hook-ran"}]}]}}))
+(original / "config.toml").write_text('approval_policy="never"\nsandbox_mode="danger-full-access"\n'
+    + '[projects.' + json.dumps(str(wt)) + ']\ntrust_level="trusted"\n')
+env = dict(os.environ, CODEX_HOME=str(original))
+subprocess.run([sys.executable, str(root / "bin/fm-codex-worker.py"), "prepare", str(wt), str(state), "t"],
+               env=env, check=True, timeout=10)
+home = state / "t.codex-home"
+assert (home / "auth.json").is_symlink()
+assert os.readlink(home / "auth.json") == str(original / "auth.json")
+assert (home / "rules").is_symlink()
+assert (home / "AGENTS.md").is_symlink()
+# Setup was proven not to read the FIFO. The vendor itself may read login
+# state even for a local provider, so replace only this fixture's FIFO now.
+(original / "auth.json").unlink()
+(original / "auth.json").write_text("{}\n")
+assert not (wt / "unrelated-hook-ran").exists()
+fakegit = wt / "fake/git"
+fakegit.parent.mkdir()
+fakegit.write_text('#!/bin/sh\nprintf reached > "' + str(wt / 'git-ran') + '"\n')
+fakegit.chmod(0o700)
 
-# codex_global_flags <launch command>: the flags between the codex executable
-# and the positional brief, which is everything codex itself is configured by.
-codex_global_flags() {
-  local launch=$1 flags
-  flags=${launch#*codex }
-  flags=${flags%%\"\$(*}
-  printf '%s' "$flags"
-}
+# The fixture chooses tool calls rather than relying on a model to obey a
+# negative test prompt. Every call still traverses the real Codex hook engine.
+calls = [
+    ("exec_command", {"cmd": "printf ordinary > ordinary.txt", "workdir": str(wt)}),
+    ("exec_command", {"cmd": "printf forbidden > vendor/basisone/proof.txt", "workdir": str(wt)}),
+    ("exec_command", {"cmd": str(fakegit) + " worktree prune", "workdir": str(wt)}),
+    ("exec_command", {"cmd": "printf after > after.txt", "workdir": str(wt)}),
+]
+requests = []
 
-test_installed_codex_disables_hooks_for_the_captured_crewmate_launch() {
-  local launch flags state
-  launch=$(capture_codex_launch ship --mode no-mistakes --yolo off)
-  flags=$(codex_global_flags "$launch")
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        requests.append(body)
+        n = len(requests)
+        if n <= len(calls):
+            name, args = calls[n-1]
+            item = {"id": f"fc_{n}", "type": "function_call", "name": name,
+                    "call_id": f"call_{n}", "arguments": json.dumps(args)}
+        else:
+            item = {"id": "msg_done", "type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "DONE"}]}
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        events = [
+            ("response.created", {"response": {"id": f"resp_{n}"}}),
+            ("response.output_item.done", {"output_index": 0, "item": item}),
+            ("response.completed", {"response": {"id": f"resp_{n}", "output": [item],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}}),
+        ]
+        for event, data in events:
+            self.wfile.write(("event: " + event + "\ndata: " + json.dumps({"type": event, **data}) + "\n\n").encode())
+            self.wfile.flush()
 
-  # The whole point: every flag firstmate will launch with, handed to the real
-  # codex, must leave the hook layer off. `features list` reports the effective
-  # state after those flags are applied and contacts no model.
-  state=$(eval "codex $flags features list" 2>&1) ||
-    fail "codex $CODEX_VERSION rejected firstmate's crewmate launch flags: $state"
-  case "$state" in
-    *"Unknown feature flag"*)
-      fail "codex $CODEX_VERSION no longer knows the hook feature firstmate disables: $state"
-      ;;
-  esac
-  printf '%s\n' "$state" | awk '$1 == "hooks" { print $NF }' | grep -qx false ||
-    fail "codex $CODEX_VERSION left hooks enabled for firstmate's crewmate launch flags, so a fresh launch can park on the hook-trust modal"
+    def log_message(self, *args):
+        pass
 
-  printf 'ok - codex %s runs a firstmate crewmate launch with its hook layer disabled\n' "$CODEX_VERSION"
-}
-
-test_installed_codex_still_reports_the_hook_feature() {
-  local listing
-  listing=$(codex features list 2>&1) ||
-    fail "codex $CODEX_VERSION could not list its feature flags: $listing"
-  printf '%s\n' "$listing" | awk '{ print $1 }' | grep -qx hooks ||
-    fail "codex $CODEX_VERSION no longer publishes a hook feature flag; firstmate's crewmate launch needs a new control"
-
-  printf 'ok - codex %s still publishes the hook feature flag firstmate disables\n' "$CODEX_VERSION"
-}
-
-test_installed_codex_still_reports_the_hook_feature
-test_installed_codex_disables_hooks_for_the_captured_crewmate_launch
-
-echo "# all fm-codex-hook-layer-live-e2e tests passed"
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+args = [sys.executable, str(root / "bin/fm-codex-worker.py"), "launch", str(home), str(wt),
+        "codex", "exec", "--skip-git-repo-check", "--ephemeral", "--json",
+        "--dangerously-bypass-approvals-and-sandbox", "-c", 'model_provider="fixture"', "-c",
+        f'model_providers.fixture={{name="fixture",base_url="http://127.0.0.1:{server.server_port}",wire_api="responses",supports_websockets=false}}',
+        "-c", 'model="fixture"', "-c", 'model_reasoning_effort="low"', "Run the local fixture."]
+try:
+    result = subprocess.run(args, cwd=wt, env=env, text=True, capture_output=True, timeout=60)
+finally:
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+assert result.returncode == 0, (version, result.stderr)
+assert len(requests) == len(calls) + 1, (version, len(requests), result.stderr)
+assert (wt / "ordinary.txt").read_text() == "ordinary", (version, result.stderr)
+assert (wt / "after.txt").read_text() == "after", (version, result.stderr)
+assert not (wt / "vendor/basisone/proof.txt").exists(), (version, "protected write executed")
+assert not (wt / "git-ran").exists(), (version, "worktree administration reached fake Git")
+assert not (wt / "unrelated-hook-ran").exists(), (version, "unrelated hook ran")
+outputs = {i["call_id"]: i["output"] for request in requests for i in request.get("input", [])
+           if i.get("type") == "function_call_output"}
+assert "blocked by PreToolUse hook" in outputs["call_2"], outputs
+assert "blocked by PreToolUse hook" in outputs["call_3"], outputs
+config = tomllib.loads((home / "config.toml").read_text())
+assert config["approval_policy"] == "never"
+assert config["sandbox_mode"] == "danger-full-access"
+assert not (wt / "project-hook-ran").exists(), (version, "unrelated project hook ran")
+listed = worker.discover("codex", str(wt), home)["data"][0]["hooks"]
+foreign = [h for h in listed if h["sourcePath"] == str(wt / ".codex/hooks.json")]
+assert len(foreign) == 1 and foreign[0]["trustStatus"] == "untrusted", (version, listed)
+assert len(config["hooks"]["state"]) == 1
+assert next(iter(config["hooks"]["state"])).startswith(str(home / "hooks.json"))
+print(f"ok - {version}: generated guard trusted; ordinary commands run before and after denied calls")
+print(f"ok - {version}: vendor write and worktree administration blocked by real PreToolUse")
+print(f"ok - {version}: unrelated hook untrusted; auth symlink never opened by setup; safety settings preserved")
+worker.remove(home)
+assert not home.exists()
+assert (original / "auth.json").is_file()
+assert (original / "rules/test.rules").exists()
+print(f"ok - {version}: private home removed without touching auth or rule targets")
+PY
+echo '# all fm-codex-hook-layer-live-e2e tests passed'

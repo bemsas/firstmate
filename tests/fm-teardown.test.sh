@@ -834,6 +834,12 @@ test_local_only_merged_to_local_main_allows() {
   wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
 
+  mkdir -p "$case_dir/state/task-x1.codex-home" "$case_dir/original-codex/rules"
+  printf 'preserve\n' > "$case_dir/original-codex/auth.json"
+  printf 'preserve\n' > "$case_dir/original-codex/rules/local.rules"
+  ln -s "$case_dir/original-codex/auth.json" "$case_dir/state/task-x1.codex-home/auth.json"
+  ln -s "$case_dir/original-codex/rules" "$case_dir/state/task-x1.codex-home/rules"
+
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
@@ -841,6 +847,9 @@ test_local_only_merged_to_local_main_allows() {
 
   expect_code 0 "$rc" "merged-main: teardown should succeed when work is merged into local main"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-main: teardown printed a REFUSED line"
+  [ ! -e "$case_dir/state/task-x1.codex-home" ] || fail "teardown retained private Codex home"
+  [ -f "$case_dir/original-codex/auth.json" ] || fail "teardown followed auth symlink"
+  [ -f "$case_dir/original-codex/rules/local.rules" ] || fail "teardown followed rule symlink"
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 

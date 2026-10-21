@@ -2440,33 +2440,14 @@ launch_template() {
     # naming it is passed. A record that cannot be published stops the spawn.
     printf '%s' '__MODELFLAG____EFFORTFLAG____BRIEFDOORBELL__'
     ;;
-  # --disable hooks (equivalent to -c features.hooks=false) turns codex's whole
-  # lifecycle-hook layer off for CREWMATE and SCOUT launches only.
-  # Without it a crewmate launch parks forever on codex's hook-trust modal
-  # ("N hooks are new or changed"), whose selection sits on "Review hooks" -
-  # neither trusting nor declining. Firstmate's key plane carries Enter, Escape
-  # and Ctrl-C with no arrow navigation, so the selection cannot be moved, and
-  # pre-accepting the prompt by writing codex's own trust store would manufacture
-  # an operator consent that was never given. The hooks it asks about are the
-  # OPERATOR's machine-level ~/.codex/hooks.json plus any project-local
-  # .codex/hooks.json, and a crewmate needs none of them: its turn-end signal is
-  # the -c notify= program on this same launch (verified still firing with hooks
-  # disabled, codex-cli 0.151.0), and firstmate's own .codex/hooks.json registers
-  # PRIMARY-session infrastructure that already stands down in a child worktree.
-  # This is the opposite of --dangerously-bypass-hook-trust, which RUNS untrusted
-  # hooks; disabling the feature runs none of them and leaves the operator's
-  # ~/.codex untouched. An unknown feature name is a hard codex error, so a future
-  # release that drops this flag fails the launch loudly instead of silently
-  # restoring the modal.
-  # A secondmate is a firstmate PRIMARY in its own home, and its turn-end guard,
-  # session-start digest, and cd/arm seatbelts are exactly those project hooks
-  # (docs/turnend-guard.md, docs/sessionstart-nudge.md, docs/cd-guard.md), so the
-  # secondmate launch deliberately keeps hooks on.
+  # Codex workers use a task-private config home and guard-only hash trust.
+  # fm-codex-worker.py owns preparation, vetting and trust. Secondmates keep
+  # their primary launch and existing hook review policy.
   codex)
     if [ "$kind" = secondmate ]; then
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'python3 __CODEXWORKER__ launch __CODEXHOME__ __WORKTREE__ codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -5868,6 +5849,9 @@ if [ "$KIND" != secondmate ]; then
   if [ "$RAW_LAUNCH" -eq 0 ]; then
     python3 "$FM_ROOT/bin/fm-worker-guardrails.py" "$HARNESS" "$WT" "$STATE_REAL" "$ID" || exit 1
     case "$HARNESS" in
+    codex)
+      python3 "$FM_ROOT/bin/fm-codex-worker.py" prepare "$WT" "$STATE_REAL" "$ID" || exit 1
+      ;;
     grok) exclude_path '.grok/hooks/fm-worker-guardrails.json' ;;
     opencode) exclude_path '.opencode/plugins/fm-worker-guardrails.js' ;;
     esac
@@ -6228,6 +6212,8 @@ polytoken)
   LAUNCH=${LAUNCH//__POLYTOKENFACETS__/"$(shell_quote "$WT/.polytoken/facets")"}
   ;;
 esac
+LAUNCH=${LAUNCH//__CODEXWORKER__/$(shell_quote "$FM_ROOT/bin/fm-codex-worker.py")}
+LAUNCH=${LAUNCH//__CODEXHOME__/$(shell_quote "$STATE_REAL/$ID.codex-home")}
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 # A record-backed launch brief is published into the state dir of the pane
 # receiving it, which for a secondmate is its own home, not this primary's.

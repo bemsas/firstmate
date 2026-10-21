@@ -22,12 +22,11 @@ The decision persists for the repository, so later worktrees of the same project
 
 ## Hook trust
 
-A second dialog, "Hooks need review - N hooks are new or changed", appears whenever the machine's `~/.codex/hooks.json` or a project's own `.codex/hooks.json` carries a hook Codex has not persisted trust for.
-It is unanswerable rather than merely inconvenient: its selection starts on "Review hooks", which is neither trusting nor declining, and Firstmate's key plane carries Enter, Escape and Ctrl-C with no arrow navigation.
-Writing Codex's own trust store to pre-accept it would manufacture an operator consent that was never given.
-So crewmate and scout launches disable Codex's hook layer outright (`bin/fm-spawn.sh`'s launch template owns the flag), which is the opposite of `--dangerously-bypass-hook-trust` - that flag RUNS the untrusted hooks.
-A crewmate loses nothing: its turn-end signal is the `-c notify=` program on the same launch, and the Firstmate hooks in a project's `.codex/hooks.json` are primary-session infrastructure that stands down in a child worktree.
-A secondmate is a primary in its own home and keeps its hooks, so an unanswerable modal there is still possible and is the operator's own hook review to settle.
+Worker and scout launches use a task-private Codex home and trust only their generated guard; `../../../bin/fm-codex-worker.py` owns the settings, files, credential reference and trust lifecycle.
+They keep their launch-time `notify=` turn-end signal.
+Secondmates and primaries keep the operator's normal hook-review policy.
+Never apply a blanket hook-trust bypass or write the operator's trust store to unblock them.
+[Runtime backend verification](../../../../../docs/verification/runtime-backends.md#codex-hook-trust) records the installed-version proof and its token-free live guard.
 
 ## Skill popup
 
