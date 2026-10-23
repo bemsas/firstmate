@@ -52,13 +52,17 @@
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       the away posture (state/.afk-contract and the legacy
 #                       state/.afk daemon flag), and a cheap per-task
-#                       endpoint-liveness read, each bounded and crash-
-#                       isolated so one task's read can never abort the
-#                       digest: read-only, always runs. The per-task reads
-#                       run serially, so with a wedged backend the stage's
-#                       ceiling is tasks x the per-read bound
-#                       (FM_SESSION_START_ENDPOINT_TIMEOUT, default 10s) and
-#                       can itself reach the digest's runtime bound.
+#                       endpoint-liveness read (a record with remote_host
+#                       set restates its remote route instead, because
+#                       remote liveness belongs to the secondmate liveness
+#                       sweep, never a local backend probe), each bounded
+#                       and crash-isolated so one task's read can never
+#                       abort the digest: read-only, always runs. The
+#                       per-task reads run serially, so with a wedged
+#                       backend the stage's ceiling is tasks x the
+#                       per-read bound (FM_SESSION_START_ENDPOINT_TIMEOUT,
+#                       default 10s) and can itself reach the digest's
+#                       runtime bound.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -916,8 +920,23 @@ for meta in "$STATE"/*.meta; do
   cat "$meta"
 
   window=$(fm_meta_get "$meta" window)
-  target=$(fm_backend_target_of_meta "$meta")
-  if [ -n "$window" ]; then
+  remote_host=$(fm_meta_get "$meta" remote_host)
+  if [ -n "$remote_host" ]; then
+    # A remote secondmate's endpoint lives on its own host, so probing this
+    # host's backend (which defaults to local tmux when backend= is unset)
+    # reports a live remote mate dead. Remote liveness belongs to the
+    # secondmate liveness sweep (bin/fm-bootstrap.sh, harvested in NETWORK
+    # CHECKS), so this line only restates the recorded remote route.
+    remote_backend=$(fm_meta_get "$meta" remote_backend)
+    if [ -n "$window" ]; then
+      printf 'endpoint: remote secondmate (host=%s backend=%s window=%s; liveness owned by the secondmate liveness sweep)\n' \
+        "$remote_host" "${remote_backend:-unknown}" "$window"
+    else
+      printf 'endpoint: remote secondmate (host=%s backend=%s, no window recorded; liveness owned by the secondmate liveness sweep)\n' \
+        "$remote_host" "${remote_backend:-unknown}"
+    fi
+  elif [ -n "$window" ]; then
+    target=$(fm_backend_target_of_meta "$meta")
     backend=$(fm_backend_of_meta "$meta")
     endpoint_rc=0
     fm_session_start_endpoint_read "$backend" "${target:-$window}" "fm-$id" || endpoint_rc=$?

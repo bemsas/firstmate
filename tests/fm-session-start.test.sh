@@ -1627,6 +1627,75 @@ SH
   pass "a digest child killed mid-stage is bannered by the parent, which still exits 0"
 }
 
+test_endpoint_remote_secondmate_never_probes_local_backend() {
+  local rec root home fakebin out probe_log
+  rec=$(new_world liveness-remote-secondmate)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  # A logging tmux: every invocation's arguments are recorded, and the window
+  # inventory answers only the local control session's window, so a local
+  # probe of the remote record would both leave a trace and print a false
+  # endpoint verdict.
+  probe_log="$home/state/tmux-probe.log"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "\$*" >> "$probe_log"
+case "\${1:-}" in
+  display-message)
+    target=""
+    prev=""
+    for a in "\$@"; do
+      [ "\$prev" = "-t" ] && target="\$a"
+      prev="\$a"
+    done
+    [ "\$target" = "fm-sess:live-window" ] && { printf '%%1\n'; exit 0; }
+    exit 1
+    ;;
+  list-windows)
+    target=""
+    prev=""
+    for a in "\$@"; do
+      [ "\$prev" = "-t" ] && target="\$a"
+      prev="\$a"
+    done
+    [ "\$target" = "=fm-sess" ] && { printf 'live-window\n'; exit 0; }
+    printf 'no such session: %s\n' "\$target" >&2
+    exit 1
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+
+  # A remote secondmate record shaped like the real remote metas: window holds
+  # the remote route label, backend= stays unset so a local probe would default
+  # to this host's tmux, and remote_backend names the backend on its own host.
+  printf 'window=remote:mate-r\nkind=secondmate\nharness=claude\nremote_host=farhost\nremote_root=/srv/firstmate\nremote_backend=herdr\nremote_herdr_session=fm-remote\nremote_target=fm-remote:w2:p2\n' \
+    > "$home/state/mate-r.meta"
+  # A local control task proves the loop still probes local records.
+  printf 'window=fm-sess:live-window\nkind=ship\n' > "$home/state/task-live.meta"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "endpoint: remote secondmate (host=farhost backend=herdr window=remote:mate-r; liveness owned by the secondmate liveness sweep)" \
+    "a remote_host record must restate the remote route instead of a local verdict"
+  assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:live-window)" \
+    "local records must keep their local liveness probe"
+  assert_not_contains "$out" "endpoint: dead (backend=tmux window=remote:mate-r)" \
+    "the remote record was probed against the local backend and reported dead"
+  assert_not_contains "$out" "endpoint: alive (backend=tmux window=remote:mate-r)" \
+    "the remote record was probed against the local backend"
+  if grep -Fq 'remote:mate-r' "$probe_log" 2>/dev/null; then
+    fail "the local tmux backend was probed for the remote record"
+  fi
+
+  pass "a remote_host record restates its remote route and never probes the local backend"
+}
+
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
@@ -3072,6 +3141,7 @@ test_endpoint_read_hang_is_bounded_and_reported
 test_endpoint_bound_rejects_padded_zero
 test_perl_timeout_fallback_reports_signal_death_nonzero
 test_abnormal_digest_death_banners_and_exits_zero
+test_endpoint_remote_secondmate_never_probes_local_backend
 test_composition_invokes_real_scripts
 test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched
