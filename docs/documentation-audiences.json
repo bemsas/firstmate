@@ -405,6 +405,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/cost-ledger.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/herdr-backend.md",
       "audience": "operator-current"
     },

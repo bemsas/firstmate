@@ -3663,6 +3663,11 @@ if [ "$KIND" = ship ] && teardown_owns_worktree && [ -e "$CONFIG/pipeline-spend"
     "$SCRIPT_DIR/fm-pipeline-spend.sh" record "$ID" >/dev/null \
     || echo "warning: could not record $ID's no-mistakes pipeline spend; cleanup continues" >&2
 fi
+if { [ "$KIND" = ship ] || [ "$KIND" = scout ]; } && teardown_owns_worktree && [ -e "$CONFIG/cost-ledger" ]; then
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-cost-ledger.sh" record "$ID" >/dev/null \
+    || echo "warning: could not record $ID's cost and quality ledger row; cleanup continues" >&2
+fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
 # pruned code root. Best effort - a sweep failure never blocks this teardown.

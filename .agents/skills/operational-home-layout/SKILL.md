@@ -45,6 +45,8 @@ config/fleet-ledger  optional presence flag opting this home in to the default-o
 config/firstmate-role  optional LOCAL, gitignored firstmate-repository publication role; see docs/configuration.md "Firstmate role" for operator opt-in and secondmate inheritance
 config/wait-no-turns  optional presence flag opting this home into default-off waiting-worker behavior (brief waiting section, foreground pipeline drive, pending-reply hold, one fire-and-forget retry ring); LOCAL, gitignored, and not inherited; see docs/configuration.md "Waiting worker spends no turns"
 config/pipeline-spend  optional presence flag opting this home in to default-off per-task no-mistakes spend recording in data/pipeline-spend.jsonl; LOCAL, gitignored, and not inherited; see docs/configuration.md "No-mistakes pipeline spend"
+config/cost-ledger  optional presence flag opting this home in to default-off per-task cost and quality recording in data/cost-ledger.jsonl; LOCAL, gitignored, and not inherited; see docs/cost-ledger.md
+config/cost-ledger  optional presence flag opting this home in to default-off per-task cost and quality recording in data/cost-ledger.jsonl; LOCAL, gitignored, and not inherited; see docs/cost-ledger.md
 config/turnend-churn-absorb  optional presence flag opting this home into the default-off absorb of bare turn-end wakes on pane churn; LOCAL, gitignored, and not inherited; see docs/configuration.md "Turn-end pane-churn absorb"
 config/done-check  optional `off`/`shadow`/`on` switch for the code-checked done checklist run at PR-ready (default off); LOCAL, gitignored, and not inherited; see docs/configuration.md "Done checklist"
 config/wedge-defer-parked-gate  optional presence flag opting this home into the default-off deferral of a wedge escalation for a lane parked at a validation gate awaiting the supervisor's own still-open decision; LOCAL, gitignored, and not inherited; see docs/configuration.md "Parked-gate wait deferral"
@@ -66,6 +68,8 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
   pipeline-spend.jsonl  optional per-task no-mistakes pipeline spend, written only when config/pipeline-spend is present; bin/fm-pipeline-spend.sh owns the schema
+  cost-ledger.jsonl  optional per-task cost and quality rows, written only when config/cost-ledger is present; bin/fm-cost-ledger.sh owns the schema
+  cost-ledger.jsonl  optional per-task cost and quality rows, written only when config/cost-ledger is present; bin/fm-cost-ledger.sh owns the schema
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
 state/               runtime records and signals; gitignored
   <id>.status        append-only wake events, not current-state truth; bin/fm-classify-lib.sh owns their syntax

@@ -620,6 +620,12 @@ The optional local, gitignored `config/pipeline-spend` presence flag opts this h
 When the flag is absent, teardown skips recording and the recorder exits before reading task metadata, no-mistakes state, or the spend ledger.
 An existing ledger is left untouched while recording is disabled.
 
+## Cost and quality ledger (config/cost-ledger)
+
+The optional local, gitignored `config/cost-ledger` presence flag opts this home into recording per-task cost and quality rows in `data/cost-ledger.jsonl` during ship and scout teardown.
+See [`cost-ledger.md`](cost-ledger.md) for the record contract and query command.
+When the flag is absent, teardown skips recording and the recorder exits before reading task metadata or the ledger.
+
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
 The optional local, gitignored `config/turnend-churn-absorb` presence flag opts this home into a default-off third form of positive work evidence in watcher triage.
