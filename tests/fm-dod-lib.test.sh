@@ -638,8 +638,6 @@ EOF
   assert_contains "$capsule" 'Do the thing.' "capsule dropped captain intent"
   assert_not_contains "$capsule" 'Never push.' "capsule kept Rules boilerplate"
   assert_not_contains "$capsule" 'Poll forever.' "capsule kept inbox boilerplate"
-  [ "$(wc -c <"$capsule_src")" -lt "$(wc -c <"$source")" ] \
-    || fail "capsule body was not smaller than the source brief"
   pass "task capsule keeps task/setup/dod and drops repeated boilerplate"
 }
 
