@@ -163,6 +163,15 @@
 #                          budget and is parked until a probe reads it live
 #                          again (FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS and
 #                          FM_SECONDMATE_LIVENESS_WINDOW_SECS)
+#   check: task <id> auto-relaunched after broken model session (<detail>)
+#                          a ship or scout showed a verified API-error banner
+#                          in the visible pane while semantically idle; the
+#                          watcher relaunched through bin/fm-control.sh with a
+#                          progress note after a stable dwell (bin/fm-broken-
+#                          session-lib.sh)
+#   check: task <id> auto-relaunch failed after broken model session: <detail>
+#   check: task <id> auto-relaunch paused after <n> attempts in <s>s; ...
+#                          the broken-session relaunch bound was exceeded
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock. A live holder whose beacon is stale
@@ -252,6 +261,9 @@ WATCH_HOME_EXISTED=0
 # and wake emission (secondmate_liveness_tick below).
 # shellcheck source=/dev/null # Analyzed separately as a canonical lint root.
 . "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
+# Ship/scout broken model session recovery (API error banner with idle agent).
+# shellcheck source=/dev/null # Analyzed separately as a canonical lint root.
+. "$SCRIPT_DIR/fm-broken-session-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -385,6 +397,17 @@ SECONDMATE_LIVENESS_MAX_ATTEMPTS=${FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS:-}
 case "$SECONDMATE_LIVENESS_MAX_ATTEMPTS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_MAX_ATTEMPTS=3 ;; esac
 SECONDMATE_LIVENESS_WINDOW_SECS=${FM_SECONDMATE_LIVENESS_WINDOW_SECS:-}
 case "$SECONDMATE_LIVENESS_WINDOW_SECS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_WINDOW_SECS=3600 ;; esac
+BROKEN_SESSION_SECS=${FM_BROKEN_SESSION_SECS:-}
+case "$BROKEN_SESSION_SECS" in ''|*[!0-9]*|0) BROKEN_SESSION_SECS=60 ;; esac
+BROKEN_SESSION_MIN_SECS=${FM_BROKEN_SESSION_MIN_SECS:-}
+case "$BROKEN_SESSION_MIN_SECS" in ''|*[!0-9]*|0) BROKEN_SESSION_MIN_SECS=90 ;; esac
+BROKEN_SESSION_TIMEOUT=${FM_BROKEN_SESSION_TIMEOUT:-}
+case "$BROKEN_SESSION_TIMEOUT" in ''|*[!0-9]*|0) BROKEN_SESSION_TIMEOUT=120 ;; esac
+BROKEN_SESSION_MAX_ATTEMPTS=${FM_BROKEN_SESSION_MAX_ATTEMPTS:-}
+case "$BROKEN_SESSION_MAX_ATTEMPTS" in ''|*[!0-9]*|0) BROKEN_SESSION_MAX_ATTEMPTS=3 ;; esac
+BROKEN_SESSION_WINDOW_SECS=${FM_BROKEN_SESSION_WINDOW_SECS:-}
+case "$BROKEN_SESSION_WINDOW_SECS" in ''|*[!0-9]*|0) BROKEN_SESSION_WINDOW_SECS=3600 ;; esac
+BROKEN_SESSION_NOTE='Supervision detected a broken model session (API error shown in the worker pane). Relaunching fresh; committed and uncommitted work in the isolated copy are preserved.'
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -1149,6 +1172,90 @@ secondmate_liveness_tick() {
     if [ -n "$err" ]; then
       echo "watcher: secondmate $id liveness: $err" >&2
       triage_log "secondmate $id liveness error: $err" || true
+      failed=1
+    fi
+  done
+  [ -z "$first_reason" ] || wake "$first_reason"
+  [ "$failed" -eq 0 ]
+}
+
+# Detect ship/scout workers stuck on a visible API error banner and relaunch
+# them with a progress note through the control plane, without touching the
+# recorded worktree.
+broken_session_tick() {
+  local tick_marker="$STATE/.broken-session-tick"
+  [ "$(age_of "$tick_marker")" -ge "$BROKEN_SESSION_SECS" ] || return 0
+  touch "$tick_marker" || return 1
+  local now=$(( $(date +%s) )) meta id kind since_file attempts bound_marker
+  local notify_key reason err first_reason='' failed=0 queued
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    kind=$(fm_meta_get "$meta" kind 2>/dev/null || true)
+    case "$kind" in ship|scout) ;; *) continue ;; esac
+    id=${meta##*/}
+    id=${id%.meta}
+    case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    fm_broken_session_lock "$STATE" "$id" || continue
+    fm_broken_session_probe "$STATE" "$meta" "$id"
+    since_file="$STATE/.broken-session-since-$id"
+    bound_marker="$STATE/.broken-session-bound-$id"
+    reason=''
+    notify_key=''
+    err=''
+    case "$FM_BROKEN_STATUS" in
+      clear)
+        rm -f "$since_file"
+        if [ -e "$bound_marker" ] || [ -L "$bound_marker" ]; then
+          if fm_broken_session_ledger_add "$STATE" "$id" rearmed \
+            && rm -f "$bound_marker"; then
+            triage_log "task $id broken-session pause cleared"
+          else
+            err='broken-session bound marker or ledger could not be cleared'
+          fi
+        fi
+        ;;
+      broken)
+        if [ ! -e "$since_file" ]; then
+          printf '%s\n' "$now" > "$since_file" || err='broken-session dwell marker unwritable'
+        elif [ "$(age_of "$since_file")" -lt "$BROKEN_SESSION_MIN_SECS" ]; then
+          :
+        elif [ -e "$bound_marker" ] || [ -L "$bound_marker" ]; then
+          :
+        elif ! attempts=$(fm_broken_session_recent_attempts "$STATE" "$id" "$BROKEN_SESSION_WINDOW_SECS"); then
+          err='broken-session relaunch ledger is unreadable'
+        elif [ "$attempts" -ge "$BROKEN_SESSION_MAX_ATTEMPTS" ]; then
+          if printf '%s\t%s\n' "$now" "$FM_BROKEN_DETAIL" > "$bound_marker"; then
+            reason="check: task $id auto-relaunch paused after $BROKEN_SESSION_MAX_ATTEMPTS attempts in ${BROKEN_SESSION_WINDOW_SECS}s; broken model session persists ($FM_BROKEN_DETAIL) - relaunch manually or inspect the worker"
+            notify_key="broken-session-bound-$id"
+          else
+            err='broken-session park marker could not be written'
+          fi
+        elif fm_broken_session_relaunch "$STATE" "$id" "$BROKEN_SESSION_NOTE" "$BROKEN_SESSION_TIMEOUT"; then
+          reason="check: task $id auto-relaunched after broken model session ($FM_BROKEN_DETAIL; backend=$FM_BROKEN_BACKEND)"
+          notify_key="broken-session-$id-$now"
+          rm -f "$since_file"
+        else
+          reason="check: task $id auto-relaunch failed after broken model session: $(fm_broken_session_first_line "$FM_BROKEN_REL_OUT")"
+          notify_key="broken-session-failed-$id-$now"
+        fi
+        ;;
+      skip)
+        triage_log "task $id broken-session: ${FM_BROKEN_DETAIL:-skipped}"
+        ;;
+    esac
+    if [ -n "$reason" ]; then
+      queued=$(fm_wake_queued_keys check)
+      if printf '%s\n' "$queued" | grep -Fx "$notify_key" >/dev/null 2>&1 \
+        || fm_wake_append check "$notify_key" "$reason"; then
+        [ -n "$first_reason" ] || first_reason=$reason
+      else
+        err="check wake row could not be queued: $reason"
+      fi
+    fi
+    fm_broken_session_unlock "$STATE" "$id"
+    if [ -n "$err" ]; then
+      echo "watcher: task $id broken-session: $err" >&2
+      triage_log "task $id broken-session error: $err" || true
       failed=1
     fi
   done
@@ -2916,6 +3023,11 @@ while :; do
   # any relaunch and the restarted watcher will not re-probe early.
   secondmate_liveness_tick || {
     echo "watcher: secondmate liveness check failed" >&2
+    exit 1
+  }
+
+  broken_session_tick || {
+    echo "watcher: broken model session check failed" >&2
     exit 1
   }
 
