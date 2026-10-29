@@ -28,6 +28,17 @@
 #              else data/<id>/report.md or tests.log mentioning the command; with no
 #              evidence file the check is unknown. A receipt head that differs from the
 #              PR head is noted, not failed, because a validation pipeline may add commits.
+#   proof      the ready report (the task's last done: line in state/<id>.status)
+#              carries the visual-proof rider bin/fm-dod-lib.sh's Definition of
+#              done requires on UI changes. A declared `proof=<path>[,...]` names
+#              comma-separated files that must each exist, be non-empty, and end
+#              in a visual extension (png jpg jpeg webp gif bmp tif tiff mp4
+#              webm mov mkv, case-insensitive); `proof=none` declares that
+#              nothing user-visible changed. With no rider - including an
+#              unreadable status file - the check fails when the PR's changed
+#              files end in a UI extension (css scss sass less html htm tsx jsx
+#              vue svelte svg, case-insensitive) and skips otherwise; a missing
+#              worktree or base ref is unknown, never a bounce.
 # Git reads run in the task's worktree against refs already there; nothing is fetched.
 # An unreadable fact is unknown, never a failure: unknown never bounces.
 #
@@ -326,6 +337,68 @@ TESTS_EOF
     note tests fail "tests the brief names were not shown passing: $MISSING; run them and record the result in data/$ID/receipt.json"
   else
     note tests pass "every named test ran${HEAD_NOTE}"
+  fi
+fi
+
+# --- proof ----------------------------------------------------------------
+# The visual-proof rider: bin/fm-dod-lib.sh's Definition of done tells the
+# worker to end a UI change's ready report - the task's final done: line -
+# with `proof=<paths>` or `proof=none`. This check verifies the rider without
+# re-teaching it: a declared rider must name real screenshot/video files, and
+# an absent rider fails only when the PR itself changes UI-extension files.
+proof_path_is_visual() {  # <path>
+  local v=$1
+  v=$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')
+  case "$v" in
+    *.png|*.jpg|*.jpeg|*.webp|*.gif|*.bmp|*.tif|*.tiff|*.mp4|*.webm|*.mov|*.mkv) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+PROOF_STATUS="$STATE/$ID.status"
+PROOF_DONE_LINE=
+if [ -f "$PROOF_STATUS" ] && [ ! -L "$PROOF_STATUS" ]; then
+  PROOF_DONE_LINE=$(grep -E '^done([[:space:]]|:|\[)' "$PROOF_STATUS" 2>/dev/null | tail -1)
+fi
+PROOF_TOKEN=
+if [ -n "$PROOF_DONE_LINE" ]; then
+  PROOF_TOKEN=$(printf '%s\n' "$PROOF_DONE_LINE" | tr ' ' '\n' | sed -n 's/^proof=//p' | tail -1)
+fi
+if [ "$PROOF_TOKEN" = none ]; then
+  note proof pass "the ready report declares proof=none: no user-visible change"
+elif [ -n "$PROOF_TOKEN" ]; then
+  BAD_PROOF=
+  PROOF_REST=$PROOF_TOKEN
+  while [ -n "$PROOF_REST" ]; do
+    PROOF_ONE=${PROOF_REST%%,*}
+    if [ "$PROOF_ONE" = "$PROOF_REST" ]; then PROOF_REST=; else PROOF_REST=${PROOF_REST#*,}; fi
+    if [ -f "$PROOF_ONE" ] && [ -s "$PROOF_ONE" ] && proof_path_is_visual "$PROOF_ONE"; then
+      continue
+    fi
+    BAD_PROOF="${BAD_PROOF}${BAD_PROOF:+, }$PROOF_ONE"
+  done
+  if [ -n "$BAD_PROOF" ]; then
+    note proof fail "proof files missing, empty, or not screenshots/video: $BAD_PROOF; capture the running app under data/$ID/proof/ and report done again"
+  else
+    note proof pass "the ready report carries visual proof"
+  fi
+elif [ "$GIT_OK" != 1 ]; then
+  note proof unknown "$GIT_WHY; cannot read whether the PR changes UI files"
+else
+  UI_CHANGED=
+  while IFS= read -r pfile; do
+    [ -n "$pfile" ] || continue
+    pfile=$(printf '%s' "$pfile" | tr '[:upper:]' '[:lower:]')
+    case "$pfile" in
+      *.css|*.scss|*.sass|*.less|*.html|*.htm|*.tsx|*.jsx|*.vue|*.svelte|*.svg)
+        UI_CHANGED="${UI_CHANGED}${UI_CHANGED:+, }$pfile" ;;
+    esac
+  done <<PROOF_FILES_EOF
+$(git -C "$WT" diff --name-only "$BASE_REF...$HEAD" 2>/dev/null)
+PROOF_FILES_EOF
+  if [ -n "$UI_CHANGED" ]; then
+    note proof fail "the PR changes UI files ($UI_CHANGED) but the ready report carries no proof rider; capture screenshots or a short video of the running app under data/$ID/proof/ and report done again with ' proof=<paths>' appended to the done line, or ' proof=none' when nothing user-visible changed"
+  else
+    note proof skip "no UI-facing files changed and no proof rider declared"
   fi
 fi
 

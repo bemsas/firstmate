@@ -66,8 +66,10 @@ fm_write_meta "$HOME_DIR/state/task-a.meta" \
 # reset_pr: fresh feature branch off the base, no brief, receipt, config, or counters.
 reset_pr() {
   git -C "$REPO" checkout -q -f -B feature "$BASE_SHA"
+  rm -rf "$HOME_DIR/data/task-a/proof"
   rm -f "$HOME_DIR/data/task-a/"* "$HOME_DIR/config/done-check" "$HOME_DIR/state/task-a.done-check" \
     "$HOME_DIR/state/done-check.log" "$SEND_LOG" "$HOME_DIR/state/task-a.check.sh"
+  rm -f "$HOME_DIR/state/task-a.status"
   : > "$SEND_LOG"
 }
 
@@ -289,6 +291,50 @@ test_tests_must_have_run() {
   pass "tests named in the brief must be shown run and passing"
 }
 
+write_status_done() { printf '%s\n' "$@" > "$HOME_DIR/state/task-a.status"; }
+
+test_proof_rider_on_ui_prs() {
+  reset_pr
+  rm -f "$HOME_DIR/state/task-a.status"
+  commit_file bin/tool.sh two
+  check FM_DONE_CHECK=on
+  assert_equals skip "$(result_of proof)" "no UI files changed and no rider declared"
+  commit_file web/src/App.tsx 'export default () => <div/>'
+  check FM_DONE_CHECK=on
+  expect_code 10 "$RC" "UI files without a proof rider bounce"
+  assert_equals fail "$(result_of proof)" "UI-facing files demand proof"
+  assert_contains "$(cat "$SEND_LOG")" 'proof' "the steer asks for visual proof"
+  write_status_done "done [at=1]: $URL proof=none"
+  check FM_DONE_CHECK=on
+  assert_equals pass "$(result_of proof)" "proof=none declares no user-visible change"
+  expect_code 0 "$RC" "proof=none leaves the PR clean"
+  mkdir -p "$HOME_DIR/data/task-a/proof"
+  printf 'x' > "$HOME_DIR/data/task-a/proof/home.png"
+  printf 'x' > "$HOME_DIR/data/task-a/proof/flow.mp4"
+  write_status_done "done [at=1]: $URL checks green proof=$HOME_DIR/data/task-a/proof/home.png,$HOME_DIR/data/task-a/proof/flow.mp4"
+  check FM_DONE_CHECK=on
+  assert_equals pass "$(result_of proof)" "a rider naming real screenshot and video files"
+  expect_code 0 "$RC" "a UI PR with attached proof passes"
+  write_status_done "done [at=1]: $URL proof=$HOME_DIR/data/task-a/proof/gone.png"
+  check FM_DONE_CHECK=on
+  assert_equals fail "$(result_of proof)" "a rider naming a missing file"
+  printf 'x' > "$HOME_DIR/data/task-a/proof/notes.md"
+  write_status_done "done [at=1]: $URL proof=$HOME_DIR/data/task-a/proof/notes.md"
+  check FM_DONE_CHECK=on
+  assert_equals fail "$(result_of proof)" "a text file is not visual proof"
+  rm -f "$HOME_DIR/state/task-a.status"
+  check FM_DONE_CHECK=on
+  assert_equals fail "$(result_of proof)" "an unreadable ready report does not waive proof on a UI PR"
+  reset_pr
+  commit_file bin/tool.sh two
+  rm -f "$HOME_DIR/state/task-a.done-check"
+  check FM_DONE_CHECK=on
+  assert_equals skip "$(result_of proof)" "no UI files changed needs no rider"
+  reset_pr
+  rm -rf "$HOME_DIR/data/task-a/proof" "$HOME_DIR/state/task-a.status"
+  pass "a UI PR's ready report must carry a verified proof rider"
+}
+
 test_shadow_logs_and_never_acts() {
   reset_pr
   commit_file VISION.md changed
@@ -483,6 +529,7 @@ test_unconfirmed_steer_is_not_counted
 test_unreadable_facts_never_bounce
 test_pr_check_hook
 
+test_proof_rider_on_ui_prs
 test_auto_records_pr
 test_watcher_runs_done_check on
 test_watcher_runs_done_check shadow

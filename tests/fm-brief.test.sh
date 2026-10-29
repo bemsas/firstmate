@@ -216,6 +216,7 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep '## Base branch' "$brief" "$id: base checklist heading absent"
     assert_grep '## Files in scope' "$brief" "$id: scope checklist heading absent"
     assert_grep '## Tests' "$brief" "$id: tests checklist heading absent"
+    assert_grep '## Visual proof for UI changes' "$brief" "$id: brief missing the visual-proof rider"
     assert_grep 'never a bare number such as "PR 108"' "$brief" "$id: brief missing the full-PR-URL rule"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"

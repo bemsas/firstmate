@@ -393,6 +393,23 @@ EOF
 
 # The draft check the DoD hands a worker must be the gh-axi path that rule 3 of
 # every ship brief requires for GitHub operations, never raw gh (issue 5325).
+# Every ship Definition of done ends with the visual-proof rider, whatever the
+# mode or forge, so a UI change's ready report always names its proof files.
+test_every_ship_dod_carries_the_ui_proof_rider() {
+  local mode out
+  for mode in no-mistakes direct-PR local-only; do
+    out="$TMP_ROOT/dod-proof-$mode.md"
+    fm_dod_block "$mode" dod-proof-task > "$out"
+    assert_grep '## Visual proof for UI changes' "$out" "$mode: DoD missing the visual-proof section"
+    assert_grep 'proof=<path>[,<path>...]' "$out" "$mode: DoD missing the proof= marker syntax"
+    assert_grep 'proof=none' "$out" "$mode: DoD missing the proof=none escape"
+  done
+  out="$TMP_ROOT/dod-proof-gerrit.md"
+  fm_dod_block no-mistakes dod-proof-task fm/dod-proof-task gerrit > "$out"
+  assert_grep '## Visual proof for UI changes' "$out" "gerrit: DoD missing the visual-proof section"
+  pass "every ship Definition of done carries the UI visual-proof rider"
+}
+
 test_pr_based_dod_draft_check_uses_gh_axi() {
   local mode out
   for mode in direct-PR no-mistakes; do
@@ -438,6 +455,8 @@ EOF
       # shellcheck disable=SC2016
       assert_grep 'against the base branch `feature/hub`' "$home/data/$id/ship-instructions.md" \
         "promotion did not target the PR at the recorded base"
+      assert_grep '## Visual proof for UI changes' "$home/data/$id/ship-instructions.md" \
+        "promotion did not carry the UI visual-proof rider"
       assert_grep 'base_branch=feature/hub' "$meta" "promotion dropped the recorded base"
     else
       [ "$status" -ne 0 ] || fail "promoting a based scout to local-only should be refused"
@@ -467,6 +486,7 @@ test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
+test_every_ship_dod_carries_the_ui_proof_rider
 test_promotion_keeps_the_recorded_base_branch
 
 # The launch role is the generated text a worker receives. It must keep the

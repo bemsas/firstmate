@@ -9,7 +9,8 @@
 # fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>]
 # prints the block on stdout with no trailing blank line. The caller validates the
 # mode; an unknown mode is refused rather than silently rendered as the pipeline
-# contract.
+# contract. Every mode block ends with fm_dod_ui_proof_block, the visual-proof
+# rider a UI change's ready report must carry.
 # The optional third argument is the task's full ship-branch name (a project's
 # registered prefix may replace the legacy `fm/` one); it defaults to `fm/<task-id>`
 # and is the immutable task branch rendered in every delivery contract.
@@ -499,7 +500,30 @@ There is no pull request, no \`gh-axi\` call, and no forge CI result to report: 
 EOF
 }
 
+# The visual-proof rider every ship Definition of done carries: a UI change's
+# ready report names its screenshots or video. Rendered once here for both
+# emitters - bin/fm-brief.sh scaffolds and bin/fm-promote.sh promotions - so
+# the rider contract has one owner. The marker lives on the task's final
+# `done:` line as `proof=<path>[,<path>...]` (comma-separated absolute paths)
+# or `proof=none` when UI-shaped files changed but nothing user-visible did;
+# bin/fm-done-check.sh's proof check verifies it mechanically on GitHub pull
+# requests and owns the extension sets both sides use.
+fm_dod_ui_proof_block() {  # <task-id>
+  local id=$1
+  cat <<EOF
+
+## Visual proof for UI changes
+If this change touches what the app's users see or interact with, attach visual proof to your ready report: capture screenshots or a short video of the running app under data/$id/proof/ - chrome-devtools-axi captures browser screenshots - and append \` proof=<path>[,<path>...]\`, the proof files as comma-separated absolute paths, to your final \`done:\` line.
+A UI change reported without visual proof is an incomplete report; when nothing user-visible changed even though UI-shaped files did, append \` proof=none\` to that same \`done:\` line.
+EOF
+}
+
 fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
+  fm_dod_block_mode "$@" || return 1
+  fm_dod_ui_proof_block "$2"
+}
+
+fm_dod_block_mode() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-}
   local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check adapter
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1

@@ -653,6 +653,7 @@ Secondmate and scout status channels do not bind PRs through this hook, and chec
 `on` additionally steers the worker back through `fm-send` with the specific failures, at most twice per task; the next failure exits `11` so firstmate escalates, and a bounce or escalation leaves merge monitoring unarmed until the worker reports done on a new head.
 An unreadable fact (forge error, missing worktree ref, no test evidence) is `unknown` and never bounces.
 The checks read the task's brief at `data/<id>/brief.md`: `## Base branch` (or `FM_DONE_CHECK_BASE`, or meta `base=`) names the intended base, `## Files in scope` lists glob bullets, and `## Tests` lists the commands the worker must show passing in `data/<id>/receipt.json`, `report.md`, or `tests.log`; a section that is absent skips its check.
+The `proof` check reads no brief section: it reads the ready-report `done:` line in `state/<id>.status` for the visual-proof rider a UI change's Definition of done requires and verifies the named screenshot or video files exist, failing only when the rider is absent and the PR's changed files carry UI extensions.
 `bin/fm-done-check.sh`'s header owns the exact checks, receipt shape, and exit codes.
 
 ## Parked-gate wait deferral (config/wedge-defer-parked-gate)
