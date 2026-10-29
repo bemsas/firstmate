@@ -72,6 +72,8 @@ STALE_BANNER_MARKER="$STATE/.guard-watcher-stale-banner"
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
+# shellcheck source=bin/fm-captain-status-age-lib.sh
+. "$SCRIPT_DIR/fm-captain-status-age-lib.sh"
 
 # The current actor (fm_lease_actor is the one owner of that identity); a
 # malformed value is a wiring bug elsewhere, so the guard just warns as main.
@@ -170,6 +172,12 @@ if [ -n "$tangle_branch" ]; then
     fi
     printf '●%s\n' "$trule"
   } >&2
+fi
+
+# Captain-status freshness: warn main when the COO mate's summary file is stale.
+# Independent of watcher health; branch actors stay silent (they report upstream).
+if [ "$GUARD_ACTOR" = main ]; then
+  fm_captain_status_age_warn || true
 fi
 
 # Compute supervision need and watcher-beacon freshness via the shared
