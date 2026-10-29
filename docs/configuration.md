@@ -1529,6 +1529,7 @@ This section is the single owner of that universal toolchain list; backend guide
 
 In that list, no-mistakes runs the validation pipeline, gh-axi and chrome-devtools-axi cover GitHub and browser operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
 When browser work should happen in a window a person can watch and log in through, or chrome-devtools-axi cannot launch its own browser, `eval "$(bin/fm-browser.sh start)"` starts a visible Chrome or Chromium with a persistent profile private to this home and points chrome-devtools-axi at it; [`bin/fm-browser.sh`](../bin/fm-browser.sh) owns its options and `stop`.
+To send element feedback from that page to the worker that owns a task, open the app or Lavish sketch URL in the visible browser, then run `bin/fm-pick-element.sh pick <task-id>` (or `send` with a snapshot ref or CSS selector); [`bin/fm-pick-element.sh`](../bin/fm-pick-element.sh) owns capture, artifacts under `data/<task-id>/pick/`, and delivery through `fm-send.sh`.
 Lavish is a presentation-only dependency for visual decisions and reports; nonvisual work can proceed with plain text when it is unavailable.
 
 **Backend requirements**
