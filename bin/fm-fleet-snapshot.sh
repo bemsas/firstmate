@@ -353,7 +353,11 @@ crew_state_json() {  # <id> [<captured-meta>] [<captured-status>]
       ;;
   esac
   jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" \
-    '{state:$state,source:$source,detail:$detail,raw:$raw}'
+    --arg wait_owner "$(printf '%s' "$raw" | sed -n 's/.* · wait-owner: \([^ ·]*\).*/\1/p')" \
+    --arg wait_reason "$(printf '%s' "$raw" | sed -n 's/.* · wait-reason: \(.*\) · wait-action:.*/\1/p')" \
+    --arg wait_action "$(printf '%s' "$raw" | sed -n 's/.* · wait-action: \(.*\)$/\1/p')" \
+    '{state:$state,source:$source,detail:$detail,raw:$raw,
+      wait:(if ($wait_owner|length)>0 then {owner:$wait_owner,reason:$wait_reason,action:$wait_action} else null end)}'
 }
 
 status_event_json() {  # <observed-status-log> [<contract-path>]

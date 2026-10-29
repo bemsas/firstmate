@@ -265,6 +265,10 @@ if command -v jq >/dev/null 2>&1; then
 else
   printf 'contributions: jq unavailable; coverage is unconfirmed\n' >&2
 fi
+if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
+  "$SCRIPT_DIR/fm-pr-feedback.sh" arm "$ID" >/dev/null 2>&1 \
+    || printf 'pr-feedback: worker CI/review watch not armed\n' >&2
+fi
 # In a secondmate home the registration itself is a captain-facing fact:
 # publish the child's PR-ready line with the canonical URL just recorded, so it
 # reaches the parent whether or not the mate model appends anything

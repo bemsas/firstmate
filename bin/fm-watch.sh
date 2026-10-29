@@ -199,6 +199,8 @@ WATCH_HOME_EXISTED=0
 # runtime needlessly spends per-root CI lint memory while adding no uncovered file.
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-push-transition-lib.sh"
+# shellcheck source=bin/fm-wait-evidence-lib.sh
+. "$SCRIPT_DIR/fm-wait-evidence-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # Only for the arm-time check on FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS below;
@@ -1246,10 +1248,6 @@ wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
 # left into another field's position. US is not IFS whitespace, so consecutive
 # delimiters yield genuinely empty fields and the record either parses as written
 # or fails the deferral's guard.
-wait_record() {  # <kind> <subject> <whom> <action> <age-record>
-  printf '%s\037%s\037%s\037%s\037%s' "$1" "$2" "$3" "$4" "$5"
-}
-
 # The evidence that a quiet pane is a BOUNDED WAIT rather than a wedge suspect,
 # read at the one moment it decides anything: when an escalation is about to
 # fire. Two records answer it, and they are independent: the worker's own status
@@ -1327,39 +1325,6 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 # so it is taken only behind a first fold read that finds some open
 # `needs-decision` at all, and only in the at-threshold branch - at most once per
 # window per STALE_ESCALATE_SECS, never on an ordinary poll.
-WEDGE_BACKLOG_HOLD_KIND='captain hold'
-wedge_wait_evidence() {  # <task> -> one wait_record on stdout
-  local task=$1 last until statusf run
-  [ -n "$task" ] || return 1
-  statusf="$STATE/$task.status"
-  last=$(status_declared_wait_line "$statusf")
-  if status_is_captain_held "$last"; then
-    wait_record 'captain-held' 'awaiting the captain - verified hold transfer' \
-      captain 'answer the held decision or release the hold' "$statusf"
-    return 0
-  fi
-  if status_is_paused "$last" \
-    && { ! until=$(status_paused_until "$last") || [ "$(date +%s)" -lt "$until" ]; }; then
-    wait_record 'declared wait' 'awaiting external' \
-      external 'confirm the wait still holds' "$statusf"
-    return 0
-  fi
-  if task_captain_call_open "$task"; then
-    wait_record "$WEDGE_BACKLOG_HOLD_KIND" 'awaiting the captain - held in the backlog' \
-      captain 'answer the held decision or release the hold' ''
-    return 0
-  fi
-  [ -e "$CONFIG/wedge-defer-parked-gate" ] || return 1
-  if status_has_open_needs_decision "$statusf" \
-    && run=$(crew_gate_awaits_human_decision "$task") \
-    && status_has_open_needs_decision "$statusf" "$run"; then
-    wait_record 'verified wait at a parked gate' "awaiting firstmate's ask-user decision" \
-      supervisor "decide the gate's ask-user finding and relay the decision to the crewmate" ''
-    return 0
-  fi
-  return 1
-}
-
 # Defer ONE wedge escalation for a pane whose wait record explains the quiet
 # (wedge_wait_evidence above). Deliberately the same shape as
 # wedge_defer_writing: a DEFERRAL, not a cancellation, so the idle timer restarts
@@ -1429,7 +1394,7 @@ EOF
   if [ "$whom" = captain ] && away_record_present; then
     # The backlog hold alone costs a backlog read to prove, so restart its idle
     # timer to keep that read at one per STALE_ESCALATE_SECS instead of every poll.
-    [ "$kind" != "$WEDGE_BACKLOG_HOLD_KIND" ] || date +%s > "$since_file"
+    [ "$kind" != "$WAIT_EVIDENCE_BACKLOG_HOLD_KIND" ] || date +%s > "$since_file"
     triage_log "absorbed $label ($kind, never rechecked while the away-posture record exists): $win"
     return 0
   fi
@@ -1671,7 +1636,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       fm_epoch_seconds_to age
       age=$(( age - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
-        if evidence=$(wedge_wait_evidence "$task") &&
+        if evidence=$(task_wait_evidence "$task") &&
            wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence"; then
           return 0
         fi
@@ -1991,9 +1956,8 @@ CAPTAIN_CALL_IDENTITY=
 task_captain_call_open() {  # <task>
   local task=$1
   CAPTAIN_CALL_IDENTITY=
-  [ -n "$task" ] || return 1
-  CAPTAIN_CALL_IDENTITY=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" \
-    open "$task" --identity 2>/dev/null) || return 1
+  task_wait_evidence_open_call "$task" || return 1
+  CAPTAIN_CALL_IDENTITY=$TASK_WAIT_CALL_IDENTITY
   return 0
 }
 

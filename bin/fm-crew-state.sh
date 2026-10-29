@@ -183,6 +183,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-wait-evidence-lib.sh
+. "$SCRIPT_DIR/fm-wait-evidence-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -214,10 +216,31 @@ FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
 
+# Append structured wait fields when this crew is in a bounded wait.
+crew_state_wait_suffix() {
+  local record suffix
+  if record=$(task_wait_evidence_status "$ID" 2>/dev/null) \
+    && suffix=$(wait_record_format_suffix "$record" 2>/dev/null); then
+    printf '%s' "$suffix"
+    return 0
+  fi
+  if [ "${RUN_STATE:-}" = parked ] && [ -n "${RUN_GATE_HUMAN:-}" ]; then
+    record=$(wait_record 'verified wait at a parked gate' "awaiting firstmate's ask-user decision" \
+      supervisor "decide the gate's ask-user finding and relay the decision to the crewmate" '')
+    suffix=$(wait_record_format_suffix "$record" 2>/dev/null) || return 1
+    printf '%s' "$suffix"
+    return 0
+  fi
+  return 1
+}
+
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
-  local line="state: $1${SEP}source: $2"
+  local line="state: $1${SEP}source: $2" suffix
   [ -n "${3:-}" ] && line="$line${SEP}$3"
+  if suffix=$(crew_state_wait_suffix 2>/dev/null); then
+    line="$line$suffix"
+  fi
   printf '%s\n' "$line"
   exit 0
 }
@@ -1202,6 +1225,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       # compare a whole component for equality, so nothing a gate name or a
       # later note happens to contain can mint it.
       if nm_gate_awaits_human_decision; then
+        RUN_GATE_HUMAN=1
         RUN_DETAIL="$RUN_DETAIL${SEP}$FM_GATE_HUMAN_DECISION"
       fi
     else
