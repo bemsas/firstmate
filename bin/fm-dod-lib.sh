@@ -106,13 +106,14 @@
 # restating the rule.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
-# fm_brief_worker_role owns the ship/scout role scope. bin/fm-spawn.sh is its one
-# emitter, supplying it first in every ship/scout launch brief and never to a
-# secondmate charter. It names the one task-owned steering inbox without
-# relaxing isolation from every other home's endpoint namespace. Like
-# fm_brief_intent_overlay it is a distinctly titled launch section that states
-# its own precedence, so a brief or project instruction that authors a
-# conflicting role is superseded rather than duplicated.
+# fm_brief_worker_role owns the ship/scout role scope. bin/fm-spawn.sh supplies
+# it first in every ship/scout launch brief and never to a secondmate charter,
+# followed by fm_brief_task_capsule_from_source rather than the full brief.md
+# body. It names the one task-owned steering inbox without relaxing isolation
+# from every other home's endpoint namespace. Like fm_brief_intent_overlay it is
+# a distinctly titled launch section that states its own precedence, so a brief
+# or project instruction that authors a conflicting role is superseded rather
+# than duplicated.
 # The code root argument is the Firstmate checkout that holds
 # .agents/skills/firstmate-coding-guidelines/SKILL.md. A worker in a Firstmate
 # worktree loads that skill by name from its own checkout. A worker whose
@@ -152,7 +153,57 @@ EOF
   printf "If the \`firstmate-coding-guidelines\` skill name does not resolve in this session, read \`%s/.agents/skills/firstmate-coding-guidelines/SKILL.md\` instead.\n" "$root"
 }
 
-# Closed-set gate shared by every forge-aware renderer and bin/fm-brief.sh, so a
+# fm_brief_task_capsule_from_source owns the compact launch prompt body.
+# bin/fm-spawn.sh prepends fm_brief_worker_role, appends fm_brief_intent_overlay
+# for no-mistakes ships, and records launch_context_* sizes after publish.
+# The full authored contract stays at data/<id>/brief.md; the capsule omits
+# repeated operational boilerplate that remains authoritative in that file.
+fm_brief_task_capsule_progress_notes() {  # <source-brief>
+  awk '
+    BEGIN { capture = 0 }
+    /^## Progress note / {
+      if (capture) printf "\n"
+      capture = 1
+      print
+      next
+    }
+    capture && /^# / { capture = 0 }
+    capture { print }
+  ' "$1"
+}
+
+fm_brief_task_capsule_from_source() {  # <source-brief> <state-dir> <task-id> <code-root>
+  local source=$1 state=$2 id=$3 root=$4 task setup dod progress
+  [ -f "$source" ] || return 1
+  printf '%s\n' \
+    '# Task capsule' \
+    "This launch prompt is a compact capsule. The authoritative full task contract lives at \`$source\`; read it at natural checkpoints, before declaring done, and whenever you need a rule this capsule omits."
+  task=$(fm_brief_heading_body "$source" "# Task") || return 1
+  [ -n "$task" ] || return 1
+  printf '%s\n' "$task"
+  progress=$(fm_brief_task_capsule_progress_notes "$source")
+  [ -n "$progress" ] && printf '%s\n' "$progress"
+  if fm_brief_heading_present "$source" "# Herdr lifecycle declaration - NOT ENABLED"; then
+    printf '\n'
+    fm_brief_heading_body "$source" "# Herdr lifecycle declaration - NOT ENABLED"
+  fi
+  setup=$(fm_brief_heading_body "$source" "# Setup" 2>/dev/null) || setup=
+  if [ -n "$setup" ]; then
+    printf '\n# Setup\n%s\n' "$setup"
+  fi
+  fm_brief_heading_present "$source" "# Definition of done" || return 1
+  dod=$(fm_brief_heading_body "$source" "# Definition of done")
+  printf '\n# Definition of done\n%s\n' "$dod"
+  cat <<EOF
+
+# Operations (compact)
+Append status lines to \`$state/$id.status\`.
+Steering inbox: \`$state/$id.inbox\` — list \`*.msg\` in numeric order, act, then move each handled message to \`handled/\`.
+All other rules, waits, project-memory bounds, and home-specific additions live only in the full contract at \`$source\`.
+EOF
+}
+
+# Closed-set gate shared by every forge-aware renderer and bin/fm-brief.sh
 # caller cannot reach a half-rendered contract. local-only is refused rather than
 # rendered with an inert annotation: it publishes nothing, and its landing
 # fast-forwards local main with content the review server has never seen.

@@ -597,6 +597,53 @@ test_external_dod_renders_the_adapter
 test_external_review_done_without_backup_is_accepted_on_the_url
 test_external_review_done_with_backup_needs_the_copy
 
+test_task_capsule_omits_boilerplate_sections() {
+  local dir source capsule_src capsule
+  dir="$TMP_ROOT/capsule-lib"
+  mkdir -p "$dir/state"
+  source="$dir/brief.md"
+  cat >"$source" <<'EOF'
+You are a crewmate.
+
+# Task
+## Captain's intent
+Do the thing.
+
+## Firstmate spec
+Verify the capsule.
+
+# Setup
+Verify isolation first.
+
+# Rules
+Never push.
+Repeat this operational boilerplate many times so the full brief dwarfs the capsule.
+Repeat this operational boilerplate many times so the full brief dwarfs the capsule.
+Repeat this operational boilerplate many times so the full brief dwarfs the capsule.
+Repeat this operational boilerplate many times so the full brief dwarfs the capsule.
+
+# Firstmate instruction inbox
+Poll forever.
+List every message on every turn even while waiting.
+List every message on every turn even while waiting.
+List every message on every turn even while waiting.
+
+# Definition of done
+Delivery contract: mode=local-only
+EOF
+  capsule_src="$dir/capsule.txt"
+  fm_brief_task_capsule_from_source "$source" "$dir/state" cap1 "$ROOT" >"$capsule_src" \
+    || fail "capsule render failed"
+  capsule=$(cat "$capsule_src")
+  assert_contains "$capsule" 'Do the thing.' "capsule dropped captain intent"
+  assert_not_contains "$capsule" 'Never push.' "capsule kept Rules boilerplate"
+  assert_not_contains "$capsule" 'Poll forever.' "capsule kept inbox boilerplate"
+  [ "$(wc -c <"$capsule_src")" -lt "$(wc -c <"$source")" ] \
+    || fail "capsule body was not smaller than the source brief"
+  pass "task capsule keeps task/setup/dod and drops repeated boilerplate"
+}
+
 test_worker_role_names_skill_and_fallback_file
+test_task_capsule_omits_boilerplate_sections
 
 echo "all fm-dod-lib tests passed"

@@ -27,7 +27,8 @@
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
 #   placeholders, an empty Task, an incomplete pair of Task subsections, or a
 #   `## Captain's intent` line opening with a Captain label or address.
-#   Every ship or scout spawn renders `launch-brief.md`; for a no-mistakes ship
+#   Every ship or scout spawn renders a compact `launch-brief.md` task capsule;
+#   for a no-mistakes ship
 #   it also carries the current `--intent` contract and the extracted captain
 #   intent. A legacy mixed Task is accepted there only under bin/fm-dod-lib.sh's
 #   provenance-marking rules; unmarked legacy Tasks stop for migration rather
@@ -3633,7 +3634,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   {
     fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT" &&
       printf '\n' &&
-      cat "$SOURCE_BRIEF" &&
+      fm_brief_task_capsule_from_source "$SOURCE_BRIEF" "$STATE" "$ID" "$FM_ROOT" &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"
       fi
@@ -3647,6 +3648,11 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: could not publish current launch contract for $SOURCE_BRIEF" >&2
     exit 1
   fi
+  LAUNCH_CONTEXT_BYTES=$(wc -c <"$BRIEF")
+  LAUNCH_CONTEXT_SOURCE_BYTES=$(wc -c <"$SOURCE_BRIEF")
+  printf '%s bytes=%s source_bytes=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$LAUNCH_CONTEXT_BYTES" "$LAUNCH_CONTEXT_SOURCE_BYTES" \
+    >>"$STATE/$ID.launch-context.log"
 fi
 
 delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
@@ -5958,7 +5964,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp claude_sandbox base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp claude_sandbox base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential launch_context_bytes launch_context_source_bytes", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5990,6 +5996,8 @@ preserve_relaunch_meta() {
   [ -z "$WORKER_ACCOUNT_PROVIDER" ] || echo "account_provider=$WORKER_ACCOUNT_PROVIDER"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  [ -z "${LAUNCH_CONTEXT_BYTES:-}" ] || echo "launch_context_bytes=$LAUNCH_CONTEXT_BYTES"
+  [ -z "${LAUNCH_CONTEXT_SOURCE_BYTES:-}" ] || echo "launch_context_source_bytes=$LAUNCH_CONTEXT_SOURCE_BYTES"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
