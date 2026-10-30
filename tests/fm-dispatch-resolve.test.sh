@@ -1047,7 +1047,7 @@ pass "configuration errors exit 2 before any network call"
 ORKEY='test-or-key-4b7e-never-on-argv'
 write_or_response() {  # <path> <choice> <confidence>
   jq -n --arg choice "$2" --argjson conf "$3" \
-    '{id: "gen-dec-1", provider: "TypeSafe", model: "typesafe/jev-1.14-20261001",
+    '{id: "gen-dec-1", provider: "TypeSafe", model: "typesafe/jev-1.13-20261001",
       answers: {rule: {type: "choice", choice: $choice, confidence: $conf,
         probabilities: {rule_1: 0.01, rule_2: 0.01, rule_3: 0.01, rule_4: 0.96, default: 0.01}}},
       usage: {input_tokens: 300, output_tokens: 40, cost: 0.00001}}' > "$1"
@@ -1062,7 +1062,7 @@ expect_code 0 "$code" "OpenRouter key resolves"
 assert_contains "$out" '  status: clear' "OpenRouter answer produces a clear result"
 assert_contains "$out" '  rule: rule_4 (A simple bug fix with a stated root cause.)   confidence: 0.9' "OpenRouter answer feeds the same rule and confidence line"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "OpenRouter answer feeds the same argmax"
-assert_contains "$out" 'typesafe/jev-1.14-20261001' "the served model is reported"
+assert_contains "$out" 'typesafe/jev-1.13-20261001' "the served model is reported"
 assert_contains "$out" 'tokens: 300/40' "OpenRouter usage is reported"
 argv=$(cat "$LOG/argv")
 assert_not_contains "$argv" "$ORKEY" "the OpenRouter key never appears on curl argv"
@@ -1072,7 +1072,7 @@ assert_contains "$argv" $'--max-time\n30' "the OpenRouter request uses the thirt
 assert_equals "Authorization: Bearer $ORKEY" "$(cat "$LOG/header")" "curl receives the OpenRouter bearer header on fd 3"
 assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "the OpenRouter key is absent from every child environment"
 body=$(cat "$LOG/body")
-assert_equals 'typesafe/jev-1.14' "$(jq -r .model <<<"$body")" "OpenRouter model is typesafe/jev-1.14"
+assert_equals 'typesafe/jev-1.13' "$(jq -r .model <<<"$body")" "OpenRouter model is typesafe/jev-1.13"
 assert_equals 'pager' "$(jq -r .state.task.project <<<"$body")" "project rides in the state"
 assert_contains "$(jq -r .state.task.brief <<<"$body")" 'off-by-one in the pager' "the brief rides in the state"
 assert_equals '["rule"]' "$(jq -c '.questions | keys' <<<"$body")" "only the rule Choice is asked"

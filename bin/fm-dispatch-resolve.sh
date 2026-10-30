@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fm-dispatch-resolve.sh - resolve one concrete crewmate or scout dispatch
 # profile from a task brief with the Jev model (typesafe.ai System One, or
-# OpenRouter's typesafe/jev-1.14), opt-in.
+# OpenRouter's typesafe/jev-1.13), opt-in.
 #
 # Usage:
 #   fm-dispatch-resolve.sh <brief-file> [--project <name>]
@@ -23,7 +23,7 @@
 #   The body is the same on both paths; only the endpoint, model, key, and
 #   timeout differ: https://api.typesafe.ai/v1/systemone with model jev-latest,
 #   or OpenRouter's decisions endpoint https://openrouter.ai/api/alpha/decisions
-#   with model typesafe/jev-1.14. Jev returns
+#   with model typesafe/jev-1.13. Jev returns
 #   the matched rule, a probability per option, and a confidence. Everything
 #   after that is jq: the confidence floor (0.6 on the answer confidence, or a
 #   rule's declared `min_confidence` on that rule's probability, falling to the
@@ -102,7 +102,7 @@ CONFIDENCE_FLOOR=0.6
 TS_MODEL=jev-latest
 TS_BASE=https://api.typesafe.ai
 TS_TIMEOUT=5
-OR_MODEL=typesafe/jev-1.14
+OR_MODEL=typesafe/jev-1.13
 OR_ENDPOINT=https://openrouter.ai/api/alpha/decisions
 OR_TIMEOUT=30
 DEFAULT_WHEN="No listed rule applies to this task."

@@ -1403,7 +1403,7 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 
 `bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with the Jev model, so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
 It is off unless `OPENROUTER_API_KEY` or `TYPESAFE_API_KEY` is non-empty in the calling environment or the home's gitignored `.env` holds a line for either; the environment wins for each key, matching the Relay and mail-plane contracts, and the Relay accessor in `bin/fm-env-lib.sh` reads the line.
-When `OPENROUTER_API_KEY` is present the resolver reaches Jev as `typesafe/jev-1.14` through OpenRouter's decisions endpoint, and otherwise it calls typesafe.ai's System One endpoint with `TYPESAFE_API_KEY`.
+When `OPENROUTER_API_KEY` is present the resolver reaches Jev as `typesafe/jev-1.13` through OpenRouter's decisions endpoint, and otherwise it calls typesafe.ai's System One endpoint with `TYPESAFE_API_KEY`.
 The OpenRouter request body and answer are the same as the System One ones, so every check after the answer is identical on both paths; OpenRouter's chat completions endpoint rejects this model, so it is not used.
 
 Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
@@ -1510,7 +1510,7 @@ Firstmate passes its profile line unless it states a reason to override, such as
 
 - The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments; `OPENROUTER_API_KEY` is handled the same way.
 - The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
-- The resolver fixes the typesafe.ai endpoint at `https://api.typesafe.ai` with model `jev-latest` and a 5 second timeout, the OpenRouter endpoint at `https://openrouter.ai/api/alpha/decisions` with model `typesafe/jev-1.14` and a 30 second timeout, and the default confidence floor at 0.6; `OPENROUTER_API_KEY` and `TYPESAFE_API_KEY` are its only resolver-specific environment settings.
+- The resolver fixes the typesafe.ai endpoint at `https://api.typesafe.ai` with model `jev-latest` and a 5 second timeout, the OpenRouter endpoint at `https://openrouter.ai/api/alpha/decisions` with model `typesafe/jev-1.13` and a 30 second timeout, and the default confidence floor at 0.6; `OPENROUTER_API_KEY` and `TYPESAFE_API_KEY` are its only resolver-specific environment settings.
 
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
@@ -2697,7 +2697,7 @@ FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainl
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
-OPENROUTER_API_KEY=     # typed dispatch resolution opt-in through OpenRouter's typesafe/jev-1.14, from the environment or .env; wins over TYPESAFE_API_KEY (docs/configuration.md "Typed dispatch resolution")
+OPENROUTER_API_KEY=     # typed dispatch resolution opt-in through OpenRouter's typesafe/jev-1.13, from the environment or .env; wins over TYPESAFE_API_KEY (docs/configuration.md "Typed dispatch resolution")
 TYPESAFE_API_KEY=       # typed dispatch resolution opt-in through typesafe.ai, from the environment or .env; with neither key bin/fm-dispatch-resolve.sh is off (docs/configuration.md "Typed dispatch resolution")
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
