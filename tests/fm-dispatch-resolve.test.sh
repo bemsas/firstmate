@@ -1043,43 +1043,41 @@ expect_code 0 "$code" "--help exits 0"
 assert_contains "$out" 'Usage:' "--help prints usage"
 pass "configuration errors exit 2 before any network call"
 
-# --- OpenRouter transport: OPENROUTER_API_KEY routes Jev through chat completions
+# --- OpenRouter transport: OPENROUTER_API_KEY routes Jev through the decisions endpoint
 ORKEY='test-or-key-4b7e-never-on-argv'
-write_or_response() {  # <path> <content> [<usage-json>]
-  jq -n --arg content "$2" --argjson usage "${3:-null}" \
-    '{id: "gen-1", model: "anthropic/routed-model", choices: [{message: {role: "assistant", content: $content}}]}
-     + (if $usage == null then {} else {usage: $usage} end)' > "$1"
+write_or_response() {  # <path> <choice> <confidence>
+  jq -n --arg choice "$2" --argjson conf "$3" \
+    '{id: "gen-dec-1", provider: "TypeSafe", model: "typesafe/jev-1.14-20261001",
+      answers: {rule: {type: "choice", choice: $choice, confidence: $conf,
+        probabilities: {rule_1: 0.01, rule_2: 0.01, rule_3: 0.01, rule_4: 0.96, default: 0.01}}},
+      usage: {input_tokens: 300, output_tokens: 40, cost: 0.00001}}' > "$1"
 }
-OR_ANSWER='{"choice":"rule_4","confidence":0.9,"probabilities":{"rule_1":0.02,"rule_2":0.02,"rule_3":0.02,"rule_4":0.9,"default":0.04}}'
-OR_USAGE='{"prompt_tokens":300,"completion_tokens":40,"total_tokens":340}'
 cp "$BASE_RULES" "$RULES"
 rm -f "$NEVER_SEND"
 
 reset_log
-write_or_response "$RESPONSE" "$OR_ANSWER" "$OR_USAGE"
+write_or_response "$RESPONSE" rule_4 0.9
 OPENROUTER_API_KEY=$ORKEY run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "OpenRouter key resolves"
 assert_contains "$out" '  status: clear' "OpenRouter answer produces a clear result"
 assert_contains "$out" '  rule: rule_4 (A simple bug fix with a stated root cause.)   confidence: 0.9' "OpenRouter answer feeds the same rule and confidence line"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "OpenRouter answer feeds the same argmax"
-assert_contains "$out" 'anthropic/routed-model' "the routed model is reported"
-assert_contains "$out" 'tokens: 300/40' "OpenRouter usage maps to prompt and completion tokens"
+assert_contains "$out" 'typesafe/jev-1.14-20261001' "the served model is reported"
+assert_contains "$out" 'tokens: 300/40' "OpenRouter usage is reported"
 argv=$(cat "$LOG/argv")
 assert_not_contains "$argv" "$ORKEY" "the OpenRouter key never appears on curl argv"
-assert_contains "$argv" 'https://openrouter.ai/api/v1/chat/completions' "the request uses the fixed OpenRouter endpoint"
+assert_contains "$argv" 'https://openrouter.ai/api/alpha/decisions' "the request uses the fixed OpenRouter decisions endpoint"
 assert_not_contains "$argv" 'api.typesafe.ai' "the typesafe.ai endpoint is not called"
+assert_contains "$argv" $'--max-time\n30' "the OpenRouter request uses the thirty-second timeout"
 assert_equals "Authorization: Bearer $ORKEY" "$(cat "$LOG/header")" "curl receives the OpenRouter bearer header on fd 3"
 assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "the OpenRouter key is absent from every child environment"
 body=$(cat "$LOG/body")
-assert_equals 'typesafe/jev-router' "$(jq -r .model <<<"$body")" "OpenRouter model is typesafe/jev-router"
-assert_equals 'json_schema' "$(jq -r .response_format.type <<<"$body")" "OpenRouter request asks for a JSON schema answer"
-assert_equals 'true' "$(jq -r .response_format.json_schema.strict <<<"$body")" "OpenRouter schema is strict"
-assert_equals '["default","rule_1","rule_2","rule_3","rule_4"]' "$(jq -c '.response_format.json_schema.schema.properties.choice.enum' <<<"$body")" "the choice enum is every rule key plus default"
-assert_equals 'pager' "$(jq -r '.messages[1].content | fromjson | .project' <<<"$body")" "project rides in the user message"
-assert_contains "$(jq -r '.messages[1].content | fromjson | .brief' <<<"$body")" 'off-by-one in the pager' "the brief rides in the user message"
-assert_equals 'A simple bug fix with a stated root cause.' "$(jq -r '.messages[1].content | fromjson | .options.rule_4' <<<"$body")" "each rule's when rides as an option"
-assert_equals 'null' "$(jq -c '.questions' <<<"$body")" "no System One question is sent to OpenRouter"
-pass "OPENROUTER_API_KEY routes Jev through OpenRouter chat completions with the same result"
+assert_equals 'typesafe/jev-1.14' "$(jq -r .model <<<"$body")" "OpenRouter model is typesafe/jev-1.14"
+assert_equals 'pager' "$(jq -r .state.task.project <<<"$body")" "project rides in the state"
+assert_contains "$(jq -r .state.task.brief <<<"$body")" 'off-by-one in the pager' "the brief rides in the state"
+assert_equals '["rule"]' "$(jq -c '.questions | keys' <<<"$body")" "only the rule Choice is asked"
+assert_equals 'A simple bug fix with a stated root cause.' "$(jq -r '.questions.rule.criteria.rule_4' <<<"$body")" "each rule's when rides as an option"
+pass "OPENROUTER_API_KEY routes Jev through the OpenRouter decisions endpoint with the same result"
 
 printf '%s\n' "export OPENROUTER_API_KEY=\"$ORKEY\"" > "$HOME_DIR/.env"
 reset_log
@@ -1090,38 +1088,25 @@ reset_log
 OPENROUTER_API_KEY=or-env-wins run code out err "$BRIEF" --project pager
 assert_equals 'Authorization: Bearer or-env-wins' "$(cat "$LOG/header")" "environment OpenRouter key wins over .env"
 reset_log
-write_response "$RESPONSE" rule_4 0.9
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
-assert_contains "$(cat "$LOG/argv")" 'https://openrouter.ai/api/v1/chat/completions' "an OpenRouter key in .env wins when only the environment carries a typesafe key"
+assert_contains "$(cat "$LOG/argv")" 'https://openrouter.ai/api/alpha/decisions' "an OpenRouter key in .env wins over a typesafe key in the environment"
 rm -f "$HOME_DIR/.env"
 pass "OpenRouter key is read from the environment then .env, and wins over a typesafe key"
 
-# Fenced JSON, a missing usage block, and non-answers
 reset_log
-write_or_response "$RESPONSE" $'```json\n'"$OR_ANSWER"$'\n```'
-OPENROUTER_API_KEY=$ORKEY run code out err "$BRIEF" --project pager
-assert_contains "$out" '  status: clear' "a fenced JSON answer without usage still resolves"
-for bad in 'I would pick rule_4.' '{"choice":"rule_4","confidence":0.9}' ''; do
-  reset_log
-  write_or_response "$RESPONSE" "$bad"
-  OPENROUTER_API_KEY=$ORKEY run code out err "$BRIEF" --project pager
-  expect_code 0 "$code" "a bad OpenRouter answer still exits 0"
-  assert_contains "$out" '  status: error' "a bad OpenRouter answer is an error: $bad"
-  assert_contains "$out" 'response is not a rule Choice answer' "a bad OpenRouter answer fails the same validation: $bad"
-  assert_absent "$LOG/quota-axi.calls" "a bad OpenRouter answer never reads quota"
-done
-reset_log
-printf '%s\n' '{"error":{"message":"no credits"}}' > "$RESPONSE"
-FAKE_CURL_HTTP=402 OPENROUTER_API_KEY=$ORKEY run code out err "$BRIEF" --project pager
+printf '%s\n' '{"error":{"message":"overloaded","code":529}}' > "$RESPONSE"
+FAKE_CURL_HTTP=529 OPENROUTER_API_KEY=$ORKEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "an OpenRouter HTTP failure still exits 0"
 assert_contains "$out" '  status: error' "an OpenRouter HTTP failure is an error result"
-assert_contains "$out" 'http 402' "an OpenRouter HTTP failure names the status"
+assert_contains "$out" 'http 529' "an OpenRouter HTTP failure names the status"
 assert_not_contains "$out$err" "$ORKEY" "no output carries the OpenRouter key"
-pass "OpenRouter replies that are not a rule answer report the existing response error"
+assert_absent "$LOG/quota-axi.calls" "an OpenRouter HTTP failure never reads quota"
+pass "OpenRouter HTTP failures are error outcomes"
 
 # The never-send list guards the OpenRouter request too
 printf '%s\n' 'Acme-Ledger' > "$NEVER_SEND"
 reset_log
-write_or_response "$RESPONSE" "$OR_ANSWER"
+write_or_response "$RESPONSE" rule_4 0.9
 OPENROUTER_API_KEY=$ORKEY run code out err "$PRIVATE_BRIEF" --project pager
 expect_withheld "OpenRouter never-send match" "brief text matches $NEVER_SEND line 1" 'Acme-Ledger'
 rm -f "$NEVER_SEND"

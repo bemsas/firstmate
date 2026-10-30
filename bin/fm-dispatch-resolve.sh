@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fm-dispatch-resolve.sh - resolve one concrete crewmate or scout dispatch
 # profile from a task brief with the Jev model (typesafe.ai System One, or
-# OpenRouter's typesafe/jev-router), opt-in.
+# OpenRouter's typesafe/jev-1.14), opt-in.
 #
 # Usage:
 #   fm-dispatch-resolve.sh <brief-file> [--project <name>]
@@ -20,12 +20,10 @@
 #   tagged when it is a scout brief (the whole brief when it has neither
 #   section), and ONE Choice question whose options are every rule's `when`
 #   from config/crew-dispatch.json plus one fixed generic none option.
-#   typesafe.ai: https://api.typesafe.ai/v1/systemone with model jev-latest,
-#   state plus a Choice question. OpenRouter:
-#   https://openrouter.ai/api/v1/chat/completions with model
-#   typesafe/jev-router, the same text as chat messages, and a strict JSON
-#   schema response_format; the message content is normalized to the same
-#   answer shape. Jev returns
+#   The body is the same on both paths; only the endpoint, model, key, and
+#   timeout differ: https://api.typesafe.ai/v1/systemone with model jev-latest,
+#   or OpenRouter's decisions endpoint https://openrouter.ai/api/alpha/decisions
+#   with model typesafe/jev-1.14. Jev returns
 #   the matched rule, a probability per option, and a confidence. Everything
 #   after that is jq: the confidence floor (0.6 on the answer confidence, or a
 #   rule's declared `min_confidence` on that rule's probability, falling to the
@@ -104,8 +102,8 @@ CONFIDENCE_FLOOR=0.6
 TS_MODEL=jev-latest
 TS_BASE=https://api.typesafe.ai
 TS_TIMEOUT=5
-OR_MODEL=typesafe/jev-router
-OR_BASE=https://openrouter.ai/api/v1
+OR_MODEL=typesafe/jev-1.14
+OR_ENDPOINT=https://openrouter.ai/api/alpha/decisions
 OR_TIMEOUT=30
 DEFAULT_WHEN="No listed rule applies to this task."
 
@@ -327,60 +325,25 @@ fi
 LAT_MS=null
 command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   if [ "$TRANSPORT" = openrouter ]; then
-    REQUEST=$(jq -n --rawfile brief "$TASK_TEXT" --arg project "$PROJECT" --arg model "$OR_MODEL" \
-      --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
-      ($rules[0]) as $cfg |
-      ($cfg.rules | to_entries | map({key: ("rule_" + ((.key + 1) | tostring)), value: .value.when}) | from_entries) as $criteria |
-      (($criteria + {default: $none_criterion}) | keys) as $choices |
-      {
-        model: $model,
-        temperature: 0,
-        messages: [
-          {role: "system", content: "You classify one task against a fixed list of dispatch rules. Reply with only the JSON object the schema describes: `choice` is the ONE option key whose condition best fits the task (`default` when no rule'"'"'s condition is met, including when a rule'"'"'s own exemption text excludes this task), `probabilities` gives every option key a probability and sums to 1, and `confidence` is the probability you hold for `choice`."},
-          {role: "user", content: ({project: $project, brief: $brief, options: ($criteria + {default: $none_criterion})} | tojson)}
-        ],
-        response_format: {
-          type: "json_schema",
-          json_schema: {
-            name: "dispatch_rule",
-            strict: true,
-            schema: {
-              type: "object",
-              additionalProperties: false,
-              required: ["choice", "confidence", "probabilities"],
-              properties: {
-                choice: {type: "string", enum: $choices},
-                confidence: {type: "number"},
-                probabilities: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: $choices,
-                  properties: ($choices | map({key: ., value: {type: "number"}}) | from_entries)
-                }
-              }
-            }
-          }
-        }
-      }')
-    ENDPOINT="$OR_BASE/chat/completions" HTTP_TIMEOUT=$OR_TIMEOUT
+    REQ_MODEL=$OR_MODEL ENDPOINT=$OR_ENDPOINT HTTP_TIMEOUT=$OR_TIMEOUT
   else
-    REQUEST=$(jq -n --rawfile brief "$TASK_TEXT" --arg project "$PROJECT" --arg model "$TS_MODEL" \
-      --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
-      ($rules[0]) as $cfg |
-      ($cfg.rules | to_entries | map({key: ("rule_" + ((.key + 1) | tostring)), value: .value.when}) | from_entries) as $criteria |
-      {
-        model: $model,
-        state: {task: {project: $project, brief: $brief}},
-        questions: {
-          rule: {
-            type: "choice",
-            instructions: "Which ONE dispatch rule best fits `task` (read `task.brief` and `task.project`)? Each option is the rule'"'"'s own matching condition; pick `default` when no rule'"'"'s condition is met, including when a rule'"'"'s own exemption text excludes this task.",
-            criteria: ($criteria + {default: $none_criterion})
-          }
-        }
-      }')
-    ENDPOINT="$TS_BASE/v1/systemone" HTTP_TIMEOUT=$TS_TIMEOUT
+    REQ_MODEL=$TS_MODEL ENDPOINT="$TS_BASE/v1/systemone" HTTP_TIMEOUT=$TS_TIMEOUT
   fi
+  REQUEST=$(jq -n --rawfile brief "$TASK_TEXT" --arg project "$PROJECT" --arg model "$REQ_MODEL" \
+    --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
+    ($rules[0]) as $cfg |
+    ($cfg.rules | to_entries | map({key: ("rule_" + ((.key + 1) | tostring)), value: .value.when}) | from_entries) as $criteria |
+    {
+      model: $model,
+      state: {task: {project: $project, brief: $brief}},
+      questions: {
+        rule: {
+          type: "choice",
+          instructions: "Which ONE dispatch rule best fits `task` (read `task.brief` and `task.project`)? Each option is the rule'"'"'s own matching condition; pick `default` when no rule'"'"'s condition is met, including when a rule'"'"'s own exemption text excludes this task.",
+          criteria: ($criteria + {default: $none_criterion})
+        }
+      }
+    }')
   never_send_check
   T0=$(fm_timing_now_ms)
   HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$HTTP_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
@@ -390,24 +353,6 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   T1=$(fm_timing_now_ms)
   LAT_MS=$(( T1 - T0 ))
   [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
-if [ "$TRANSPORT" = openrouter ]; then
-  # Normalize the chat completion into the System One answer shape below, so
-  # every validation and gate after this point is transport-independent. A
-  # reply that is not that JSON object leaves nothing for the validation to
-  # accept and reports the same response error.
-  NORMALIZED=$(mktemp) || emit_error "mktemp failed"
-  if jq '
-    (.choices[0].message.content // "" | if type == "string" then sub("^\\s*```(json)?\\s*"; "") | sub("\\s*```\\s*$"; "") else "" end | try fromjson catch null) as $a |
-    {model: .model, answers: {rule: ($a | if type == "object" then . + {type: "choice"} else null end)}}
-    + (if (.usage | type) == "object"
-       then {usage: {input_tokens: .usage.prompt_tokens, output_tokens: .usage.completion_tokens}}
-       else {} end)' "$RESP_FILE" > "$NORMALIZED" 2>/dev/null; then
-    cp "$NORMALIZED" "$RESP_FILE"
-  else
-    : > "$RESP_FILE"
-  fi
-  rm -f "$NORMALIZED"
-fi
 jq -e --slurpfile rules "$RULES" '
     (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
     (.answers.rule.choice | type) == "string" and
