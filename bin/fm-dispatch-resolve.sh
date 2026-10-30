@@ -30,8 +30,9 @@
 #   reads its own account's row and an expanded provider with no row for the
 #   candidate is unmeasured, never blocked), and the spendPriority argmax over
 #   the eligible candidates. The model never sees quota, catalogs, approvals,
-#   confidence floors, `why`, or `use`. With no rules, it returns a non-clear
-#   result so firstmate keeps using the existing intake.
+#   confidence floors, `why`, or `use`. AGY Gemini models bind to scope gemini;
+#   AGY Claude/GPT models bind to scope claude_gpt. With no rules, it returns
+#   a non-clear result so firstmate keeps using the existing intake.
 #   docs/configuration.md "Crew dispatch profiles" owns the declared fields and
 #   "Typed dispatch resolution" owns this tool's operator contract.
 #
@@ -366,7 +367,11 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     (bare($m)) as $bare |
     [rows($p; $lane)[] | select(
       .scope == "all_models" or .scope == "all_products" or
-      ($m != "" and (.scope == ("model:" + $bare) or .scope == ("product:" + $bare)))
+      ($m != "" and (.scope == ("model:" + $bare) or .scope == ("product:" + $bare))) or
+      ($p == "agy" and $m != "" and (
+        (.scope == "gemini" and ($bare | startswith("gemini-"))) or
+        (.scope == "claude_gpt" and ($bare | startswith("claude-") or startswith("gpt-")))
+      ))
     )];
   def floor_state($f; $p; $lane):
     if $f == null then "none"

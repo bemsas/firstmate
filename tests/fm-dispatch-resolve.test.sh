@@ -404,6 +404,42 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" 'candidate: agy:-  provider=agy  scope=all_models  remaining=64%  spendPriority=0.4  runway=through_reset  -> eligible' "agy uses its resolver-only authoritative quota provider"
 assert_contains "$out" "  profile: --harness 'agy'" "provider-less agy rule resolves"
 
+# AGY supplies independent Gemini and third-party pools, not all_models.
+AGY_QUOTA="$TMP_ROOT/agy-quota.json"
+jq '(.providers[] | select(.provider == "agy").quotaSemantics.effectiveAvailability) = [
+  {"scope":"claude_gpt","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"},"selection":{"spendPriority":-1}},
+  {"scope":"gemini","status":"known","effectivePercentRemaining":73,"runway":{"status":"through_reset"},"selection":{"spendPriority":0.8}}
+]' "$QUOTA" > "$AGY_QUOTA"
+printf '%s\n' '{"rules":[{"when":"Agy work.","use":[
+  {"harness":"agy","model":"gemini-4-argon"},
+  {"harness":"agy","model":"google/gemini-4-flash"},
+  {"harness":"agy","model":"claude-opus-4-6"},
+  {"harness":"agy","model":"openai/gpt-oss-120b"},
+  {"harness":"agy","model":"unrecognized-model"},
+  {"harness":"agy"},
+  {"harness":"gemini","model":"gemini-4-argon","provider":"google"}
+]}]}' > "$RULES"
+reset_log
+QUOTA_AXI_FIXTURE="$AGY_QUOTA" TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+for model in gemini-4-argon google/gemini-4-flash; do
+  assert_contains "$out" "candidate: agy:$model  provider=agy  scope=gemini  remaining=73%  spendPriority=0.8  runway=through_reset  -> eligible" "AGY Gemini uses its own pool: $model"
+done
+for model in claude-opus-4-6 openai/gpt-oss-120b; do
+  assert_contains "$out" "candidate: agy:$model  provider=agy  scope=claude_gpt  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible" "AGY third-party model uses its own exhausted pool: $model"
+done
+for model in unrecognized-model -; do
+  assert_contains "$out" "candidate: agy:$model  provider=agy  -> eligible, unranked: no applicable quota row for provider agy" "AGY unknown family cannot borrow a pool: $model"
+done
+assert_contains "$out" 'candidate: gemini:gemini-4-argon  provider=google  scope=all_models  remaining=72%' "AGY pool matching does not affect Google"
+assert_contains "$out" 'reason: genuine spendPriority tie' "both Gemini candidates participate in ranking"
+# One Gemini candidate now wins over the other provider's lower priority.
+jq 'del(.rules[0].use[1])' "$RULES" > "$TMP_ROOT/agy-single.json"
+cp "$TMP_ROOT/agy-single.json" "$RULES"
+reset_log
+QUOTA_AXI_FIXTURE="$AGY_QUOTA" TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" "  profile: --harness 'agy' --model 'gemini-4-argon'" "AGY Gemini wins by measured spendPriority"
+pass "AGY quota pools bind by model family without third-party exhaustion bounding Gemini"
+
 GEMINI_RULE="$TMP_ROOT/gemini-rule.json"
 printf '%s\n' '{"rules":[{"when":"Gemini work.","use":{"harness":"gemini","model":"gemini-3.8-flash-high","provider":"google"}}]}' > "$GEMINI_RULE"
 cp "$GEMINI_RULE" "$RULES"
