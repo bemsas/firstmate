@@ -2664,7 +2664,11 @@ test_codex_permission_modes() {
         assert_not_contains "$launch" '--disable hooks' "secondmate must retain primary hooks"
         assert_not_contains "$launch" 'notify=' "secondmate must retain its own turn-end wiring"
       else
-        flags+='--disable hooks -c '
+        # This fork launches workers through the task-private Codex home
+        # (bin/fm-codex-worker.py), whose generated guard must stay on.
+        flags+='-c '
+        assert_contains "$launch" "fm-codex-worker.py' launch '" "worker must use the task-private Codex home"
+        assert_not_contains "$launch" '--disable hooks' "worker must keep its generated guard hook"
         assert_contains "$launch" 'notify=' "worker must retain its turn-end notification"
       fi
       assert_contains "$launch" "$flags" "permission selection changed model, effort, or hook flags"
