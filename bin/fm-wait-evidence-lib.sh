@@ -16,6 +16,7 @@ set -u
 FM_WAIT_EVIDENCE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_WAIT_EVIDENCE_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$FM_WAIT_EVIDENCE_LIB_DIR/.." && pwd)}}"
 FM_WAIT_EVIDENCE_STATE="${FM_STATE_OVERRIDE:-$FM_WAIT_EVIDENCE_HOME/state}"
+FM_WAIT_EVIDENCE_CONFIG="${FM_CONFIG_OVERRIDE:-$FM_WAIT_EVIDENCE_HOME/config}"
 
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_WAIT_EVIDENCE_LIB_DIR/fm-classify-lib.sh"
@@ -57,7 +58,7 @@ task_wait_evidence_status() {  # <task> -> one wait_record on stdout
       captain 'answer the held decision or release the hold' ''
     return 0
   fi
-  if [ -e "$FM_WAIT_EVIDENCE_HOME/config/wedge-defer-worker-wait" ] && verb=$(status_worker_wait_verb "$statusf"); then
+  if [ -e "$FM_WAIT_EVIDENCE_CONFIG/wedge-defer-worker-wait" ] && verb=$(status_worker_wait_verb "$statusf"); then
     if [ "$verb" = blocked ]; then
       wait_record 'declared blocker' 'awaiting firstmate - its own newest line reports a blocker' \
         supervisor 'clear the reported blocker and close it with fm-send --resolve-key' "$statusf"
@@ -73,7 +74,7 @@ task_wait_evidence_status() {  # <task> -> one wait_record on stdout
 task_wait_evidence() {  # <task> -> one wait_record on stdout
   local task=$1 statusf run
   task_wait_evidence_status "$task" && return 0
-  [ -e "$FM_WAIT_EVIDENCE_HOME/config/wedge-defer-parked-gate" ] || return 1
+  [ -e "$FM_WAIT_EVIDENCE_CONFIG/wedge-defer-parked-gate" ] || return 1
   statusf="$FM_WAIT_EVIDENCE_STATE/$task.status"
   if status_has_open_needs_decision "$statusf" \
     && run=$(crew_gate_awaits_human_decision "$task") \
