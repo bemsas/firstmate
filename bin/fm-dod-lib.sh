@@ -200,7 +200,7 @@ fm_brief_task_capsule_from_source() {  # <source-brief> <state-dir> <task-id> <c
     "This launch prompt is a compact capsule. The authoritative full task contract lives at \`$source\`; read it at natural checkpoints, before declaring done, and whenever you need a rule this capsule omits."
   task=$(fm_brief_heading_body "$source" "# Task") || return 1
   [ -n "$task" ] || return 1
-  printf '%s\n' "$task"
+  printf '\n# Task\n%s\n' "$task"
   progress=$(fm_brief_task_capsule_progress_notes "$source")
   [ -n "$progress" ] && printf '%s\n' "$progress"
   if fm_brief_heading_present "$source" "# Herdr lifecycle declaration - NOT ENABLED"; then

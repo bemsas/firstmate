@@ -105,14 +105,6 @@ fm_broken_session_probe() {
     ship|scout) ;;
     *) FM_BROKEN_DETAIL="kind=$kind"; return 0 ;;
   esac
-  if crew_is_paused "$id"; then
-    FM_BROKEN_DETAIL='declared external wait'
-    return 0
-  fi
-  if crew_gate_awaits_human_decision "$id" >/dev/null 2>&1; then
-    FM_BROKEN_DETAIL='awaiting human gate decision'
-    return 0
-  fi
   backend=$(fm_backend_of_meta "$meta")
   FM_BROKEN_BACKEND=$backend
   target=$(fm_backend_target_of_meta "$meta")
@@ -134,6 +126,16 @@ fm_broken_session_probe() {
     FM_BROKEN_STATUS=clear
     return 0
   }
+  # The current-state reads below may cost a bounded no-mistakes call, so they
+  # are taken only once an error banner is actually on screen.
+  if crew_is_paused "$id"; then
+    FM_BROKEN_DETAIL='declared external wait'
+    return 0
+  fi
+  if crew_gate_awaits_human_decision "$id" >/dev/null 2>&1; then
+    FM_BROKEN_DETAIL='awaiting human gate decision'
+    return 0
+  fi
   busy=$(fm_busy_classify_meta "$meta" "$id" "$state" "$capture")
   verdict=${busy%% *}
   [ "$verdict" = idle ] || {
