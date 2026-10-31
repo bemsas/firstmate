@@ -37,7 +37,7 @@ task_wait_evidence_open_call() {  # <task> -> sets TASK_WAIT_CALL_IDENTITY, 0/1
 }
 
 task_wait_evidence_status() {  # <task> -> one wait_record on stdout
-  local task=$1 last until statusf
+  local task=$1 last until statusf verb
   [ -n "$task" ] || return 1
   statusf="$FM_WAIT_EVIDENCE_STATE/$task.status"
   last=$(status_declared_wait_line "$statusf")
@@ -55,6 +55,16 @@ task_wait_evidence_status() {  # <task> -> one wait_record on stdout
   if task_wait_evidence_open_call "$task"; then
     wait_record "$WAIT_EVIDENCE_BACKLOG_HOLD_KIND" 'awaiting the captain - held in the backlog' \
       captain 'answer the held decision or release the hold' ''
+    return 0
+  fi
+  if [ -e "$FM_WAIT_EVIDENCE_HOME/config/wedge-defer-worker-wait" ] && verb=$(status_worker_wait_verb "$statusf"); then
+    if [ "$verb" = blocked ]; then
+      wait_record 'declared blocker' 'awaiting firstmate - its own newest line reports a blocker' \
+        supervisor 'clear the reported blocker and close it with fm-send --resolve-key' "$statusf"
+    else
+      wait_record 'declared decision' 'awaiting firstmate - its own newest line asks for a decision' \
+        supervisor 'answer the reported decision with fm-send --resolve-key' "$statusf"
+    fi
     return 0
   fi
   return 1

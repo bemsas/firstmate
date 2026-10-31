@@ -134,7 +134,10 @@ check_harness_idle_empty() {  # <name> <launch-cmd...>
 # asserted, so a known gap stays visible evidence rather than either a silent
 # pass or a failure about a shape this guard does not yet cover. Add a harness
 # here only once a real run has shown it empty.
+# CMX_REQUIRE_CURSORLESS_EMPTY=1 names a shape that must prove itself empty,
+# such as a named claude session whose rule right-aligns that name.
 cursorless_established() {  # <name>
+  [ "${CMX_REQUIRE_CURSORLESS_EMPTY:-0}" != 1 ] || return 0
   case "$1" in claude | opencode) return 0 ;; esac
   return 1
 }
@@ -156,6 +159,15 @@ check_harness_idle_empty_cursorless() {  # <name> <version> <window>
   if [ "$verdict" = empty ]; then
     CHECKED=$((CHECKED + 1))
     pass "$name ($version): real idle composer classifies empty cursorless too"
+  elif [ "$verdict" = pending ]; then
+    # `pending` is the one verdict that blocks a steer, so it fails for every
+    # harness: a vendor footer below the composer read as typed text would skip
+    # every doorbell to that worker (claude 2.x on herdr 0.8.0, 2026-09-20).
+    printf '# %s cursorless pane tail at failure:\n' "$name" >&2
+    printf '%s\n' "$cap" | fm_composer_strip_ansi | grep '[^[:space:]]' | tail -8 | sed 's/^/#   /' >&2
+    FAILED=1
+    printf 'not ok - %s (%s): a proven-idle composer read cursorless as pending; every steer to this harness would skip its doorbell\n' \
+      "$name" "$version" >&2
   elif ! cursorless_established "$name"; then
     note "$name ($version): cursorless read is $verdict, not established empty; not asserted here"
   else
@@ -175,6 +187,14 @@ for h in claude codex opencode pi grok kimi muse; do
     note "harness absent, not verified here: $h"
   fi
 done
+# A named claude session (`claude -n <name>`) right-aligns that name in the
+# rule above its composer; the cursorless read must still prove it empty, or
+# away-mode delivery to a named primary on a cursorless backend defers forever.
+if command -v claude >/dev/null 2>&1; then
+  CMX_REQUIRE_CURSORLESS_EMPTY=1 check_harness_idle_empty claude-named claude -n fm-cmx-named
+else
+  note "harness absent, not verified here: claude-named"
+fi
 
 # --- 2. The strict blank-row posture, live ----------------------------------
 # A plain shell pane parked on a blank line between two rules (the audit's
