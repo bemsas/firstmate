@@ -16,6 +16,9 @@ make_home() {
   fakebin="$TMP_ROOT/$name/bin"
   mkdir -p "$home/data" "$home/state" "$home/config" "$projects/proj" "$fakebin"
   git -C "$projects/proj" init -q || fail "could not initialize project fixture"
+  # Spawn refuses an unborn HEAD, so the fixture project needs one commit.
+  git -C "$projects/proj" -c user.email=fm@example.com -c user.name=fm -c commit.gpgsign=false \
+    commit -q --allow-empty -m init || fail "could not commit project fixture"
   printf '#!/bin/sh\nexit 1\n' >"$fakebin/tmux"
   chmod +x "$fakebin/tmux"
   printf '%s\n' "$home|$projects/proj|$fakebin"

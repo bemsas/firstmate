@@ -4116,10 +4116,15 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   SOURCE_BRIEF=$BRIEF
   BRIEF="$DATA/$ID/launch-brief.md"
   BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
+  # A brief without the scaffold's `# Task` and `# Definition of done` sections
+  # cannot be compacted, so it is delivered whole, as before capsules existed.
+  if ! LAUNCH_TASK_TEXT=$(fm_brief_task_capsule_from_source "$SOURCE_BRIEF" "$STATE" "$ID" "$FM_ROOT"); then
+    LAUNCH_TASK_TEXT=$(cat -- "$SOURCE_BRIEF") || LAUNCH_TASK_TEXT=''
+  fi
   {
-    fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT" &&
-      printf '\n' &&
-      fm_brief_task_capsule_from_source "$SOURCE_BRIEF" "$STATE" "$ID" "$FM_ROOT" &&
+    [ -n "$LAUNCH_TASK_TEXT" ] &&
+      fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT" &&
+      printf '\n%s\n' "$LAUNCH_TASK_TEXT" &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"
       fi

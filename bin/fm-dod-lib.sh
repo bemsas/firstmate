@@ -183,6 +183,15 @@ fm_brief_task_capsule_progress_notes() {  # <source-brief>
   ' "$1"
 }
 
+fm_brief_task_capsule_current_sections() {  # <source-brief>
+  # Everything from the first such heading to the end is the appended contract,
+  # including the promoted Definition of done rendered after them.
+  awk '
+    !capture && /^# Current / { capture = 1; printf "\n" }
+    capture { print }
+  ' "$1"
+}
+
 fm_brief_task_capsule_from_source() {  # <source-brief> <state-dir> <task-id> <code-root>
   local source=$1 state=$2 id=$3 root=$4 task setup dod progress
   [ -f "$source" ] || return 1
@@ -205,6 +214,9 @@ fm_brief_task_capsule_from_source() {  # <source-brief> <state-dir> <task-id> <c
   fm_brief_heading_present "$source" "# Definition of done" || return 1
   dod=$(fm_brief_heading_body "$source" "# Definition of done")
   printf '\n# Definition of done\n%s\n' "$dod"
+  # bin/fm-promote.sh appends `# Current ...` sections that supersede the
+  # scout delivery contract, so a relaunch after promotion must carry them.
+  fm_brief_task_capsule_current_sections "$source"
   cat <<EOF
 
 # Operations (compact)
