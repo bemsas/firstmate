@@ -127,7 +127,6 @@ EOF
   pass "Grok Bot text is not executed and no reply is published"
 }
 
-fm_test_run \
-  rejects_bad_arguments \
-  reports_unsupported_and_records_exchange \
-  does_not_execute_message_or_publish
+rejects_bad_arguments
+reports_unsupported_and_records_exchange
+does_not_execute_message_or_publish

@@ -375,16 +375,15 @@ concurrent_appends_stay_valid_json() {
   pass "concurrent appends stay valid JSON"
 }
 
-fm_test_run \
-  rejects_bad_arguments \
-  routes_topic_to_profile \
-  wraps_request_and_keeps_clarify_toolset \
-  does_not_execute_message_text \
-  writes_private_jsonl_and_parent_reply \
-  hashes_secret_looking_text \
-  inbound_sequences_parent_route_inbox \
-  timeout_preserves_124 \
-  provider_failure_preserves_status \
-  empty_reply_is_failure \
-  channel_failure_is_exit_4 \
-  concurrent_appends_stay_valid_json
+rejects_bad_arguments
+routes_topic_to_profile
+wraps_request_and_keeps_clarify_toolset
+does_not_execute_message_text
+writes_private_jsonl_and_parent_reply
+hashes_secret_looking_text
+inbound_sequences_parent_route_inbox
+timeout_preserves_124
+provider_failure_preserves_status
+empty_reply_is_failure
+channel_failure_is_exit_4
+concurrent_appends_stay_valid_json
