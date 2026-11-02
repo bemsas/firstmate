@@ -265,6 +265,10 @@ Ordinary child teardown uses its own home's configuration; retiring a whole home
 The [record export reference](configuration.md#record-export-configrecord-export-root) owns the operator contract, allowlist, publication mechanics, and teardown boundary.
 The export root remains cold output; no operational reader consumes it.
 
+### Deterministic wake router (prototype)
+
+An opt-in, shadow-by-default router can classify each drained wake as acknowledge, scripted action, or model decision so that only decisions cost a supervisor turn; [`docs/wake-router.md`](wake-router.md) owns its design and safety limits.
+
 ## Busy state is semantic, per adapter
 
 `bin/fm-busy-lib.sh` is the single owner of what "this worker is busy" means, and `bin/fm-busy-event.sh` is the only writer of the per-task records it reads.
