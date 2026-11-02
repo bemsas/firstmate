@@ -630,6 +630,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/wake-router.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/watcher-continuity.md",
       "audience": "operator-current"
     },
