@@ -191,6 +191,8 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-public-followup-emit.sh` | Validate and report one typed terminal work result into its owning home, or stage it when that home is remote |
 | `fm-public-followup-collect.sh` | Read and retire the typed terminal results a remote work home staged for the home that owes the public reply |
 | `fm-inbox.sh`            | The captain's out-of-band capture surface: queue a note (optionally idempotent by request id), announce or repair its wake, record a durable primary reply, and emit bounded receipts and primary-readiness JSON |
+| `fm-hermes-inbox.sh`     | Hermes desktop and ops post one note through `fm-inbox.sh` and read its recorded reply |
+| `fm-hermes-inbox-entry.sh` | Skill entry that resolves the local checkout and home, then execs `fm-hermes-inbox.sh` |
 | `fm-mail.sh`             | General-purpose mail plane: read unseen IMAP mail, send one SMTP message, or surface new mail as a `check` wake via `poll` (configuration in the home's gitignored `.env`) |
 | `fm-mail.py`             | The IMAP/SMTP engine behind `fm-mail.sh` |
 | `fm-judge-first.sh`      | Judge-first hook: runs a secondmate's new `needs-decision:`/`blocked:` lines through the private decision judge before the supervisor wakes (shadow by default, `config/judge-first` switch; `fm-judge-first.py` is its engine) |

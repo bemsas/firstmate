@@ -720,6 +720,10 @@
     {
       "path": "tests/fixtures/claude-idle-composer-plain.txt",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": "hermes/firstmate-inbox/SKILL.md",
+      "audience": "operator-current"
     }
   ]
 }

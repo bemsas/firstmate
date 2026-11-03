@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # fm-hermes-bridge-lib.sh - private exchange log for the Hermes and Grokbot ask scripts.
 #
-# Sourced, never executed. bin/fm-ask-hermes.sh and bin/fm-ask-grokbot.sh own
-# their flags. This file owns the log row and the private append.
+# Sourced, never executed. bin/fm-ask-hermes.sh, bin/fm-ask-grokbot.sh, and
+# bin/fm-hermes-inbox.sh own their flags. This file owns the log row and the
+# private append.
 #
 # Log path: $FM_HOME/data/hermes-bridge/log.jsonl
 # Directory mode 0700, file mode 0600. Appends serialize on a mkdir lock.
@@ -41,6 +42,14 @@ fm_hermes_bridge_corr_ok() {  # <id>
 fm_hermes_bridge_profile_for_topic() {  # <topic>
   case "$1" in
     admin) printf '%s\n' desktop ;;
+    ops) printf '%s\n' ops ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_hermes_bridge_topic_for_profile() {  # <profile>
+  case "$1" in
+    desktop) printf '%s\n' admin ;;
     ops) printf '%s\n' ops ;;
     *) return 1 ;;
   esac
