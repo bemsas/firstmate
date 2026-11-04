@@ -26,6 +26,11 @@
 # relaunching on inconclusive evidence could create a second endpoint beside a
 # live one - and an unreachable remote host is never evidence of death, so a
 # remote route is never replaced by a local endpoint.
+# `restored` is a local endpoint that is up, but whose agent process has no
+# FM_HOME or FM_TASK_INBOX (a crash or herdr restore resumed it bare). That is
+# a diagnostic, not a relaunch: replacing it is the control plane's relaunch,
+# and only once the composer reads empty. An unreadable launch environment is
+# `skipped`, never a relaunch. A process the backend cannot name stays `alive`.
 #
 # Replacement relaunch goes through `bin/fm-spawn.sh <id> --secondmate` with
 # FM_SPAWN_NO_GUARD=1, the same guarded path every recovery uses. That path
@@ -119,7 +124,7 @@ fm_secondmate_liveness_recent_attempts() {  # <id> <window-secs>
 #
 # Read-only probe of one registered secondmate's recorded endpoint. Populates:
 #
-#   FM_SM_LIVE_STATUS  silent | alive | relaunchable | skipped
+#   FM_SM_LIVE_STATUS  silent | alive | restored | relaunchable | skipped
 #   FM_SM_LIVE_STATE   the raw classifier/state word
 #   FM_SM_LIVE_KILL    1 when relaunch must first kill a confirmed-dead local
 #                      endpoint (its shell husk occupies the name)
@@ -130,7 +135,7 @@ fm_secondmate_liveness_recent_attempts() {  # <id> <window-secs>
 #   FM_SM_LIVE_CAUSE   relaunch cause phrase, on relaunchable
 #   FM_SM_LIVE_WHERE   backend=<b> or host=<h>, on relaunchable
 #   FM_SM_LIVE_REASON  exact skip suffix, on skipped
-#   FM_SM_LIVE_LINE    verbose already-live line body, on alive
+#   FM_SM_LIVE_LINE    verbose already-live line, or the restored diagnostic line
 #
 # `silent` means the meta records no endpoint at all - that shape is owned by
 # secondmate-provisioning recovery, not liveness.
@@ -232,8 +237,34 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   FM_SM_LIVE_STATE=$agent_state
   case "$agent_state" in
     alive)
-      FM_SM_LIVE_STATUS=alive
-      FM_SM_LIVE_LINE="secondmate $id already live (backend=$backend)"
+      local env_raw='' env_word='' env_detail=''
+      env_raw=$(fm_backend_target_launch_env "$backend" "$target" 2>/dev/null) || env_raw=''
+      case "$env_raw" in
+        *$'\t'*)
+          env_word=${env_raw%%$'\t'*}
+          env_detail=${env_raw#*$'\t'}
+          ;;
+        *)
+          env_word=$env_raw
+          env_detail=''
+          ;;
+      esac
+      case "$env_word" in
+        present|unidentified)
+          FM_SM_LIVE_STATUS=alive
+          FM_SM_LIVE_LINE="secondmate $id already live (backend=$backend)"
+          ;;
+        restored)
+          [ -n "$env_detail" ] || env_detail='agent process has no FM_HOME or FM_TASK_INBOX'
+          FM_SM_LIVE_STATUS=restored
+          FM_SM_LIVE_REASON=$env_detail
+          FM_SM_LIVE_LINE="secondmate $id restored without launch environment (backend=$backend; $FM_SM_LIVE_REASON)"
+          ;;
+        *)
+          FM_SM_LIVE_STATUS=skipped
+          FM_SM_LIVE_REASON="launch environment unreadable (backend=$backend)"
+          ;;
+      esac
       ;;
     dead|missing)
       FM_SM_LIVE_STATUS=relaunchable

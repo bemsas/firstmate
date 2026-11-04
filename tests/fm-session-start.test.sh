@@ -1396,6 +1396,135 @@ EOF
 
 # --- endpoint liveness: tmux and herdr, live and dead ------------------------
 
+# make_fake_ps_real_tpgid <fakebin>: keep the harness ps stub for comm/args,
+# and answer tpgid from the real process table so a pty agent's foreground
+# group is the agent itself.
+make_fake_ps_real_tpgid() {
+  local fakebin=$1
+  mv "$fakebin/ps" "$fakebin/ps.harness"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *tpgid=*) exec /bin/ps "$@" ;;
+esac
+exec "$0.harness" "$@"
+SH
+  chmod +x "$fakebin/ps"
+}
+
+test_endpoint_launch_environment_for_local_secondmates() {
+  local rec root home fakebin out restored present probe
+  rec=$(new_world launch-env)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_ps_real_tpgid "$fakebin"
+  restored=$(fm_test_start_pty_agent -- --resume) || fail "the restored pty agent did not start"
+  present=$(fm_test_start_pty_agent FM_HOME=/h FM_TASK_INBOX=/h/state/id.inbox) \
+    || fail "the present pty agent did not start"
+  probe="$home/state/pane-pid.log"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+case "\${1:-}" in
+  display-message)
+    target=""
+    format=""
+    prev=""
+    for a in "\$@"; do
+      [ "\$prev" = "-t" ] && target="\$a"
+      prev="\$a"
+      case "\$a" in '#{'*) format="\$a" ;; esac
+    done
+    case "\$format" in
+      *pane_pid*)
+        printf '%s\n' "\$target" >> "$probe"
+        case "\$target" in
+          fm-sess:restored) printf '%s\n' "$restored"; exit 0 ;;
+          fm-sess:present) printf '%s\n' "$present"; exit 0 ;;
+        esac
+        exit 1
+        ;;
+      *pane_current_command*) printf '%s\n' claude; exit 0 ;;
+      *pane_tty*) exit 0 ;;
+    esac
+    printf '%%1\n'
+    exit 0
+    ;;
+  list-windows)
+    printf '%s\n' restored present ship-win
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  printf 'window=fm-sess:restored\nkind=secondmate\nharness=claude\n' > "$home/state/restored.meta"
+  printf 'window=fm-sess:present\nkind=secondmate\nharness=claude\n' > "$home/state/present.meta"
+  printf 'window=fm-sess:ship-win\nkind=ship\n' > "$home/state/ship.meta"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  fm_test_reap_pty_agents
+
+  assert_contains "$out" \
+    "endpoint: restored without launch environment (backend=tmux window=fm-sess:restored; herdr-restored resume with no FM_HOME or FM_TASK_INBOX)" \
+    "a restored secondmate was still reported alive: $out"
+  assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:present)" \
+    "a secondmate that still has its launch environment should stay alive"
+  assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:ship-win)" \
+    "a ship task must stay a plain alive endpoint"
+  if grep -Fxq 'fm-sess:ship-win' "$probe" 2>/dev/null; then
+    fail "the ship task's process environment was probed"
+  fi
+  pass "session start: a restored local secondmate is named, and a present one stays alive"
+}
+
+test_endpoint_launch_environment_read_is_bounded() {
+  local rec root home fakebin out
+  rec=$(new_world launch-env-bound)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  display-message)
+    format=""
+    for a in "$@"; do
+      case "$a" in '#{'*) format=$a ;; esac
+    done
+    case "$format" in
+      *pane_pid*) sleep 30; exit 0 ;;
+    esac
+    printf '%s\n' '%1'
+    exit 0
+    ;;
+  list-windows)
+    printf '%s\n' hang-win
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  printf 'window=fm-sess:hang-win\nkind=secondmate\nharness=claude\n' > "$home/state/hang.meta"
+
+  out=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_SESSION_START_ENDPOINT_TIMEOUT=1 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" \
+    "endpoint: unknown (backend=tmux window=fm-sess:hang-win; launch environment unreadable)" \
+    "a launch-environment read that hits its bound must not be reported alive: $out"
+  assert_not_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:hang-win)" \
+    "a bounded launch-environment read was reported alive"
+  pass "session start: a launch-environment read that does not finish is unknown, not alive"
+}
+
 test_endpoint_liveness_tmux() {
   local rec root home fakebin out
   rec=$(new_world liveness-tmux)
@@ -3185,6 +3314,8 @@ test_session_start_relaunches_herdr_husk_secondmate
 test_status_tail_bounding
 test_status_tail_line_cap
 test_orphan_status_logs_are_printed
+test_endpoint_launch_environment_for_local_secondmates
+test_endpoint_launch_environment_read_is_bounded
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_endpoint_read_death_is_isolated_and_reported

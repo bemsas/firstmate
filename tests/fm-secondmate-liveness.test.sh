@@ -295,6 +295,12 @@ case "${1:-}" in
             *) printf '%s\n' "$mode"; exit 0 ;;
           esac
           ;;
+        *pane_pid*)
+          if [ -n "${FM_TEST_AGENT_PID:-}" ]; then
+            printf '%s\n' "$FM_TEST_AGENT_PID"
+          fi
+          exit 0
+          ;;
       esac
     done
     exit 0
@@ -861,7 +867,133 @@ test_sweep_noop_with_no_secondmate_meta
 test_sweep_skips_mate_whose_liveness_lock_is_held
 test_relaunch_waits_for_other_mates_relaunch_lock
 test_sweep_refuses_relaunch_on_ledger_errors
+launch_env_word() {  # <pid>
+  bash -c '. "$1"; fm_backend_process_launch_env "$2"' _ "$ROOT/bin/fm-backend.sh" "$1"
+}
+
+test_launch_env_words_stay_distinct() {
+  local out pid present bare resume
+  out=$(launch_env_word '')
+  [ "${out%%$'\t'*}" = unidentified ] || fail "an empty pid should be unidentified, got: $out"
+  out=$(launch_env_word 1)
+  [ "${out%%$'\t'*}" = unidentified ] || fail "pid 1 should be unidentified, got: $out"
+  out=$(launch_env_word 2)
+  [ "$out" = $'unreadable\tlaunch environment unreadable' ] \
+    || fail "an unreadable environ should not look alive, got: $out"
+
+  present=$(fm_test_start_pty_agent FM_HOME=/h FM_TASK_INBOX=/h/state/id.inbox -- --resume) \
+    || fail "the present pty agent did not start"
+  out=$(launch_env_word "$present")
+  [ "${out%%$'\t'*}" = present ] \
+    || fail "a --resume process that still has its launch environment must stay present, got: $out"
+
+  resume=$(fm_test_start_pty_agent -- --resume) || fail "the resume pty agent did not start"
+  out=$(launch_env_word "$resume")
+  [ "$out" = $'restored\therdr-restored resume with no FM_HOME or FM_TASK_INBOX' ] \
+    || fail "a bare --resume should name the herdr restore, got: $out"
+
+  bare=$(fm_test_start_pty_agent) || fail "the bare pty agent did not start"
+  out=$(launch_env_word "$bare")
+  [ "$out" = $'restored\tagent process has no FM_HOME or FM_TASK_INBOX' ] \
+    || fail "a process with no launch environment should say so, got: $out"
+  fm_test_reap_pty_agents
+  pass "launch environment: present, restored, unreadable, and unidentified stay distinct"
+}
+
+test_sweep_reports_restored_secondmate_without_relaunch() {
+  local w fb tmuxfb log out agent
+  w=$(new_world sweep-restored)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  agent=$(fm_test_start_pty_agent -- --resume) || fail "the restored pty agent did not start"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log" FM_TEST_AGENT_PID="$agent")
+  fm_test_reap_pty_agents
+
+  assert_contains "$out" \
+    "SECONDMATE_LIVENESS: secondmate sm1 restored without launch environment (backend=tmux; herdr-restored resume with no FM_HOME or FM_TASK_INBOX)" \
+    "a restored secondmate must be named in the liveness report, got: $out"
+  [ ! -s "$log" ] || fail "a restored secondmate was killed or relaunched: $(cat "$log")"
+  pass "sweep: a secondmate restored without its launch environment is reported and not relaunched"
+}
+
+test_sweep_leaves_present_launch_environment_untouched() {
+  local w fb tmuxfb log out agent
+  w=$(new_world sweep-present-env)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  agent=$(fm_test_start_pty_agent FM_HOME=/h FM_TASK_INBOX=/h/state/id.inbox) \
+    || fail "the present pty agent did not start"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log" FM_TEST_AGENT_PID="$agent" FM_BOOTSTRAP_VERBOSE_FACTS=1)
+  fm_test_reap_pty_agents
+
+  assert_contains "$out" "BOOTSTRAP_INFO: secondmate sm1 already live (backend=tmux)" \
+    "a secondmate that still has its launch environment should stay already-live, got: $out"
+  assert_not_contains "$out" "restored without launch environment" \
+    "a present launch environment was reported as restored: $out"
+  [ ! -s "$log" ] || fail "a present secondmate was killed or relaunched: $(cat "$log")"
+  pass "sweep: a secondmate whose launch environment is present stays already-live"
+}
+
+test_sweep_skips_unreadable_launch_environment() {
+  local w fb tmuxfb log out dir zombie
+  if [ -r /proc/2/environ ]; then
+    pass "sweep: unreadable launch environment skipped (this host can read pid 2)"
+    return 0
+  fi
+  dir=$(mktemp -d "$FM_TEST_TMPDIR/zombie-env.XXXXXX")
+  setsid --fork python3 -c '
+import os, sys, time
+path = sys.argv[1]
+pid = os.fork()
+if pid == 0:
+    os._exit(0)
+open(path, "w").write("%s %s\n" % (os.getpid(), pid))
+time.sleep(30)
+os.waitpid(pid, 0)
+' "$dir/pid" </dev/null >/dev/null 2>&1
+  zombie=''
+  local i=0 helper=''
+  while [ "$i" -lt 40 ]; do
+    if [ -s "$dir/pid" ]; then
+      read -r helper zombie < "$dir/pid" || true
+      [ -n "$zombie" ] && break
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -n "$zombie" ] || fail "the zombie fixture did not start"
+  w=$(new_world sweep-unreadable-env)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  cat > "$tmuxfb/ps" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *tpgid=*) printf '%s\n' "$zombie"; exit 0 ;;
+esac
+exec /bin/ps "\$@"
+SH
+  chmod +x "$tmuxfb/ps"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log" FM_TEST_AGENT_PID="$zombie")
+  kill "$helper" "$zombie" 2>/dev/null || true
+
+  assert_contains "$out" \
+    "SECONDMATE_LIVENESS: secondmate sm1: skipped: launch environment unreadable (backend=tmux)" \
+    "an unreadable launch environment must be skipped, not called alive, got: $out"
+  [ ! -s "$log" ] || fail "an unreadable launch environment was killed or relaunched: $(cat "$log")"
+  pass "sweep: an unreadable launch environment is skipped and not relaunched"
+}
+
 test_remote_poll_probe_maps_states
 test_remote_poll_probe_unreachable_preserves_route
+test_launch_env_words_stay_distinct
+test_sweep_reports_restored_secondmate_without_relaunch
+test_sweep_leaves_present_launch_environment_untouched
+test_sweep_skips_unreadable_launch_environment
 
 echo "# all fm-secondmate-liveness tests passed"

@@ -3220,7 +3220,9 @@ test_drain_rotates_orphaned_scratch() {
 # --- secondmate endpoint liveness tick ---------------------------------------
 # bin/fm-watch.sh's secondmate_liveness_tick drives the shared
 # bin/fm-secondmate-liveness-lib.sh probe+relaunch machinery during ordinary
-# supervision: only a positively dead or missing recorded endpoint relaunches
+# supervision: only a positively dead or missing recorded endpoint relaunches.
+# A mate whose pane is up but whose process has no launch environment is
+# triage-only and does not clear a relaunch park.
 # (through the same guarded fm-spawn.sh --secondmate path the session-start
 # sweep uses), every relaunch emits exactly one `check` wake plus a durable
 # ledger line, inconclusive verdicts are triage-only, an unreachable remote
@@ -3263,6 +3265,12 @@ case "${1:-}" in
       case "$a" in
         *pane_current_command*) printf '%s\n' "$cmd"; exit 0 ;;
         *cursor_y*) printf '0\n'; exit 0 ;;
+        *pane_pid*)
+          if [ -n "${FM_TEST_AGENT_PID:-}" ]; then
+            printf '%s\n' "$FM_TEST_AGENT_PID"
+          fi
+          exit 0
+          ;;
       esac
     done
     exit 0 ;;
@@ -3428,6 +3436,31 @@ test_secondmate_liveness_tick_relaunches_every_dead_mate_before_waking() {
       || fail "$id's relaunch did not queue its own check row: $(cat "$state/.wake-queue")"
   done
   pass "watch liveness: one tick relaunches every dead mate, queues a row each, and wakes once"
+}
+
+test_secondmate_liveness_tick_logs_restored_without_relaunch() {
+  local dir state pid agent marker
+  dir=$(make_secondmate_liveness_case liveness-restored)
+  state="$dir/state"
+  agent=$(fm_test_start_pty_agent -- --resume) || fail "the restored pty agent did not start"
+  marker="$state/.secondmate-relaunch-bound-sm1"
+  printf '%s\talive\n' "$(date +%s)" > "$marker"
+
+  run_liveness_leg "$dir" restored FM_FAKE_TMUX_CURRENT_COMMAND=claude FM_TEST_AGENT_PID="$agent"
+  pid=$LIVENESS_PID
+  sleep 4
+  is_live_non_zombie "$pid" \
+    || fail "the watcher woke on a restored secondmate: $(cat "$dir/watch-restored.out" "$dir/watch-restored.err")"
+  kill_liveness_leg "$pid"
+  fm_test_reap_pty_agents
+
+  [ ! -s "$dir/tmux.log" ] || fail "a restored secondmate was killed or relaunched: $(cat "$dir/tmux.log")"
+  [ ! -s "$state/.wake-queue" ] || fail "a restored secondmate queued a wake: $(cat "$state/.wake-queue")"
+  [ -e "$marker" ] || fail "a restored probe cleared the relaunch park"
+  grep -F 'secondmate sm1 liveness: secondmate sm1 restored without launch environment (backend=tmux; herdr-restored resume with no FM_HOME or FM_TASK_INBOX)' \
+    "$state/.watch-triage.log" >/dev/null \
+    || fail "the restored probe did not land in the triage log: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  pass "watch liveness: a restored secondmate is logged, left parked, and not relaunched"
 }
 
 test_secondmate_liveness_tick_leaves_alive_and_inconclusive_untouched() {
@@ -3796,6 +3829,7 @@ test_drain_rotates_orphaned_scratch
 test_secondmate_liveness_tick_relaunches_dead_endpoint_once
 test_secondmate_liveness_tick_relaunches_missing_endpoint
 test_secondmate_liveness_tick_relaunches_every_dead_mate_before_waking
+test_secondmate_liveness_tick_logs_restored_without_relaunch
 test_secondmate_liveness_tick_leaves_alive_and_inconclusive_untouched
 test_secondmate_liveness_tick_cadence_gates_the_probe
 test_secondmate_liveness_tick_attempt_bound_parks_then_rearm_on_alive

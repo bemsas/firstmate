@@ -1083,14 +1083,23 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
 # `${#row}`, which counts characters under UTF-8 and bytes under LC_ALL=C
 # (issue #1988). Title text is ASCII-printable only, the same boundary
 # _fm_composer_titled_bottom_ok holds; any other glyph leaves residue, and the
-# verdict stays `unknown`, the safe direction.
+# verdict stays `unknown`, the safe direction. The one exception is U+21AF
+# DOWNWARDS ZIGZAG ARROW, which Claude Code 2.1.312 draws as a single column
+# of composer chrome inside the top rule (`──── ↯ ─`). That glyph is mapped
+# to one ASCII space before the residue test. It is not title text, and the
+# exception is that exact character: ✳ and every other non-ASCII glyph still
+# refuse.
 _fm_composer_titled_rule_row() {  # <trimmed-row> <plain-rule-spaces>
-  local row=$1 expected=$2 spaces
+  local row=$1 expected=$2 spaces mark
   case "$row" in
     ────────*) ;;
     *) return 1 ;;
   esac
   spaces=${row//─/ }
+  # UTF-8 for U+21AF, so the substitution is the same three bytes under
+  # LC_ALL=C and one character under UTF-8. One byte would change the width.
+  printf -v mark '%b' '\342\206\257'
+  spaces=${spaces//"$mark"/ }
   spaces=$(printf '%s' "$spaces" | LC_ALL=C sed 's/[!-~]/ /g')
   case "$spaces" in
     *[![:space:]]*) return 1 ;;

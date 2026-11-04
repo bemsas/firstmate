@@ -55,7 +55,11 @@
 #                       endpoint-liveness read (a record with remote_host
 #                       set restates its remote route instead, because
 #                       remote liveness belongs to the secondmate liveness
-#                       sweep, never a local backend probe), each bounded
+#                       sweep, never a local backend probe). A local
+#                       secondmate whose pane is up but whose agent process
+#                       has no FM_HOME or FM_TASK_INBOX is reported restored
+#                       rather than alive; a named process whose environ
+#                       cannot be read is unknown. Each read is bounded
 #                       and crash-isolated so one task's read can never
 #                       abort the digest: read-only, always runs. The
 #                       per-task reads run serially, so with a wedged
@@ -600,6 +604,60 @@ fm_session_start_endpoint_read() {  # <backend> <target> [expected-label]
   ' _ "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target" "$label"
 }
 
+# fm_session_start_launch_env_read <backend> <target>: the same isolation as
+# the existence read, for one local secondmate's launch environment. stdout is
+# fm_backend_target_launch_env's word<TAB>detail line. A hang or a death is
+# this function's own status, never a missing rest of the digest.
+fm_session_start_launch_env_read() {  # <backend> <target>
+  local backend=$1 target=$2
+  # shellcheck disable=SC2016  # Positional parameters expand inside the child bash, not here.
+  fm_run_timed "$ENDPOINT_TIMEOUT" bash -c '
+    . "$1"
+    fm_backend_target_launch_env "$2" "$3"
+  ' _ "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target"
+}
+
+# fm_session_start_print_local_secondmate_endpoint <backend> <target> <window>
+# The cheap existence read already succeeded. present and unidentified stay
+# "alive": unidentified means the backend could not name a process, which is
+# not evidence the launch environment was stripped. restored names the missing
+# environment in the line. unreadable, and a read that dies or hits the bound,
+# are "unknown" rather than alive.
+fm_session_start_print_local_secondmate_endpoint() {  # <backend> <target> <window>
+  local backend=$1 target=$2 window=$3
+  local launch_rc=0 launch_line='' launch_word='' launch_detail=''
+  launch_line=$(fm_session_start_launch_env_read "$backend" "$target") || launch_rc=$?
+  if [ "$launch_rc" -ne 0 ]; then
+    printf 'endpoint: unknown (backend=%s window=%s; launch environment unreadable)\n' \
+      "$backend" "$window"
+    return 0
+  fi
+  case "$launch_line" in
+    *$'\t'*)
+      launch_word=${launch_line%%$'\t'*}
+      launch_detail=${launch_line#*$'\t'}
+      ;;
+    *)
+      launch_word=$launch_line
+      launch_detail=''
+      ;;
+  esac
+  case "$launch_word" in
+    present|unidentified)
+      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+      ;;
+    restored)
+      [ -n "$launch_detail" ] || launch_detail='agent process has no FM_HOME or FM_TASK_INBOX'
+      printf 'endpoint: restored without launch environment (backend=%s window=%s; %s)\n' \
+        "$backend" "$window" "$launch_detail"
+      ;;
+    *)
+      printf 'endpoint: unknown (backend=%s window=%s; launch environment unreadable)\n' \
+        "$backend" "$window"
+      ;;
+  esac
+}
+
 hash_file_sha256() {
   local file=$1 digest
   [ -f "$file" ] || return 1
@@ -963,7 +1021,12 @@ for meta in "$STATE"/*.meta; do
     # the bound firing and >=128 is a signal death. Every other nonzero status
     # is the probe's own verdict that the endpoint is gone.
     if [ "$endpoint_rc" -eq 0 ]; then
-      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+      kind=$(fm_meta_get "$meta" kind)
+      if [ "$kind" = secondmate ]; then
+        fm_session_start_print_local_secondmate_endpoint "$backend" "${target:-$window}" "$window"
+      else
+        printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+      fi
     elif [ "$endpoint_rc" -eq 124 ] || [ "$endpoint_rc" -ge 128 ]; then
       printf 'endpoint: error (backend=%s window=%s - the endpoint read died or hit its %ss bound; the digest continued past it)\n' \
         "$backend" "$window" "$ENDPOINT_TIMEOUT"

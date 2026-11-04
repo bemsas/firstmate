@@ -276,6 +276,79 @@ fm_test_reap_procevent_homes() {
 
 FM_TEST_WATCHER_REGISTRY=$(mktemp "$FM_TEST_TMPDIR/.fm-test-watcher.$$.XXXXXX") || return 1
 
+# Pty agents started for launch-environment tests. Each line is
+# "<helper-pid> <agent-pid>". The helper holds the pty open; the agent is the
+# foreground process fm_tmux_agent_process can name. Registration is a file so
+# a starter invoked from a command substitution still records the pair.
+FM_TEST_PTY_REGISTRY=$(mktemp "$FM_TEST_TMPDIR/.fm-test-pty.$$.XXXXXX") || return 1
+
+# fm_test_start_pty_agent [KEY=VALUE...] [-- extra-argv...]
+# Print the pid of a bash that is the foreground group of its own pty. Extra
+# argv is appended after the shell's $0, so `-- --resume` puts that exact
+# argument in the agent's cmdline. The helper is reparented with setsid --fork,
+# so the command substitution that captures the pid does not take the agent
+# down when it returns.
+fm_test_start_pty_agent() {
+  local dir helper='' agent='' i
+  dir=$(mktemp -d "$FM_TEST_TMPDIR/pty-agent.XXXXXX") || return 1
+  # The helper must not inherit this function's stdout. A caller that captures
+  # the agent pid with $() would otherwise wait until the helper exits.
+  cat > "$dir/agent.py" <<'PY'
+import os, pty, signal, sys, time
+pidfile = sys.argv[1]
+args = sys.argv[2:]
+env = {"PATH": "/usr/bin:/bin"}
+extra = []
+if "--" in args:
+    cut = args.index("--")
+    pairs, extra = args[:cut], args[cut + 1:]
+else:
+    pairs = args
+for pair in pairs:
+    key, _, value = pair.partition("=")
+    if key:
+        env[key] = value
+agent, fd = pty.fork()
+if agent == 0:
+    os.execve("/bin/bash", ["bash", "-c", "while true; do sleep 30; done", "bash", *extra], env)
+    os._exit(127)
+with open(pidfile, "w") as handle:
+    handle.write("%s %s\n" % (os.getpid(), agent))
+signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
+while True:
+    time.sleep(3600)
+PY
+  setsid --fork python3 "$dir/agent.py" "$dir/pid" "$@" </dev/null >/dev/null 2>&1
+  agent=''
+  i=0
+  while [ "$i" -lt 40 ]; do
+    if [ -s "$dir/pid" ]; then
+      read -r helper agent < "$dir/pid" || true
+      [ -n "$agent" ] && break
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  if [ -z "$agent" ]; then
+    rm -rf "$dir"
+    return 1
+  fi
+  printf '%s %s\n' "$helper" "$agent" >> "$FM_TEST_PTY_REGISTRY"
+  rm -rf "$dir"
+  printf '%s\n' "$agent"
+}
+
+fm_test_reap_pty_agents() {
+  local helper agent
+  [ -f "$FM_TEST_PTY_REGISTRY" ] || return 0
+  while read -r helper agent; do
+    [ -n "${agent:-}" ] && kill -- "-$agent" 2>/dev/null || true
+    [ -n "${agent:-}" ] && kill "$agent" 2>/dev/null || true
+    [ -n "${helper:-}" ] && kill "$helper" 2>/dev/null || true
+  done < "$FM_TEST_PTY_REGISTRY"
+  rm -f "$FM_TEST_PTY_REGISTRY"
+}
+
 fm_test_track_watcher_state() {  # <state-dir>
   [ -n "${1:-}" ] || return 1
   printf '%s\n' "$1" >> "$FM_TEST_WATCHER_REGISTRY"
@@ -363,6 +436,7 @@ fm_test_reap_root_processes() {  # <root>
 
 fm_test_cleanup() {
   local d
+  fm_test_reap_pty_agents
   fm_test_reap_watchers
   fm_test_reap_procevent_homes
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do

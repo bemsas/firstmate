@@ -295,6 +295,74 @@ fm_backend_process_comm() {  # <pid>
   printf '%s' "$comm"
 }
 
+# fm_backend_process_argv_has: 0 when <pid>'s argv contains <exact-arg>.
+# An unreadable argv is not a match. The argv itself is never printed.
+fm_backend_process_argv_has() {  # <pid> <exact-arg>
+  local pid=$1 want=$2 arg
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  while IFS= read -r -d '' arg || [ -n "$arg" ]; do
+    [ "$arg" = "$want" ] && return 0
+  done < "/proc/$pid/cmdline"
+  return 1
+}
+
+# fm_backend_process_launch_env: one line, word<TAB>detail, for <pid>.
+#   present       FM_HOME and FM_TASK_INBOX are both non-empty. A `--resume`
+#                 argv does not change this: the launch environment is there.
+#   restored      the environ was read and either variable is missing or empty.
+#                 The detail names a herdr-restored resume when that exact argv
+#                 is present, and otherwise says the variables are absent.
+#   unreadable    <pid> is numeric and above 1, but its environ cannot be read
+#                 (no procfs, another user's process, or a zombie whose proc
+#                 entry no longer opens). Callers must not report that endpoint
+#                 alive.
+#   unidentified  no pid, a non-numeric pid, or pid <= 1. Callers keep the
+#                 verdict they already had. A backend that cannot name a
+#                 process is not evidence the launch environment was stripped.
+# Values are never printed. Only Linux procfs can answer present or restored;
+# every other host is unreadable for a named pid.
+fm_backend_process_launch_env() {  # <pid>
+  local pid=${1:-} arg home='' inbox='' detail=''
+  case "$pid" in
+    ''|*[!0-9]*) printf 'unidentified\t\n'; return 0 ;;
+  esac
+  if [ "$pid" -le 1 ]; then
+    printf 'unidentified\t\n'
+    return 0
+  fi
+  # [ -r ] is not enough: a zombie can stat as readable and then fail to open.
+  if [ ! -r "/proc/$pid/environ" ] || ! : < "/proc/$pid/environ" 2>/dev/null; then
+    printf 'unreadable\tlaunch environment unreadable\n'
+    return 0
+  fi
+  while IFS= read -r -d '' arg || [ -n "$arg" ]; do
+    case "$arg" in
+      FM_HOME=*) home=${arg#FM_HOME=} ;;
+      FM_TASK_INBOX=*) inbox=${arg#FM_TASK_INBOX=} ;;
+    esac
+  done < "/proc/$pid/environ" || true
+  if [ -n "$home" ] && [ -n "$inbox" ]; then
+    printf 'present\t\n'
+    return 0
+  fi
+  if fm_backend_process_argv_has "$pid" --resume; then
+    detail='herdr-restored resume with no FM_HOME or FM_TASK_INBOX'
+  else
+    detail='agent process has no FM_HOME or FM_TASK_INBOX'
+  fi
+  printf 'restored\t%s\n' "$detail"
+}
+
+# fm_backend_target_launch_env: the foreground process at <target>, classified
+# by fm_backend_process_launch_env. A backend that cannot name that process is
+# unidentified. The line is word<TAB>detail on stdout.
+fm_backend_target_launch_env() {  # <backend> <target>
+  local pid
+  pid=$(fm_backend_agent_process "$1" "$2" 2>/dev/null) || pid=
+  fm_backend_process_launch_env "$pid"
+}
+
 # fm_backend_process_cwd: print <pid>'s CURRENT WORKING DIRECTORY, which is the
 # fact that ties a process to one task's worktree. Linux answers from procfs;
 # elsewhere lsof is the portable reader. A host that can do neither returns

@@ -1145,6 +1145,77 @@ test_matrix_claude_titled_top_rule() {
   pass "matrix: claude's titled top rule proves an idle composer empty and a draft pending (#5601, #5558)"
 }
 
+test_matrix_claude_212_zigzag_top_rule() {
+  # Claude Code 2.1.312 draws U+21AF inside the composer's top rule
+  # (`──── ↯ ─`) and an idle prompt of `❯` plus a non-breaking space. The
+  # captures are the panes that read `unknown` and made relaunch refuse.
+  local fix caps plain ansi draft starred
+  fix=$ROOT/tests/fixtures
+  caps=$'styled=1\ncursor=0\nidentity=1\ncortex=ask'
+  plain=$(cat "$fix/claude-idle-composer-plain.txt")
+  ansi=$(cat "$fix/claude-idle-composer-ansi.txt")
+  assert_screen "claude 2.1.312 idle plain capture" empty "$caps" "$plain"
+  assert_screen "claude 2.1.312 idle ansi capture" empty "$caps" "$ansi"
+  assert_screen "claude 2.1.312 idle plain capture on the plain descriptor" empty \
+    $'styled=0\ncursor=0\nidentity=1\ncortex=ask' "$plain"
+  draft=$(python3 -c '
+import pathlib, sys
+glyph = "\u276f"
+nbsp = "\u00a0"
+lines = []
+for line in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    raw = line[:-1] if line.endswith("\r") else line
+    if raw == glyph or raw == glyph + nbsp:
+        line = glyph + " fix the login bug"
+    lines.append(line)
+sys.stdout.write("\n".join(lines))
+' "$fix/claude-idle-composer-plain.txt")
+  assert_screen "claude 2.1.312 typed draft on the zigzag rule" pending "$caps" "$draft"
+  starred=$(python3 -c '
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+sys.stdout.write(text.replace("\u21af", "\u2733"))
+' "$fix/claude-idle-composer-plain.txt")
+  assert_screen "non-ASCII title in the zigzag column" unknown "$caps" "$starred"
+  pass "matrix: claude 2.1.312's zigzag top rule is empty, a draft stays pending, and other non-ASCII titles still refuse"
+}
+
+test_matrix_claude_212_dim_suggestion() {
+  # Claude Code 2.1.312 draws a rotating prompt suggestion on the idle
+  # composer: the arrow, a non-breaking space, then SGR 2 dim text. Enter
+  # does not submit that suggestion. The fixture is the real idle ANSI
+  # capture with that measured row in place of the bare prompt.
+  local fix caps ghost bright plain stripped
+  fix=$ROOT/tests/fixtures
+  caps=$'styled=1\ncursor=0\nidentity=1\ncortex=ask'
+  ghost=$(cat "$fix/claude-idle-composer-ghost-ansi.txt")
+  assert_screen "claude 2.1.312 dim suggestion on the zigzag rule" empty "$caps" "$ghost"
+  assert_screen "claude 2.1.312 dim suggestion without styling" unknown \
+    $'styled=0\ncursor=0\nidentity=1\ncortex=ask' "$ghost"
+  plain=$(printf '%s\n' "$ghost" | grep -F 'Run your full heartbeat duties now' | fm_composer_strip_ansi)
+  case "$plain" in
+    *'Run your full heartbeat duties now'*) ;;
+    *) fail "the dim suggestion must survive ANSI stripping, got '$plain'" ;;
+  esac
+  stripped=$(printf '%s\n' "$ghost" | grep -F 'Run your full heartbeat duties now' | fm_composer_strip_ghost)
+  case "$stripped" in
+    *'Run your full heartbeat duties now'*)
+      fail "the dim suggestion must strip as ghost text, got '$stripped'"
+      ;;
+  esac
+  bright=$(python3 -c '
+import pathlib, sys
+raw = pathlib.Path(sys.argv[1]).read_bytes()
+phrase = "Run your full heartbeat duties now".encode()
+dim = b"\x1b[2m" + phrase
+if raw.count(dim) != 1:
+    raise SystemExit("dim suggestion missing")
+sys.stdout.buffer.write(raw.replace(dim, phrase, 1))
+' "$fix/claude-idle-composer-ghost-ansi.txt") || fail "could not build the normal-intensity variant"
+  assert_screen "claude 2.1.312 same words at normal intensity" pending "$caps" "$bright"
+  pass "matrix: claude 2.1.312's dim prompt suggestion is empty ghost text, and the same words typed stay pending"
+}
+
 test_matrix_grok_144_approval_titled_bottom_border() {
   # Grok 1.0.44 draws the title inside a bottom border exactly as wide as the
   # top border and appends its approval mode (` · always-approve`). The mid-dot
@@ -1638,6 +1709,8 @@ test_matrix_opencode_leftbar_cwd_furniture
 test_matrix_opencode_leftbar_abs_cwd_furniture
 test_matrix_grok_titled_bottom_border
 test_matrix_claude_titled_top_rule
+test_matrix_claude_212_zigzag_top_rule
+test_matrix_claude_212_dim_suggestion
 test_matrix_grok_144_approval_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
