@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # fm-hermes-inbox.sh - post one Hermes note into the main firstmate inbox.
 #
-# Hermes desktop and ops call this through bin/fm-hermes-inbox-entry.sh.
+# Hermes desktop, ops, and trix call this through bin/fm-hermes-inbox-entry.sh.
 # post writes one note with bin/fm-inbox.sh note. read looks that note up
 # with bin/fm-inbox.sh receipts and prints only its recorded reply.
 # The exchange log is bin/fm-hermes-bridge-lib.sh.
-# The sender is always hermes. The profile is desktop or ops, and it must
+# The sender is always hermes. The profile is desktop, ops, or trix, and it must
 # match HERMES_HOME when that variable names a profile directory.
 # The request id is hermes.<profile>.<correlation>. A second post with the
 # same id returns the original note. A different message for that id is refused.
@@ -20,8 +20,8 @@
 #   1  the inbox call or the exchange log failed
 #
 # Usage:
-#   fm-hermes-inbox.sh post --profile desktop|ops --corr <16-hex> [--message-file <path>]
-#   fm-hermes-inbox.sh read --profile desktop|ops --corr <16-hex>
+#   fm-hermes-inbox.sh post --profile desktop|ops|trix --corr <16-hex> [--message-file <path>]
+#   fm-hermes-inbox.sh read --profile desktop|ops|trix --corr <16-hex>
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -33,8 +33,8 @@ umask 077
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  fm-hermes-inbox.sh post --profile desktop|ops --corr <16-hex> [--message-file <path>]
-  fm-hermes-inbox.sh read --profile desktop|ops --corr <16-hex>
+  fm-hermes-inbox.sh post --profile desktop|ops|trix --corr <16-hex> [--message-file <path>]
+  fm-hermes-inbox.sh read --profile desktop|ops|trix --corr <16-hex>
 EOF
   exit 2
 }
@@ -43,7 +43,7 @@ help_text() {
   cat <<'EOF'
 Post one Hermes note through fm-inbox.sh, or read its recorded reply.
 
---profile desktop and --profile ops are the only accepted profiles.
+--profile desktop, --profile ops, and --profile trix are the only accepted profiles.
 --corr is 16 hex characters and becomes the inbox request id
 hermes.<profile>.<correlation>.
 post reads the note from --message-file or from stdin and does not evaluate it.
@@ -101,8 +101,8 @@ enforce_profile_home() {  # <profile>
     *) printf '%s\n' 'error: HERMES_HOME is not a named profile directory' >&2; exit 2 ;;
   esac
   case "$name" in
-    desktop|ops) ;;
-    *) printf '%s\n' 'error: HERMES_HOME profile must be desktop or ops' >&2; exit 2 ;;
+    desktop|ops|trix) ;;
+    *) printf '%s\n' 'error: HERMES_HOME profile must be desktop, ops, or trix' >&2; exit 2 ;;
   esac
   if [ "$name" != "$1" ]; then
     printf '%s\n' 'error: --profile does not match HERMES_HOME' >&2
@@ -416,7 +416,7 @@ done
 fm_hermes_bridge_corr_ok "$corr" || { printf '%s\n' 'error: corr must be 16 hex characters' >&2; exit 2; }
 corr=$(printf '%s' "$corr" | tr 'A-F' 'a-f')
 topic=$(fm_hermes_bridge_topic_for_profile "$profile") || {
-  printf '%s\n' 'error: profile must be desktop or ops' >&2
+  printf '%s\n' 'error: profile must be desktop, ops, or trix' >&2
   exit 2
 }
 require_home

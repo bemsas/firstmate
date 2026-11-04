@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/fm-hermes-inbox.test.sh - Hermes note into the main firstmate inbox.
 #
-# Covers request creation, correlation, reply lookup, both profiles, malformed
+# Covers request creation, correlation, reply lookup, each profile, malformed
 # input, a missing reply, and exchange output that does not keep secret text.
 set -u
 
@@ -17,6 +17,7 @@ STDOUT="$TMP_ROOT/stdout"
 STDERR="$TMP_ROOT/stderr"
 CORR=0123456789abcdef
 CORR2=fedcba9876543210
+CORR3=0011223344556677
 HERMES_HOME_FOR_TEST=''
 
 mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
@@ -62,7 +63,7 @@ rejects_malformed_input() {
   rc=0
   bash "$ROOT/bin/fm-hermes-inbox.sh" --help >"$STDOUT" 2>"$STDERR" || rc=$?
   [ "$rc" -eq 0 ] || fail "help exited $rc"
-  grep -q 'desktop and --profile ops' "$STDOUT" || fail "help omitted the profiles"
+  grep -q 'desktop, --profile ops, and --profile trix' "$STDOUT" || fail "help omitted the profiles"
   grep -q 'fm-inbox.sh note' "$STDOUT" || fail "help omitted fm-inbox.sh note"
   rc=0
   bash "$ROOT/bin/fm-hermes-inbox.sh" >"$STDOUT" 2>"$STDERR" || rc=$?
@@ -106,16 +107,16 @@ PY
   pass "malformed inbox input is refused"
 }
 
-posts_and_reads_for_both_profiles() {
+posts_and_reads_for_each_profile() {
   local home msg note_id request_id mode dirmode profile corr
   home=$(seed_home)
   msg=$(write_msg 'bridge note')
-  for profile in desktop ops; do
-    if [ "$profile" = desktop ]; then
-      corr=$CORR
-    else
-      corr=$CORR2
-    fi
+  for profile in desktop ops trix; do
+    case "$profile" in
+      desktop) corr=$CORR ;;
+      ops) corr=$CORR2 ;;
+      trix) corr=$CORR3 ;;
+    esac
     HERMES_HOME_FOR_TEST="$TMP_ROOT/profiles/$profile"
     mkdir -p "$HERMES_HOME_FOR_TEST"
     invoke "$home" post --profile "$profile" --corr "$corr" --message-file "$msg"
@@ -152,8 +153,10 @@ posts_and_reads_for_both_profiles() {
     "$log" >/dev/null || fail "desktop create row missing: $(cat "$log")"
   jq -e 'select(.profile == "ops" and .direction == "read" and .outcome == "reply" and .topic == "ops" and .reply == "he said \"ok\"")' \
     "$log" >/dev/null || fail "ops reply row missing: $(cat "$log")"
+  jq -e 'select(.profile == "trix" and .direction == "inbound" and .outcome == "created" and .topic == "trix" and .correlation_id == "0011223344556677")' \
+    "$log" >/dev/null || fail "trix create row missing: $(cat "$log")"
   HERMES_HOME_FOR_TEST=''
-  pass "both profiles create a correlated note and read its reply"
+  pass "desktop, ops, and trix create a correlated note and read its reply"
 }
 
 replay_keeps_the_original_message() {
@@ -252,6 +255,16 @@ entry_uses_pins_and_environment() {
   [ "$INVOKE_RC" -eq 0 ] || fail "pin entry exited $INVOKE_RC ($(cat "$STDERR"))"
   jq -e '.outcome == "created" and .profile == "desktop"' "$STDOUT" >/dev/null \
     || fail "pin entry json: $(cat "$STDOUT")"
+  rm -f "$STDOUT" "$STDERR"
+  set +e
+  env -u FM_HOME -u FM_FIRSTMATE_ROOT -u HERMES_HOME \
+    bash "$skill/scripts/firstmate-inbox.sh" post --profile trix --corr "$CORR3" \
+    --message-file "$(write_msg 'from the trix skill entry')" >"$STDOUT" 2>"$STDERR"
+  INVOKE_RC=$?
+  set -e
+  [ "$INVOKE_RC" -eq 0 ] || fail "trix pin entry exited $INVOKE_RC ($(cat "$STDERR"))"
+  jq -e '.outcome == "created" and .profile == "trix" and .correlation_id == "0011223344556677"' \
+    "$STDOUT" >/dev/null || fail "trix pin entry json: $(cat "$STDOUT")"
   secret_pin="$TMP_ROOT/secret-pin"
   printf '%s\n' 'token=not-a-path' > "$secret_pin"
   ln -s "$secret_pin" "$skill/fm-home-link"
@@ -279,7 +292,7 @@ entry_uses_pins_and_environment() {
 }
 
 rejects_malformed_input
-posts_and_reads_for_both_profiles
+posts_and_reads_for_each_profile
 replay_keeps_the_original_message
 missing_note_and_literal_text
 does_not_leak_secrets

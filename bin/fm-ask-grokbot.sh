@@ -133,10 +133,14 @@ corr=$(printf '%s' "$corr" | tr 'A-F' 'a-f')
 require_home
 validate_timeout "$timeout"
 if [ -n "$topic" ]; then
-  fm_hermes_bridge_profile_for_topic "$topic" >/dev/null || {
-    printf '%s\n' 'error: topic must be admin or ops' >&2
-    exit 2
-  }
+  # Grok Bot records admin and ops only. Hermes profile trix is not a Grok Bot topic.
+  case "$topic" in
+    admin|ops) ;;
+    *)
+      printf '%s\n' 'error: topic must be admin or ops' >&2
+      exit 2
+      ;;
+  esac
 fi
 # Accepted and unused: there is no provider process to bound.
 : "$timeout"

@@ -152,7 +152,12 @@ routes_topic_to_profile() {
   [ "$INVOKE_RC" -eq 0 ] || fail "ops route exited $INVOKE_RC"
   [ "$(arg_at 2)" = ops ] || fail "ops profile $(arg_at 2)"
   [ "$(arg_at 9)" = clarify ] || fail "ops toolset $(arg_at 9)"
-  pass "admin selects desktop and ops selects ops"
+  invoke "$home" --corr "$CORR" --topic trix --message-file "$msg"
+  [ "$INVOKE_RC" -eq 0 ] || fail "trix route exited $INVOKE_RC ($(cat "$STDERR"))"
+  [ "$(arg_at 2)" = trix ] || fail "trix profile $(arg_at 2)"
+  [ "$(arg_at 9)" = clarify ] || fail "trix toolset $(arg_at 9)"
+  [ "$(arg_count)" -eq 14 ] || fail "trix argv count $(arg_count)"
+  pass "admin selects desktop, ops selects ops, and trix selects trix"
 }
 
 wraps_request_and_keeps_clarify_toolset() {

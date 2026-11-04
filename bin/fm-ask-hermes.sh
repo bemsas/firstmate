@@ -8,7 +8,7 @@
 # (bin/fm-pending-reply-lib.sh). The exchange log is bin/fm-hermes-bridge-lib.sh.
 #
 # Topic routing fails closed: admin selects profile desktop, ops selects
-# profile ops. There is no default topic.
+# profile ops, and trix selects profile trix. There is no default topic.
 # The Hermes command is:
 #   hermes --profile <profile> chat --oneshot --quiet --query-file <file>
 #     --toolsets clarify --max-turns 2 --ignore-rules --source tool
@@ -27,7 +27,7 @@
 #   other  the provider's own status
 #
 # Usage:
-#   fm-ask-hermes.sh --corr <16-hex> --topic admin|ops [--timeout <1-600>]
+#   fm-ask-hermes.sh --corr <16-hex> --topic admin|ops|trix [--timeout <1-600>]
 #       [--message-file <path>] [--approved-action <name> --approved-statement-file <path>]
 #   fm-ask-hermes.sh --inbound --corr <16-hex> [--message-file <path>]
 set -euo pipefail
@@ -45,7 +45,7 @@ umask 077
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  fm-ask-hermes.sh --corr <16-hex> --topic admin|ops [--timeout <1-600>]
+  fm-ask-hermes.sh --corr <16-hex> --topic admin|ops|trix [--timeout <1-600>]
       [--message-file <path>] [--approved-action <name> --approved-statement-file <path>]
   fm-ask-hermes.sh --inbound --corr <16-hex> [--message-file <path>]
 EOF
@@ -58,6 +58,7 @@ Ask the local Hermes CLI, or relay one inbound message to this home.
 
 --topic admin selects Hermes profile desktop.
 --topic ops selects Hermes profile ops.
+--topic trix selects Hermes profile trix.
 Any other topic is refused.
 The provider runs with toolset clarify, a query file, and a two-turn bound.
 An approval pair is --approved-action plus --approved-statement-file.
@@ -384,7 +385,7 @@ if [ "$inbound" -eq 1 ]; then
 fi
 
 profile=$(fm_hermes_bridge_profile_for_topic "$topic") || {
-  printf '%s\n' 'error: topic must be admin or ops' >&2
+  printf '%s\n' 'error: topic must be admin, ops, or trix' >&2
   exit 2
 }
 do_outbound "$corr" "$topic" "$profile" "$timeout" "$message" "$action" "$statement" "$exchange"

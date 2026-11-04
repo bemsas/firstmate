@@ -43,6 +43,7 @@ fm_hermes_bridge_profile_for_topic() {  # <topic>
   case "$1" in
     admin) printf '%s\n' desktop ;;
     ops) printf '%s\n' ops ;;
+    trix) printf '%s\n' trix ;;
     *) return 1 ;;
   esac
 }
@@ -51,6 +52,7 @@ fm_hermes_bridge_topic_for_profile() {  # <profile>
   case "$1" in
     desktop) printf '%s\n' admin ;;
     ops) printf '%s\n' ops ;;
+    trix) printf '%s\n' trix ;;
     *) return 1 ;;
   esac
 }

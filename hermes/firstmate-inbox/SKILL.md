@@ -10,17 +10,17 @@ metadata:
 
 # Firstmate inbox
 
-Use this skill when desktop or ops should hand one note to the main firstmate inbox and later read that note's reply.
+Use this skill when desktop, ops, or trix should hand one note to the main firstmate inbox and later read that note's reply.
 
 The only command is the bridge script installed beside this file.
 Do not send email, direct messages, or public posts.
 Do not spend money, place an order, or call a payment tool.
-Do not use any profile other than desktop or ops.
+Do not use any profile other than desktop, ops, or trix.
 
 ## Post
 
 Run the command below with the terminal tool.
-Use desktop or ops for the profile, matching the profile that is running.
+Use desktop, ops, or trix for the profile, matching the profile that is running.
 Use 16 hex characters for the correlation.
 Put the note text in a regular file and pass that path.
 The script does not evaluate the file.
