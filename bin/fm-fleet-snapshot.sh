@@ -1505,6 +1505,10 @@ snapshot_cleanup() {
   cleanup_json_files
 }
 trap snapshot_cleanup EXIT
+# A caller timeout sends TERM; exit through the EXIT trap so per-run temp dirs are removed.
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
 
 bounded_parent_activities_json() {  # <status-file>
   local f=$1 out rc reason script
@@ -2001,7 +2005,8 @@ if [ "$OUTPUT_MODE" = contribution-input ]; then
   contribution_tasks=$(contribution_tasks_json) || { echo "fm-fleet-snapshot: contribution task read failed" >&2; exit 1; }
   contribution_input_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.contrib.XXXXXX") || { echo "fm-fleet-snapshot: contribution temp dir failed" >&2; exit 1; }
   # shellcheck disable=SC2064  # The trap resolves this invocation's directory at exit.
-  trap 'rm -rf -- "$contribution_input_dir"' EXIT
+  # Chain, never replace, the global cleanup so the task and ledger dirs are removed too.
+  trap 'rm -rf -- "$contribution_input_dir"; snapshot_cleanup' EXIT
   printf '%s' "$BACKLOG_JSON" > "$contribution_input_dir/backlog.json" || { echo "fm-fleet-snapshot: contribution backlog write failed" >&2; exit 1; }
   printf '%s' "$contribution_tasks" > "$contribution_input_dir/tasks.json" || { echo "fm-fleet-snapshot: contribution tasks write failed" >&2; exit 1; }
   jq -n --slurpfile backlog "$contribution_input_dir/backlog.json" --slurpfile tasks "$contribution_input_dir/tasks.json" '{backlog:$backlog[0],tasks:$tasks[0]}' || { echo "fm-fleet-snapshot: contribution input assembly failed" >&2; exit 1; }
