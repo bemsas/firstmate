@@ -193,6 +193,10 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-inbox.sh`            | The captain's out-of-band capture surface: queue a note (optionally idempotent by request id), announce or repair its wake, record a durable primary reply, and emit bounded receipts and primary-readiness JSON |
 | `fm-hermes-inbox.sh`     | Hermes desktop, ops, and trix post one note through `fm-inbox.sh` and read its recorded reply |
 | `fm-hermes-inbox-entry.sh` | Skill entry that resolves the local checkout and home, then execs `fm-hermes-inbox.sh` |
+| `fm-hermes-digest-lib.sh` | Format one captain digest from a read-only captain-status.v1 snapshot |
+| `fm-hermes-daily-digest.sh` | Send one Europe/London daily captain digest to Hermes topic ops, or print it |
+| `fm-hermes-schedule.sh` | Write the morning digest and Grok Bot port-check LaunchAgent plists without loading them |
+| `fm-grokbot-port-health.sh` | Check Grok Bot's debug port and relaunch it only when that port is down and no update is in progress |
 | `fm-mail.sh`             | General-purpose mail plane: read unseen IMAP mail, send one SMTP message, or surface new mail as a `check` wake via `poll` (configuration in the home's gitignored `.env`) |
 | `fm-mail.py`             | The IMAP/SMTP engine behind `fm-mail.sh` |
 | `fm-judge-first.sh`      | Judge-first hook: runs a secondmate's new `needs-decision:`/`blocked:` lines through the private decision judge before the supervisor wakes (shadow by default, `config/judge-first` switch; `fm-judge-first.py` is its engine) |
