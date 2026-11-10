@@ -156,8 +156,8 @@ if [ "$cmd" = check ]; then
      synthetic:([.ledger[].observation|select(.synthetic == true)]|length),
      returns:(.returns|group_by(.code)|map({key:.[0].code,value:length})|from_entries),
      escalate:any(.returns[];.escalate),changed_artifacts:$broken} |
-    if $flow == "intent-changed" then .layers[0].state="stale" else . end |
-    if $old then .layers[5].state="stale" else . end' <<<"$ticket")
+    if $flow == "intent-changed" and .layers[0].state == "passed" then .layers[0].state="stale" else . end |
+    if $old and .layers[5].state == "passed" then .layers[5].state="stale" else . end' <<<"$ticket")
   printf '%s\n' "$verdict"
   flow=$(jq -r '.flow' <<<"$verdict")
   printf 'fm-job-ticket: bookkeeping %s; no work-quality verdict\n' "$flow" >&2
@@ -187,7 +187,7 @@ if [ "$cmd" = init ]; then
   [ ! -e "$FILE" ] || refuse 'ticket already exists'
   case "$size" in S|M|L) ;; *) bad_usage 'size must be S, M or L' ;; esac
   [ "$kind" = ship ] || bad_usage 'only software-feature ship jobs supported (--kind ship)'
-  body=$(fm_brief_heading_body "$BRIEF" "## Captain's intent")
+  body=$(fm_brief_heading_body "$BRIEF" "## Captain's intent") || refuse 'cannot read raw intent'
   [[ $body =~ [^[:space:]] ]] || refuse 'raw intent section missing or empty'
   hash=$(intent_hash) || refuse 'cannot read raw intent'
   ticket=$(jq -nc --arg task "$TASK" --arg size "$size" --arg file "$BRIEF" --arg hash "$hash" \
@@ -229,7 +229,7 @@ case "$cmd" in
       [ "$layer" != strategy ] || jq -e '(.ledger|length)>0' <<<"$ticket" >/dev/null || refuse 'strategy needs a truth ledger'
       [ "$layer" != production ] || [ -n "$version" ] || refuse 'production requires version'
       if [ "$layer" = intake ]; then
-        body=$(fm_brief_heading_body "$BRIEF" "## Captain's intent")
+        body=$(fm_brief_heading_body "$BRIEF" "## Captain's intent") || refuse 'cannot read raw intent'
         [[ $body =~ [^[:space:]] ]] || refuse 'raw intent section missing or empty'
         hash=$(intent_hash) || refuse 'cannot read raw intent'
         ticket=$(jq --arg hash "$hash" --argjson at "$now" '

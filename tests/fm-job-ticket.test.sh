@@ -315,7 +315,59 @@ test_sourced_library_selection() {
   done
   pass 'all three sourced libraries select the ticket suite through the public changed-file interface'
 }
+test_verdict_overlay_keeps_untouched_layers_open() {
+  make_case overlay
+  setup_qa
+  observations "$A"
+  cli pass job production --actor worker-1 --artifact "$d/artifacts/production" --version "$B"
+  expect 3 cli check job --version "$B"
+  verdict_is '.flow=="stale" and .layers[5].state=="open"' 'stale observations overlaid never-passed reality'
+  json_is '.layers[5].state=="open" and .layers[5].at==null' 'stored reality was touched'
+  make_case overlay-intake
+  cli init job --size S --kind ship
+  printf "# Task\n## Captain's intent\nChanged synthetic ask before intake.\n## Firstmate spec\nConstraint only.\n" > "$d/home/data/job/brief.md"
+  expect 3 cli check job
+  verdict_is '.flow=="intent-changed" and .layers[0].state=="open"' 'changed ask overlaid never-passed intake'
+  pass 'read-only staleness overlays preserve never-passed intake and reality states'
+}
+test_heading_read_failures() {
+  local fakebin real_awk brief
+  make_case read-failure
+  fakebin=$(fm_fakebin "$d")
+  real_awk=$(command -v awk)
+  brief=$d/home/data/job/brief.md
+  # Deterministically make only this synthetic brief unavailable between its
+  # existence check and awk opening it. The real awk produces the IO failure;
+  # no brief permissions, production readers, or external processes are changed.
+  cat > "$fakebin/awk" <<'SH'
+#!/usr/bin/env bash
+for last; do :; done
+if [ "${last:-}" = "$FM_JOB_TEST_BRIEF" ]; then
+  mv "$FM_JOB_TEST_BRIEF" "$FM_JOB_TEST_BRIEF.unavailable"
+fi
+exec "$FM_JOB_TEST_AWK" "$@"
+SH
+  chmod +x "$fakebin/awk"
+  expect 1 env FM_HOME="$d/home" FM_DATA_OVERRIDE="$d/home/data" FM_CONFIG_OVERRIDE="$d/home/config" \
+    FM_STATE_OVERRIDE="$d/must-not-create-state" FM_JOB_TEST_BRIEF="$brief" FM_JOB_TEST_AWK="$real_awk" \
+    PATH="$fakebin:$PATH" "$CLI" init job --size S --kind ship
+  assert_present "$brief.unavailable" 'brief read failure was not exercised'
+  assert_absent "$d/home/data/job/job-ticket.json" 'read failure created a ticket'
+  expect 1 cli init job --size S --kind ship
+  mv "$brief.unavailable" "$brief"
+  cli init job --size S --kind ship
+  cp "$d/home/data/job/job-ticket.json" "$TMP_ROOT/read-failure-before"
+  expect 1 env FM_HOME="$d/home" FM_DATA_OVERRIDE="$d/home/data" FM_CONFIG_OVERRIDE="$d/home/config" \
+    FM_STATE_OVERRIDE="$d/must-not-create-state" FM_JOB_TEST_BRIEF="$brief" FM_JOB_TEST_AWK="$real_awk" \
+    PATH="$fakebin:$PATH" "$CLI" pass job intake --actor main --artifact "$d/artifacts/intake"
+  assert_present "$brief.unavailable" 'intake read failure was not exercised'
+  cmp -s "$TMP_ROOT/read-failure-before" "$d/home/data/job/job-ticket.json" || fail 'read failure changed ticket'
+  unchanged_refusal pass job intake --actor main --artifact "$d/artifacts/intake"
+  pass 'actual heading IO errors and missing briefs refuse with exit 1 without writes'
+}
 
+test_verdict_overlay_keeps_untouched_layers_open
+test_heading_read_failures
 test_ordered_walk
 test_order_artifacts_atomicity
 test_labels_and_desktop_shape
