@@ -688,6 +688,18 @@
     {
       "path": ".agents/skills/validation-supervision/SKILL.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": "tests/fixtures/claude-idle-composer-ansi.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/claude-idle-composer-ghost-ansi.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/claude-idle-composer-plain.txt",
+      "audience": "maintainer-verification"
     }
   ]
 }
