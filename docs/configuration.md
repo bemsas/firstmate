@@ -801,6 +801,12 @@ The optional local, gitignored `config/cost-ledger` presence flag opts this home
 See [`cost-ledger.md`](cost-ledger.md) for the record contract and query command.
 When the flag is absent, teardown skips recording and the recorder exits before reading task metadata or the ledger.
 
+## Job ticket (config/job-ticket)
+
+The optional local, gitignored `config/job-ticket` presence flag enables explicitly invoked software-feature ticket recording in this home.
+See [job-ticket.md](job-ticket.md) for the record contract, boundaries, and verification entry point.
+No lifecycle command creates the flag or calls the recorder automatically.
+
 ## No-mistakes home resolver (config/nm-home-resolver)
 
 The optional local, gitignored `config/nm-home-resolver` file opts this home into finding each task's no-mistakes home through a site-provided resolver, for sites that run one no-mistakes daemon per isolated workspace, each against its own `NM_HOME`.

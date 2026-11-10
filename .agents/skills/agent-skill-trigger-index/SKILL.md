@@ -10,6 +10,7 @@ metadata:
 
 These skills are not captain-invocable; load them only at their precise triggers.
 
+- `agency-job-flow` - load only when `config/job-ticket` exists in this home and an explicitly selected software-feature ship job is at intake, a worker ready report, or the delivery ask.
 - `operational-home-layout` - load when locating, interpreting, or changing Firstmate home, config, data, state, project, or generated runtime paths.
 - `session-start-recovery` - load when the session-start digest reports unfinished checks, actionable diagnostics, recovery inputs, or output requiring interpretation.
 - `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `OUTDATED:`, `PRESENTATION_UNAVAILABLE:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `STARTUP_MEMORY_BUDGET:`, `CREW_DISPATCH: invalid`, `FLEET_SYNC:`, `NETWORK_CHECKS:`, `HOME_SUMMARY:`, `BACKLOG_RECONCILE:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `SECONDMATE_HANDOFF:`, `NUDGE_SECONDMATES:`, or `FMX:`), or when `BOOTSTRAP_INFO:` says an interrupted backlog cleanup may have left an endpoint or local copy; silence and other `BOOTSTRAP_INFO:` facts need no load.

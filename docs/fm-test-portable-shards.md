@@ -40,6 +40,40 @@ The session-start hint retains its pre-optimization maximum until CI measures th
 The T3 Code backend suites carry the slowest successful Ubuntu samples from CI runs [39463576576](https://github.com/kunchenguid/firstmate/actions/runs/39463576576), [39814995718](https://github.com/kunchenguid/firstmate/actions/runs/39814995718), and [39883948163](https://github.com/kunchenguid/firstmate/actions/runs/39883948163) - 239245 ms for `tests/fm-backend-t3code.test.sh`, 57613 ms for `tests/fm-t3-mcp.test.sh`, 283 ms for `tests/fm-watch-inbox-meta.test.sh`, and the 51 ms and 52 ms live-guard skips for `tests/fm-backend-t3code-live-e2e.test.sh` and `tests/fm-backend-t3code-pr-tools-live-e2e.test.sh`.
 `tests/fm-backend-t3code.test.sh` and `tests/fm-t3-mcp.test.sh` run in the portable parallel lanes, so those two values sit in `portable_parallel_weight_hints`: every case id the backend suite spawns carries a per-run suffix and its cleanup removes only the `/tmp/fm-<id>` directories that run created, and both suites passed running concurrently with each other and beside another parallel suite (see [`fm-test-isolation-proof.md`](fm-test-isolation-proof.md)).
 
+### Provisional offline samples
+
+The following serial hints are successful, non-skipped local Linux x86_64 measurements from 2026-11-10, pending replacement by Ubuntu timing-artifact maxima.
+The ten existing subjects ran once through `bash bin/fm-test-run.sh` with explicit paths, `--jobs 1`, a 60-second per-script bound, and runner-generated timing JSON.
+That invocation reported `FM_TEST_SUMMARY total=10 failed=0 skipped_gate=0 duration_ms=24982`.
+Ten additional existing subjects each ran once with the same serial runner and 60-second per-script bound; all ten exited 0 without a gate skip. Their script durations totalled 117249 ms.
+The job-ticket hint uses its successful focused CLI fixture sample at source `a085e2561caba560fef29df72a4f792f40caaabb`, which reported 13 behavior groups and `duration_ms=29115` with exit 0 and no gate skip.
+These are provisional packing inputs, not CI timings, broad-regression coverage, or a job-duration guarantee.
+All entries retain their existing serial placement, and the 15-percent unhinted guard and modeled shard budget remain unchanged.
+
+| Subject | Observed duration_ms |
+|---|---|
+| `tests/fm-captain-status-age.test.sh` | 1370 |
+| `tests/fm-cost-ledger.test.sh` | 1336 |
+| `tests/fm-fleet-snapshot-contribution-input.test.sh` | 1265 |
+| `tests/fm-housekeeping.test.sh` | 2484 |
+| `tests/fm-job-ticket.test.sh` | 29115 |
+| `tests/fm-parent-channel-scan-exclusion.test.sh` | 10427 |
+| `tests/fm-pr-feedback.test.sh` | 1850 |
+| `tests/fm-project-mode.test.sh` | 1823 |
+| `tests/fm-remote-job-claim-retention.test.sh` | 247 |
+| `tests/fm-tree-check.test.sh` | 2021 |
+| `tests/fm-wait-evidence.test.sh` | 1772 |
+| `tests/fm-startup-growth-check.test.sh` | 8072 |
+| `tests/fm-review-check.test.sh` | 3321 |
+| `tests/fm-record-export-remote-home.test.sh` | 16875 |
+| `tests/fm-git-push-guard.test.sh` | 2708 |
+| `tests/fm-merge-local.test.sh` | 11306 |
+| `tests/fm-remote-delta-read.test.sh` | 6106 |
+| `tests/fm-pr-health.test.sh` | 46494 |
+| `tests/fm-task-capsule.test.sh` | 2642 |
+| `tests/fm-self-repo-role.test.sh` | 15868 |
+| `tests/fm-session-lock-windows-consumers.test.sh` | 3857 |
+
 ## Parallel lanes
 
 The two parallel lanes use longest-processing-time assignment over those hints.
