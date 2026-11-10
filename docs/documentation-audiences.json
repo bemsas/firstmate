@@ -126,6 +126,14 @@
   ],
   "surfaces": [
     {
+      "path": ".agents/skills/agency-job-flow/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/job-ticket.md",
+      "audience": "operator-current"
+    },
+    {
       "path": ".agents/skills/afk/SKILL.md",
       "audience": "agent-runtime"
     },
