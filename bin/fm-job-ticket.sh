@@ -247,7 +247,7 @@ case "$cmd" in
         .layers[$i] |= (.history += [del(.history)] | .state="passed" | .actor=$actor |
           .artifact=$artifact | .ref=(if $ref=="" then null else $ref end) |
           .version=(if $version=="" then null else $version end) | .at=$at) |
-        .layers |= [to_entries[] | if .key>$i then .value.state="stale" else . end | .value] |
+        .layers |= [to_entries[] | if .key>$i and .value.at!=null then .value.state="stale" else . end | .value] |
         if $i<5 then .ledger |= map(if .observation != null then .observation.state="stale" else . end) else . end |
         if $i==2 then .ledger_frozen=true else . end' <<<"$ticket")
     done
@@ -286,7 +286,7 @@ case "$cmd" in
         (if .observation != null then .history += [.observation] else . end) |
         .observation={by:$by,status:$status,version:$version,reason:$reason,synthetic:$synthetic,evidence:$evidence,at:$at,state:"current"}
         else . end) |
-      .layers |= [to_entries[]|if .key>=5 then .value.state="stale" else . end|.value]' <<<"$ticket")
+      .layers |= [to_entries[]|if .key>=5 and .value.at!=null then .value.state="stale" else . end|.value]' <<<"$ticket")
     ;;
   return)
     [ -n "$actor" ] || bad_usage 'return actor required'
@@ -302,7 +302,7 @@ case "$cmd" in
       .returns += [{code:$code,index:$i,by:$by,note:$note,at:$at,escalate:$escalate,
         reopened:(if $i<0 or $escalate then null else .layers[$i].layer end)}] |
       if $i>=0 and ($escalate|not) then
-        .layers |= [to_entries[]|if .key==$i then .value.state="open" elif .key>$i then .value.state="stale" else . end|.value] |
+        .layers |= [to_entries[]|if .key==$i then .value.state="open" elif .key>$i and .value.at!=null then .value.state="stale" else . end|.value] |
         .ledger |= map(if .observation != null then .observation.state="stale" else . end) |
         if $i<=2 then .ledger_frozen=false else . end
       else . end' <<<"$ticket")

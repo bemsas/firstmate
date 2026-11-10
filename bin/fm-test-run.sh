@@ -1579,6 +1579,10 @@ families_for_changed_path() {
       printf '%s\n' watcher-wake-lock
       printf '%s\n' "__script__:fm-backend-t3code.test.sh"
       ;;
+    bin/fm-wake-lib.sh)
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' "__script__:fm-job-ticket.test.sh"
+      ;;
     bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
     bin/fm-push-transition-lib.sh|bin/fm-worker-done.sh|\
     bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
@@ -1740,6 +1744,10 @@ families_for_changed_path() {
     bin/fm-teardown.sh)
       printf '%s\n' pr-forge
       printf '%s\n' "__script__:fm-backend-t3code.test.sh"
+      ;;
+    bin/fm-pr-lib.sh)
+      printf '%s\n' pr-forge
+      printf '%s\n' "__script__:fm-job-ticket.test.sh"
       ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*|bin/fm-cost-ledger.sh|bin/fm-pipeline-spend.sh)

@@ -49,17 +49,21 @@ unchanged_refusal() {
 setup_strategy() {
   cli init job --size S --kind ship
   cli pass job intake --actor main --artifact "$d/artifacts/intake"
+  expect 3 cli check job
+  verdict_is '.flow=="incomplete" and all(.layers[1:][];.state=="open")' 'untouched layers reported stale after intake'
   cli truth job add --id T1 --text 'phone label on one line' --proof desktop --owner desktop
   cli truth job add --id T2 --text 'desktop unchanged' --proof desktop --owner desktop
   cli truth job add --id T3 --text 'existing checks' --proof command --owner vm-mate
   expect 3 cli check job
-  verdict_is '.statuses.UNOBSERVED==3 and .statuses.PROVEN==0' 'unobserved truths were inferred'
+  verdict_is '.flow=="incomplete" and .statuses.UNOBSERVED==3 and .statuses.PROVEN==0' 'unobserved truths or partial progress misreported'
   cli pass job research strategy --actor vm-mate --artifact "$d/artifacts/research"
 }
 setup_qa() {
   setup_strategy
   cli pass job production --actor worker-1 --artifact "$d/artifacts/production" --version "$A"
   cli pass job qa --actor selected-path --ref selected-path --version "$A"
+  expect 3 cli check job
+  verdict_is '.flow=="incomplete" and all(.layers[5:][];.state=="open")' 'untouched layers reported stale after QA'
 }
 observations() {
   local version=$1
@@ -86,6 +90,8 @@ test_ordered_walk() {
   outside_hashes > "$TMP_ROOT/outside-before"
   setup_qa
   observations "$A"
+  expect 3 cli check job --version "$A"
+  verdict_is '.flow=="incomplete" and all(.layers[5:][];.state=="open")' 'first observations staled untouched layers'
   finish
   expect 0 cli check job --version "$A"
   verdict_is '.flow=="complete" and .statuses.PROVEN==3 and .synthetic==3 and (.layers|length)==8' 'bad completed verdict'
@@ -109,6 +115,9 @@ test_order_artifacts_atomicity() {
   unchanged_refusal pass job intake strategy --actor main --artifact "$d/artifacts/intake"
   json_is '.layers[0].state=="open"' 'multi-layer refusal partially committed'
   cli pass job intake research --actor main --artifact "$d/artifacts/research"
+  cli return job --code approach --by main
+  expect 3 cli check job
+  verdict_is '.flow=="incomplete" and all(.layers[2:][];.state=="open")' 'return staled untouched layers'
   unchanged_refusal pass job strategy --actor main --artifact "$d/artifacts/research"
   pass 'order, empty ledger, missing artifacts, invalid references and multi-layer refusals are atomic'
 }
@@ -278,6 +287,34 @@ test_missing_intent_and_overrides() {
   assert_absent "$d/home/data/job" 'default data directory written'
   pass 'missing/empty raw intent refuses and explicit private data/config overrides work'
 }
+test_sourced_library_selection() {
+  local repo=$TMP_ROOT/selection script library listed
+  fm_git_init_commit "$repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$ROOT/bin/fm-test-run.sh" "$CLI" "$repo/bin/"
+  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  for library in fm-wake-lib.sh fm-pr-lib.sh fm-brief-heading-lib.sh; do
+    printf '# SYNTHETIC selection fixture\n' > "$repo/bin/$library"
+  done
+  # These suites are only selection subjects; this test never executes them.
+  for script in fm-job-ticket.test.sh fm-daemon.test.sh fm-pr-merge.test.sh; do
+    printf '# SYNTHETIC selection subject\n' > "$repo/tests/$script"
+  done
+  git -C "$repo" add .
+  git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm fixture
+  for library in fm-wake-lib.sh fm-pr-lib.sh fm-brief-heading-lib.sh; do
+    printf '# SYNTHETIC library change\n' >> "$repo/bin/$library"
+    listed=$(bash "$repo/bin/fm-test-run.sh" --list --changed --base HEAD)
+    assert_contains "$listed" tests/fm-job-ticket.test.sh "$library did not select the ticket suite"
+    case "$library" in
+      fm-wake-lib.sh) assert_contains "$listed" tests/fm-daemon.test.sh 'wake family selection was lost' ;;
+      fm-pr-lib.sh) assert_contains "$listed" tests/fm-pr-merge.test.sh 'PR family selection was lost' ;;
+    esac
+    git -C "$repo" add "bin/$library"
+    git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm fixture-change
+  done
+  pass 'all three sourced libraries select the ticket suite through the public changed-file interface'
+}
 
 test_ordered_walk
 test_order_artifacts_atomicity
@@ -289,3 +326,4 @@ test_changed_intent_recovery
 test_artifact_changes_and_read_only
 test_disabled_and_usage
 test_missing_intent_and_overrides
+test_sourced_library_selection

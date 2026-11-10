@@ -70,7 +70,7 @@ The top-level object contains `task`, `size`, `kind`, `job_type`, `intent`, `led
 
 | Rule | Contract |
 |---|---|
-| R1 - order | Earlier layers must be currently passed; re-passing a layer retains its previous record and makes all later layers stale; a refused multi-layer call commits nothing. |
+| R1 - order | Earlier layers must be currently passed; re-passing a layer retains its previous record and makes later recorded handoffs stale; a refused multi-layer call commits nothing. |
 | R2 - artifacts | Every pass needs an existing nonempty artifact, except QA and delivery may use a nonempty reference, and learning may use `none`; file bytes are hashed. |
 | R3 - ledger | Strategy requires at least one truth and freezes additions; only an accepted intent or approach return unfreezes the ledger. |
 | R4 - labels | The observer label must differ from the recorded production actor label. |
@@ -78,13 +78,14 @@ The top-level object contains `task`, `size`, `kind`, `job_type`, `intent`, `led
 | R6 - binding | Production and every observation need a full lower-case 40-hex version; reality requires all observations current at QA's version, falling back to production's version when QA has none. |
 | R7 - status | `PROVEN` needs evidence; `GAP`, `NOT_DETERMINED`, and `NOT_RUN` each need a reason; reality may pass with any of these explicit statuses. |
 | R8 - returns | Intent reopens intake, approach strategy, craft production, proof reality; environment reopens nothing; the third local return to a layer records escalation without reopening it. |
-| R9 - changed ask | Check re-hashes the actual intent body; passing any later layer refuses a mismatch; re-passing intake refreshes its hash, retains history, and stales downstream records. |
+| R9 - changed ask | Check re-hashes the actual intent body; passing any later layer refuses a mismatch; re-passing intake refreshes its hash, retains history, and stales downstream recorded handoffs. |
 | R10 - freshness | An upstream pass or accepted layer return stales observations; re-observation stales reality and later layers; check also reports differing requested versions or changed bound files. |
 | R11 - opt-in | Mutations are disabled without the local presence flag, while reads remain available. |
 | R12 - custody | A ticket mutation is locked and atomic; no existing task lifecycle, native validation, or approval authority changes. |
 
 Observations kept after a return remain stale until explicitly recorded again, even if the version string has not changed.
-The first two returns to each layer reopen that layer and stale its descendants; environment returns have no escalation counter limit.
+The first two returns to each layer reopen that layer and stale its recorded descendant handoffs; environment returns have no escalation counter limit.
+Layers that have never passed remain open during upstream passes, observations, and returns, so ordinary partial progress reports incomplete rather than stale.
 The escalation flag remains visible in the historical verdict even if subsequent bookkeeping completes.
 
 ## Reading a verdict
