@@ -1633,6 +1633,18 @@ for v in TERM_PROGRAM TERN_PANE TERN_PANE_SOCKET TERN_WINDOW_KEY TERN_WINDOW_SOC
 done
 SH
   chmod +x "$fakebin/codex"
+  # This fork launches Codex through its task-private worker launcher, which
+  # vets the real app-server before exec. The stand-in codex above is not one,
+  # and the launcher hands its inherited environment to codex unchanged, so
+  # this python3 shim runs `codex <args>` directly and leaves the rest alone.
+  cat > "$fakebin/python3" <<SH
+#!/bin/sh
+case "\$1" in
+  *fm-codex-worker.py) [ "\$2" = launch ] && { shift 5; exec codex "\$@"; } ;;
+esac
+exec $(command -v python3) "\$@"
+SH
+  chmod +x "$fakebin/python3"
   launch=$(cat "$launchlog")
   preamble=$(grep '^export ' "$panelog")
   env -i HOME="$TMP_ROOT/pane-home" PATH="$fakebin:$PATH" TERM=xterm "$@" \
