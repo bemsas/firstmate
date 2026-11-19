@@ -15,6 +15,9 @@
 # Every run appends one JSON line to
 # $FM_HOME/data/hermes-bridge/grokbot-port-health.jsonl.
 # Probe, quit, and relaunch waits are bounded.
+# A probe that cannot run is not a down port: when the probe command does
+# not resolve, the run logs probe-unavailable, exits 2, and leaves the app
+# alone. jq writes the log, so a missing jq also exits 2 before any action.
 #
 # Test seams, all optional:
 #   FM_GROKBOT_PORT_PROBE     executable, exit 0 when the port is up
@@ -29,7 +32,7 @@
 # Exit codes:
 #   0    port healthy, update in progress, or relaunch restored the port
 #   1    relaunch failed or the port stayed down
-#   2    usage or a missing home
+#   2    usage, a missing home, or a missing probe or jq
 #   124  a bounded wait was hit
 #
 # Usage:
@@ -77,6 +80,8 @@ valid_bound() {  # <seconds>
 valid_bound "$probe_seconds"
 valid_bound "$relaunch_seconds"
 valid_bound "$wait_seconds"
+
+command -v jq >/dev/null 2>&1 || { printf '%s\n' 'error: jq is required' >&2; exit 2; }
 
 log_dir=$home/data/hermes-bridge
 log=$log_dir/grokbot-port-health.jsonl
@@ -145,6 +150,12 @@ open_app() {
   set -e
   return "$rc"
 }
+
+if ! command -v "${FM_GROKBOT_PORT_PROBE:-nc}" >/dev/null 2>&1; then
+  append_log probe-unavailable 'port probe command is unavailable; Grok Bot left alone'
+  printf '%s\n' 'error: port probe command is unavailable' >&2
+  exit 2
+fi
 
 if port_up; then
   append_log healthy 'port 127.0.0.1:9333 is up'

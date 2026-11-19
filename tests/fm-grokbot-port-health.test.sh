@@ -224,7 +224,30 @@ timeout_and_failure_are_logged() {
   pass "timeouts and failures stay private and bounded"
 }
 
+unavailable_probe_leaves_the_app_alone() {
+  local home rc
+  home=$(seed_home)
+  reset_stub up up ok ok
+  set +e
+  FM_HOME="$home" \
+    FM_GROKBOT_PORT_PROBE="$STUB/no-such-probe" \
+    FM_GROKBOT_UPDATE_PLIST="$PLIST" \
+    FM_GROKBOT_APP_PROBE="$APP" \
+    FM_GROKBOT_QUIT="$QUIT" \
+    FM_GROKBOT_RELAUNCH="$RELAUNCH" \
+    FM_GROKBOT_STUB_DIR="$STUB" \
+    FM_GROKBOT_WAIT_SECONDS=1 \
+    bash "$ROOT/bin/fm-grokbot-port-health.sh" >"$STDOUT" 2>"$STDERR"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "an unavailable probe exited $rc"
+  assert_absent "$STUB/actions" "an unavailable probe quit or relaunched the app"
+  assert_outcome "$home" probe-unavailable 'port probe command is unavailable; Grok Bot left alone'
+  pass "an unavailable port probe leaves a running Grok Bot alone"
+}
+
 healthy_port_does_nothing
 update_in_progress_does_nothing
+unavailable_probe_leaves_the_app_alone
 missing_port_relaunches_within_bounds
 timeout_and_failure_are_logged
