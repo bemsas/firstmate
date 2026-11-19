@@ -291,9 +291,62 @@ entry_uses_pins_and_environment() {
   pass "the skill entry reads pins and lets the environment override them"
 }
 
+installer_writes_a_skill_the_entry_runs() {
+  local home skills skill fakehome bad rc
+  home=$(seed_home)
+  skills="$TMP_ROOT/hermes-skills"
+  skill="$skills/firstmate-inbox"
+  set +e
+  FM_HOME="$home" bash "$ROOT/bin/fm-hermes-skill-install.sh" install --skills-dir "$skills" >"$STDOUT" 2>"$STDERR"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "skill install exited $rc ($(cat "$STDERR"))"
+  assert_present "$skill/SKILL.md" "installed skill has no SKILL.md"
+  [ -x "$skill/scripts/firstmate-inbox.sh" ] || fail "installed skill entry is not executable"
+  rm -f "$STDOUT" "$STDERR"
+  set +e
+  env -u FM_HOME -u FM_FIRSTMATE_ROOT -u HERMES_HOME FM_HERMES_SKILL_DIR="$skill" \
+    bash "$skill/scripts/firstmate-inbox.sh" post --profile ops --corr "$CORR" \
+    --message-file "$(write_msg 'from the installed skill')" >"$STDOUT" 2>"$STDERR"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "installed skill post exited $rc ($(cat "$STDERR"))"
+  jq -e '.outcome == "created" and .profile == "ops"' "$STDOUT" >/dev/null \
+    || fail "installed skill post json: $(cat "$STDOUT")"
+  [ "$(note_count "$home")" -eq 1 ] || fail "installed skill did not post into the pinned home"
+  rm -f "$STDOUT" "$STDERR"
+  set +e
+  env -u FM_HOME -u FM_FIRSTMATE_ROOT -u HERMES_HOME FM_HERMES_SKILL_DIR="$skill" \
+    bash "$skill/scripts/firstmate-inbox.sh" read --profile ops --corr "$CORR" >"$STDOUT" 2>"$STDERR"
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "installed skill read of an unanswered note exited $rc ($(cat "$STDERR"))"
+  jq -e '.outcome == "pending"' "$STDOUT" >/dev/null || fail "installed skill read json: $(cat "$STDOUT")"
+  fakehome="$TMP_ROOT/fakehome"
+  mkdir -p "$fakehome"
+  set +e
+  HOME="$fakehome" FM_HOME="$home" bash "$ROOT/bin/fm-hermes-skill-install.sh" install \
+    --skills-dir "$fakehome/.hermes/profiles/ops/skills" >"$STDOUT" 2>"$STDERR"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "live Hermes skills install exited $rc"
+  assert_contains "$(cat "$STDERR")" 'FM_HERMES_SKILL_ALLOW_LIVE=1' "live refusal hid the guard"
+  assert_absent "$fakehome/.hermes" "a refused live install wrote files"
+  bad="$TMP_ROOT/bad home"
+  mkdir -p "$bad"
+  set +e
+  FM_HOME="$bad" bash "$ROOT/bin/fm-hermes-skill-install.sh" install --skills-dir "$TMP_ROOT/bad-skills" >"$STDOUT" 2>"$STDERR"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "a home the entry would refuse exited $rc"
+  assert_absent "$TMP_ROOT/bad-skills" "a refused home wrote a skill"
+  pass "the installer writes a skill whose entry posts into the pinned home"
+}
+
 rejects_malformed_input
 posts_and_reads_for_each_profile
 replay_keeps_the_original_message
 missing_note_and_literal_text
 does_not_leak_secrets
 entry_uses_pins_and_environment
+installer_writes_a_skill_the_entry_runs

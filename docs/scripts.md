@@ -193,6 +193,10 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-inbox.sh`            | The captain's out-of-band capture surface: queue a note (optionally idempotent by request id), announce or repair its wake, record a durable primary reply, and emit bounded receipts and primary-readiness JSON |
 | `fm-hermes-inbox.sh`     | Hermes desktop, ops, and trix post one note through `fm-inbox.sh` and read its recorded reply |
 | `fm-hermes-inbox-entry.sh` | Skill entry that resolves the local checkout and home, then execs `fm-hermes-inbox.sh` |
+| `fm-hermes-skill-install.sh` | Write the firstmate-inbox skill, its entry, and its pins into one Hermes skills directory |
+| `fm-ask-hermes.sh`       | Ask one Hermes profile through the local CLI and relay the reply, or record one inbound message |
+| `fm-ask-grokbot.sh`      | Record a Grok Bot ask as unsupported, because Grok Bot has no message/reply surface |
+| `fm-hermes-bridge-lib.sh` | Private exchange log shared by the Hermes and Grok Bot bridge scripts |
 | `fm-hermes-digest-lib.sh` | Format one captain digest from a read-only captain-status.v1 snapshot |
 | `fm-hermes-daily-digest.sh` | Send one Europe/London daily captain digest to Hermes topic ops, or print it |
 | `fm-hermes-schedule.sh` | Write the morning digest and Grok Bot port-check LaunchAgent plists without loading them |
