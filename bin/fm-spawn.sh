@@ -6689,9 +6689,17 @@ BUSY_GEN=
     # agy version, a templated launch, and a worktree that does not already
     # carry its own .agents/hooks.json; every other agy launch arms nothing and
     # keeps the rendered-tail fallback (bin/fm-busy-lib.sh).
+    # A relaunch finds the file an earlier spawn of this task wrote (untracked,
+    # carrying the agy-hook source) and replaces it with the new generation.
     AGY_HOOK_WIRING=0
+    AGY_HOOK_REPLACE=0
+    if [ -f "$WT/.agents/hooks.json" ] && [ ! -L "$WT/.agents/hooks.json" ] \
+      && ! git -C "$WT" ls-files --error-unmatch .agents/hooks.json >/dev/null 2>&1 \
+      && grep -qF -- "--source agy-hook" "$WT/.agents/hooks.json"; then
+      AGY_HOOK_REPLACE=1
+    fi
     if [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH" -eq 0 ] \
-      && [ ! -e "$WT/.agents/hooks.json" ] && [ ! -L "$WT/.agents/hooks.json" ] \
+      && { [ "$AGY_HOOK_REPLACE" -eq 1 ] || { [ ! -e "$WT/.agents/hooks.json" ] && [ ! -L "$WT/.agents/hooks.json" ]; }; } \
       && ! git -C "$WT" ls-files --error-unmatch .agents/hooks.json >/dev/null 2>&1 \
       && fm_busy_agy_hooks_verified "$("$AGY_BIN" --version 2>/dev/null | head -1)"; then
       AGY_HOOK_WIRING=1
@@ -6801,6 +6809,7 @@ BUSY_GEN=
       # Workspace busy hooks; bin/fm-agy-worker-hooks.sh owns their contents.
       agy_turnend=-
       [ "$busy_notify_turnend" != true ] || agy_turnend=$TURNEND
+      [ "${AGY_HOOK_REPLACE:-0}" -ne 1 ] || rm -f "$WT/.agents/hooks.json"
       "$SCRIPT_DIR/fm-agy-worker-hooks.sh" "$WT" "$STATE_REAL" "$ID" "$BUSY_GEN" "$agy_turnend" || {
         echo "error: failed to write agy worker hooks for $ID" >&2
         exit 1

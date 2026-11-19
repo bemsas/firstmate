@@ -955,6 +955,15 @@ test_agy_verified_worker_gets_workspace_busy_hooks() {
   out=$(printf '{"hookEventName":"PostToolUse","toolCall":{"name":"run_command","args":{"CommandLine":"echo secret-abc"}},"error":""}' | sh -c "$cmd")
   [ -z "$out" ] || fail "PostToolUse hook printed output: $out"
   assert_grep '"src":"agy-hook"' "$statedir/$id.tool-ring.jsonl" "PostToolUse must feed the tool ring"
+  printf '{"firstmate":{"note":"--source agy-hook stale gen"}}\n' > "$hooks"
+  mkdir -p "$HOME_DIR/data/$id-r"
+  cp "$HOME_DIR/data/$id/brief.md" "$HOME_DIR/data/$id-r/brief.md"
+  printf 'launched\n' > "$CASE_DIR/agy.state"
+  out=$(FM_FAKE_AGY_VERSION=1.5.12 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id-r" \
+    --model gemini-3.8-flash-low)
+  rc=$?
+  expect_code 0 "$rc" "a second spawn over this task's own earlier hooks file should succeed: $out"
+  assert_grep "$id-r" "$hooks" "an earlier generated hooks file must be replaced with the new task's wiring"
   assert_no_grep 'secret-abc' "$statedir/$id.tool-ring.jsonl" "the ring must not store agy tool arguments"
   pass "fm-spawn: a verified agy worker gets clean workspace busy hooks that open, close on fullyIdle, and feed the ring"
 }
