@@ -1,15 +1,29 @@
 #!/usr/bin/env bash
-# fm-hermes-daily-digest.sh - send one captain digest to Hermes profile ops.
+# fm-hermes-daily-digest.sh - post one captain digest to the Hermes ops topic.
 #
-# Delivery calls bin/fm-ask-hermes.sh --topic ops with a regular message
-# file and a bounded timeout. It does not invoke Hermes by any other path.
-# The exchange log is the private log owned by bin/fm-hermes-bridge-lib.sh.
-# One Europe/London local date gets at most one successful send. A lock is
-# held across the send. A date already marked delivered is reprinted and
-# is not read or sent again. A failed send removes the in-flight claim,
-# writes data/hermes-bridge/digest/<date>.failed, and stays retryable.
-# A later launch that finds a successful ops log row for the in-flight
-# correlation records delivery from that claim and does not send again.
+# Delivery runs the Hermes CLI's deterministic send, with no model and no
+# agent loop:
+#   hermes --profile ops send --to <target> --file <date>.msg --json
+# The profile is the ops topic's profile from bin/fm-hermes-bridge-lib.sh.
+# The target is config/hermes-digest-target, owned by
+# bin/fm-hermes-digest-lib.sh. A missing or malformed target is refused and
+# nothing is sent anywhere. FM_HERMES_DIGEST_BIN, when set, replaces hermes;
+# otherwise hermes resolves on PATH, which bin/fm-hermes-schedule.sh pins.
+# Delivery counts only when send exits 0 and its JSON result says success
+# and not skipped.
+#
+# Every run that formats a digest archives it first as
+# data/hermes-bridge/digest/<date>.msg, and a refused or failed send keeps
+# that archive. One Europe/London local date gets at most one successful
+# send. A lock is held across the send, and <date>.sending claims the date
+# while it runs. A date already marked delivered is reprinted and is not
+# read or sent again. A send that Hermes reports failed removes the claim,
+# writes <date>.failed, and stays retryable. A send whose outcome is
+# unknown (time bound, signal, or an unreadable result) keeps the claim,
+# and later runs for that date refuse until the operator checks the ops
+# topic and removes <date>.sending. Each send attempt appends one row,
+# target hermes-send, to the exchange log owned by
+# bin/fm-hermes-bridge-lib.sh. No output names the target.
 #
 # --format-only prints the digest and does not send.
 # --now <epoch> fixes the instant. The default is the current time.
@@ -18,8 +32,11 @@
 #
 # Exit codes:
 #   0    digest sent, or this London date was already sent
-#   2    usage, a missing or bad source, or a stale snapshot
-#   other  the ask script's status
+#   1    Hermes reported the send failed or skipped it
+#   2    usage, a missing or bad source or target, a stale snapshot, or no hermes
+#   3    this or an earlier send for this date has an unknown outcome
+#   124  the time bound was hit; the outcome is unknown
+#   other  Hermes ended on a signal; the outcome is unknown
 #
 # Usage:
 #   fm-hermes-daily-digest.sh [--now <epoch>] [--timeout <1-600>] [--format-only]
@@ -45,13 +62,18 @@ EOF
 
 help_text() {
   cat <<'EOF'
-Send one captain digest to Hermes profile ops, or print it.
+Post one captain digest to the Hermes ops topic, or print it.
 
 The source is captain-status.v1, resolved by bin/fm-hermes-digest-lib.sh.
+The target is config/hermes-digest-target, platform:chat_id[:thread_id].
+Delivery is hermes --profile ops send --to <target> --file <digest> --json.
+A missing or malformed target is refused and nothing is sent.
 --format-only prints the digest and does not call Hermes.
 --now fixes the Unix instant used for the London date and the 24-hour merge window.
---timeout is the bound passed to fm-ask-hermes.sh, from 1 to 600 seconds.
+--timeout bounds the send, from 1 to 600 seconds.
 A London date that already has a delivered marker is not sent again.
+A date whose earlier send has an unknown outcome is refused until its
+<date>.sending claim is removed.
 EOF
 }
 
@@ -75,6 +97,7 @@ validate_timeout() {
 # shellcheck disable=SC2329 # EXIT trap invokes this after a source file is materialized.
 cleanup_temp() {
   [ -z "${FM_HERMES_DIGEST_TEMP:-}" ] || rm -f "$FM_HERMES_DIGEST_TEMP"
+  [ -z "${work:-}" ] || rm -rf "$work"
 }
 trap cleanup_temp EXIT
 
@@ -89,7 +112,7 @@ prepare_source() {
   fi
 }
 
-now='' timeout=120 format_only=0
+now='' timeout=120 format_only=0 work=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --help|-h) help_text; exit 0 ;;
@@ -138,6 +161,9 @@ delivered=$digest_dir/$london.delivered
 failed=$digest_dir/$london.failed
 sending=$digest_dir/$london.sending
 text_path=$digest_dir/$london.text
+msg=$digest_dir/$london.msg
+result=$digest_dir/$london.send.json
+profile=$(fm_hermes_bridge_profile_for_topic ops)
 
 # shellcheck disable=SC2329 # EXIT trap invokes this after the digest lock is held.
 release_lock() {
@@ -177,36 +203,40 @@ acquire_lock() {
   return 1
 }
 
-log_has_success() {  # <corr>
-  local log=$FM_HOME/data/hermes-bridge/log.jsonl corr=$1
-  [ -s "$log" ] || return 1
-  jq -se --arg corr "$corr" '
-    any(.[]; .correlation_id == $corr and .topic == "ops" and .direction == "outbound" and .outcome == "ok")
-  ' "$log" >/dev/null 2>&1
+write_private() {  # <dest> <text>
+  local tmp
+  tmp=$(mktemp "$digest_dir/.write.XXXXXX")
+  printf '%s\n' "$2" > "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$1"
 }
 
 print_saved() {
-  local exchange corr
-  exchange=$(sed -n 's/^exchange=//p' "$delivered" | head -n 1)
+  local corr
   corr=$(sed -n 's/^corr=//p' "$delivered" | head -n 1)
   printf 'date=%s\n' "$london"
-  printf 'exchange=%s\n' "$exchange"
   printf 'corr=%s\n' "$corr"
+  printf 'via=hermes-send\n'
   printf 'already-delivered\n'
   cat "$text_path"
 }
 
-mark_delivered() {  # <corr> <exchange> <text>
-  local corr=$1 exchange=$2 body=$3 tmp
-  tmp=$(mktemp "$digest_dir/.delivered.XXXXXX")
-  printf 'date=%s\ncorr=%s\nexchange=%s\n' "$london" "$corr" "$exchange" > "$tmp"
-  chmod 600 "$tmp"
-  mv -f "$tmp" "$delivered"
-  tmp=$(mktemp "$digest_dir/.text.XXXXXX")
-  printf '%s\n' "$body" > "$tmp"
-  chmod 600 "$tmp"
-  mv -f "$tmp" "$text_path"
+mark_delivered() {  # <corr> <text>
+  write_private "$delivered" "$(printf 'date=%s\ncorr=%s\nvia=hermes-send\nprofile=%s' "$london" "$1" "$profile")"
+  write_private "$text_path" "$2"
   rm -f "$sending" "$failed"
+}
+
+record_failed() {  # <exit> <outcome> [corr]
+  local body
+  body=$(printf 'date=%s\n' "$london")
+  [ -z "${3:-}" ] || body=$(printf '%s\ncorr=%s' "$body" "$3")
+  body=$(printf '%s\nexit=%s\noutcome=%s' "$body" "$1" "$2")
+  write_private "$failed" "$body"
+}
+
+log_send() {  # <corr> <outcome> <exit>
+  fm_hermes_bridge_log_exchange hermes-send "$1" "$1" ops "$profile" outbound "$2" "$3" "$digest" '' '' || true
 }
 
 acquire_lock || exit 1
@@ -221,63 +251,73 @@ if [ -f "$delivered" ]; then
   exit 0
 fi
 
-if [ -f "$sending" ]; then
-  prior_corr=$(sed -n 's/^corr=//p' "$sending" | head -n 1)
-  prior_text=$(awk 'found { print } /^---$/ { found=1 }' "$sending")
-  if [ -n "$prior_corr" ] && log_has_success "$prior_corr"; then
-    prior_exchange=$(jq -r --arg corr "$prior_corr" '
-      select(.correlation_id == $corr and .topic == "ops" and .outcome == "ok") | .exchange_id
-    ' "$FM_HOME/data/hermes-bridge/log.jsonl" | head -n 1)
-    mark_delivered "$prior_corr" "$prior_exchange" "$prior_text"
-    print_saved
-    exit 0
-  fi
+if [ -e "$sending" ]; then
+  printf 'error: an earlier send for %s has an unknown outcome; check the ops topic, then remove %s to send again\n' \
+    "$london" "$sending" >&2
+  exit 3
 fi
 
 prepare_source || exit 2
 digest=$(fm_hermes_digest_format "$FM_HERMES_DIGEST_PATH" "$now") || exit 2
+write_private "$msg" "$digest"
+
+target=$(fm_hermes_digest_target) || { record_failed 2 refused-target; exit 2; }
+hermes_path=$(command -v "${FM_HERMES_DIGEST_BIN:-hermes}" 2>/dev/null || true)
+case "$hermes_path" in
+  /*) [ -x "$hermes_path" ] || hermes_path='' ;;
+  *) hermes_path='' ;;
+esac
+if [ -z "$hermes_path" ]; then
+  printf '%s\n' 'error: hermes is not on PATH; nothing was sent' >&2
+  record_failed 2 refused-no-hermes
+  exit 2
+fi
 
 corr=$(fm_hermes_bridge_new_id) || {
   printf '%s\n' 'error: could not generate a correlation id' >&2
   exit 1
 }
-{
-  printf 'corr=%s\n' "$corr"
-  printf '%s\n' '---'
-  printf '%s\n' "$digest"
-} > "$sending"
-chmod 600 "$sending"
-msg=$digest_dir/$london.msg
-printf '%s\n' "$digest" > "$msg"
-chmod 600 "$msg"
+write_private "$sending" "corr=$corr"
 
 work=$(mktemp -d)
 set +e
-bash "$SCRIPT_DIR/fm-ask-hermes.sh" \
-  --corr "$corr" \
-  --topic ops \
-  --timeout "$timeout" \
-  --message-file "$msg" \
-  >"$work/reply" 2>"$work/err"
+fm_run_timed "$timeout" "$hermes_path" --profile "$profile" send --to "$target" --file "$msg" --json \
+  </dev/null >"$work/out" 2>"$work/err"
 rc=$?
 set -e
-exchange=$(sed -n 's/^exchange=//p' "$work/err" | head -n 1)
-if [ "$rc" -eq 0 ]; then
-  mark_delivered "$corr" "$exchange" "$digest"
+cp "$work/out" "$result" 2>/dev/null || true
+chmod 600 "$result" 2>/dev/null || true
+verdict=unknown
+if jq -e 'type == "object"' "$work/out" >/dev/null 2>&1; then
+  if jq -e '.success == true and (.skipped // false) != true and (.error // null) == null' "$work/out" >/dev/null 2>&1; then
+    verdict=sent
+  else
+    verdict=refused
+  fi
+fi
+
+if [ "$rc" -eq 0 ] && [ "$verdict" = sent ]; then
+  log_send "$corr" sent 0
+  mark_delivered "$corr" "$digest"
   printf 'date=%s\n' "$london"
-  printf 'exchange=%s\n' "$exchange"
   printf 'corr=%s\n' "$corr"
+  printf 'via=hermes-send\n'
   printf '%s\n' "$digest"
-  rm -rf "$work"
   exit 0
 fi
-{
-  printf 'date=%s\n' "$london"
-  printf 'corr=%s\n' "$corr"
-  printf 'exit=%s\n' "$rc"
-} > "$failed"
-chmod 600 "$failed"
-rm -f "$sending"
-cat "$work/err" >&2 || true
-rm -rf "$work"
+
+if [ "$rc" -eq 1 ] || [ "$rc" -eq 2 ] || { [ "$rc" -eq 0 ] && [ "$verdict" = refused ]; }; then
+  log_send "$corr" failed "$rc"
+  record_failed "$rc" failed "$corr"
+  rm -f "$sending"
+  printf 'error: hermes send did not deliver the digest for %s (exit %s); the archive is %s\n' \
+    "$london" "$rc" "$msg" >&2
+  exit 1
+fi
+
+log_send "$corr" unconfirmed "$rc"
+record_failed "$rc" unconfirmed "$corr"
+printf 'error: the send for %s has an unknown outcome (exit %s); check the ops topic before removing %s\n' \
+  "$london" "$rc" "$sending" >&2
+[ "$rc" -ne 0 ] || exit 3
 exit "$rc"

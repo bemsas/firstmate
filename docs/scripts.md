@@ -202,8 +202,8 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-ask-hermes.sh`       | Ask one Hermes profile through the local CLI and relay the reply, or record one inbound message |
 | `fm-ask-grokbot.sh`      | Record a Grok Bot ask as unsupported, because Grok Bot has no message/reply surface |
 | `fm-hermes-bridge-lib.sh` | Private exchange log shared by the Hermes and Grok Bot bridge scripts |
-| `fm-hermes-digest-lib.sh` | Format one captain digest from a read-only captain-status.v1 snapshot |
-| `fm-hermes-daily-digest.sh` | Send one Europe/London daily captain digest to Hermes topic ops, or print it |
+| `fm-hermes-digest-lib.sh` | Format one captain digest from a read-only captain-status.v1 snapshot and resolve its ops-topic target |
+| `fm-hermes-daily-digest.sh` | Post one Europe/London daily captain digest to the configured Hermes ops topic with `hermes send`, or print it |
 | `fm-hermes-schedule.sh` | Write the morning digest and Grok Bot port-check LaunchAgent plists without loading them |
 | `fm-grokbot-port-health.sh` | Check Grok Bot's debug port and relaunch it only when that port is down and no update is in progress |
 | `fm-mail.sh`             | General-purpose mail plane: read unseen IMAP mail, send one SMTP message, or surface new mail as a `check` wake via `poll` (configuration in the home's gitignored `.env`) |

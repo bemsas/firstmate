@@ -22,6 +22,10 @@
 # written, because launchd does not read a shell profile.
 # When config/hermes-digest-source or FM_HERMES_DIGEST_SOURCE is set, the
 # digest plist copies that source into its environment.
+# print-digest and install refuse, writing nothing, while the digest's ops
+# target (config/hermes-digest-target, owned by bin/fm-hermes-digest-lib.sh)
+# is absent or malformed. The plist never carries the target; the digest
+# reads it under FM_HOME at run time.
 #
 # Usage:
 #   fm-hermes-schedule.sh print-digest
@@ -30,6 +34,10 @@
 #   fm-hermes-schedule.sh status --launch-agents-dir <absolute-dir>
 #   fm-hermes-schedule.sh uninstall --launch-agents-dir <absolute-dir>
 set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=bin/fm-hermes-digest-lib.sh
+. "$SCRIPT_DIR/fm-hermes-digest-lib.sh"
 
 umask 077
 
@@ -56,6 +64,7 @@ Hour 7 and minute 0 follow the Mac timezone. Set that timezone to
 Europe/London so 07:00 follows London daylight-saving time.
 Each job PATH pins the directories where this shell finds hermes and jq.
 FM_HERMES_SCHEDULE_PATH replaces that PATH. A tool missing from it is refused.
+The digest job is refused until config/hermes-digest-target names its ops topic.
 EOF
 }
 
@@ -227,7 +236,12 @@ esac
 require_home
 
 case "$cmd" in
-  print-digest) digest_path=$(job_path hermes jq) || exit 2; digest_plist; exit 0 ;;
+  print-digest)
+    fm_hermes_digest_target >/dev/null || exit 2
+    digest_path=$(job_path hermes jq) || exit 2
+    digest_plist
+    exit 0
+    ;;
   print-health) health_path=$(job_path jq) || exit 2; health_plist; exit 0 ;;
 esac
 
@@ -246,6 +260,7 @@ dir=$(require_dir_arg "$dir")
 
 case "$cmd" in
   install)
+    fm_hermes_digest_target >/dev/null || exit 2
     digest_path=$(job_path hermes jq) || exit 2
     health_path=$(job_path jq) || exit 2
     mkdir -p "$dir"

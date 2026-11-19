@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# tests/fm-hermes-daily-digest.test.sh - digest text, ops delivery, and launchd templates.
+# tests/fm-hermes-daily-digest.test.sh - digest text, ops-topic send, and launchd templates.
 #
 # Formatting, source refusal, idempotence, and plist install are driven through
-# the executables. Provider and ssh calls are fixture stubs.
+# the executables. Hermes and ssh are fixture stubs; the Hermes stub follows
+# the installed hermes send argument and --json result contract.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -18,6 +19,7 @@ STUB_DIR="$TMP_ROOT/stub"
 STUB="$TMP_ROOT/hermes-stub"
 SSH_STUB="$TMP_ROOT/ssh-stub"
 SSH_LOG="$TMP_ROOT/ssh-log"
+TARGET='telegram:-1000000000000:7'
 NOW=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' '2026-11-09T13:00:00Z' +%s 2>/dev/null || date -u -d '2026-11-09T13:00:00Z' +%s)
 [ -n "${NOW:-}" ] || fail "could not parse the fixture instant"
 LONDON=$(TZ=Europe/London date -r "$NOW" +%F 2>/dev/null || TZ=Europe/London date -d "@$NOW" +%F)
@@ -49,6 +51,7 @@ seed_home() {
   printf '%s\n' bridge-mate > "$dir/.fm-secondmate-home"
   printf '%s\n' 'schema=fm-secondmate-parent.v1' 'route=remote' 'parent_host=remote.example' \
     > "$dir/.fm-secondmate-parent"
+  printf '%s\n' "$TARGET" > "$dir/config/hermes-digest-target"
   printf '%s\n' "$dir"
 }
 
@@ -61,37 +64,48 @@ plain_home() {
 
 cat > "$STUB" << 'EOF'
 #!/usr/bin/env bash
+# Fixture for the installed hermes CLI: [--profile <name>] send --to <target>
+# --file <path> [--json]. Any other shape is a usage error (exit 2), as in
+# hermes send. A chat call is recorded so a test can prove it never happens.
 set -eu
-dir=${FM_ASK_HERMES_STUB_DIR:?}
+dir=${FM_HERMES_STUB_DIR:?}
 mkdir -p "$dir"
 while ! mkdir "$dir/gate" 2>/dev/null; do
   sleep 0.05
 done
 printf 'x\n' >> "$dir/calls"
 printf '%s\0' "$@" >> "$dir/args"
-prev=
-q=
-for a in "$@"; do
-  if [ "$prev" = --query-file ]; then
-    q=$a
-  fi
-  prev=$a
+profile='' cmd='' to='' file='' json=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --profile) profile=$2; shift 2 ;;
+    send|chat) cmd=$1; shift ;;
+    --to) to=$2; shift 2 ;;
+    --file) file=$2; shift 2 ;;
+    --json) json=1; shift ;;
+    *) rmdir "$dir/gate"; printf 'usage: unexpected %s\n' "$1" >&2; exit 2 ;;
+  esac
 done
-if [ -n "${q:-}" ] && [ -f "$q" ]; then
-  cp "$q" "$dir/query"
-fi
 rmdir "$dir/gate"
-printf '%s\n' 'session_id: local-test' >&2
-mode=${FM_ASK_HERMES_STUB_MODE:-ok}
+if [ "$cmd" = chat ]; then
+  printf 'chat\n' >> "$dir/chat"
+  printf '%s\n' ack
+  exit 0
+fi
+[ "$cmd" = send ] && [ -n "$to" ] && [ -f "$file" ] || { printf '%s\n' 'usage: send --to --file' >&2; exit 2; }
+cp "$file" "$dir/body"
+printf '%s\n' "$profile" > "$dir/profile"
+printf '%s\n' "$to" > "$dir/to"
+mode=${FM_HERMES_STUB_MODE:-ok}
 case "$mode" in
-  sleep)
-    sleep "${FM_ASK_HERMES_STUB_SLEEP_SECS:-1}"
-    printf '%s\n' ack
-    ;;
-  fail) exit "${FM_ASK_HERMES_STUB_EXIT:-9}" ;;
-  ok) printf '%s\n' ack ;;
+  sleep) sleep "${FM_HERMES_STUB_SLEEP_SECS:-1}"; printf '%s\n' '{"success": true, "note": "sent"}' ;;
+  ok) printf '%s\n' '{"success": true, "note": "sent"}' ;;
+  fail) printf '%s\n' '{"error": "platform rejected the message"}'; exit 1 ;;
+  skipped) printf '%s\n' '{"success": true, "skipped": true, "reason": "cron_auto_delivery_duplicate_target"}' ;;
+  garbage) printf '%s\n' 'not json' ;;
   *) exit 99 ;;
 esac
+[ "$json" -eq 1 ] || exit 98
 EOF
 chmod +x "$STUB"
 
@@ -114,11 +128,11 @@ invoke() {  # <home> <args...>
   rm -f "$STDOUT" "$STDERR"
   set +e
   FM_HOME="$home" \
+    FM_HERMES_DIGEST_BIN="${FM_HERMES_DIGEST_BIN:-$STUB}" \
     FM_ASK_HERMES_BIN="$STUB" \
-    FM_ASK_HERMES_STUB_DIR="$STUB_DIR" \
-    FM_ASK_HERMES_STUB_MODE="${FM_ASK_HERMES_STUB_MODE:-ok}" \
-    FM_ASK_HERMES_STUB_EXIT="${FM_ASK_HERMES_STUB_EXIT:-9}" \
-    FM_ASK_HERMES_STUB_SLEEP_SECS="${FM_ASK_HERMES_STUB_SLEEP_SECS:-1}" \
+    FM_HERMES_STUB_DIR="$STUB_DIR" \
+    FM_HERMES_STUB_MODE="${FM_HERMES_STUB_MODE:-ok}" \
+    FM_HERMES_STUB_SLEEP_SECS="${FM_HERMES_STUB_SLEEP_SECS:-1}" \
     FM_HERMES_DIGEST_SOURCE="${FM_HERMES_DIGEST_SOURCE:-}" \
     FM_HERMES_DIGEST_SSH_BIN="${FM_HERMES_DIGEST_SSH_BIN:-}" \
     FM_HERMES_DIGEST_SSH_LOG="${FM_HERMES_DIGEST_SSH_LOG:-$SSH_LOG}" \
@@ -193,7 +207,7 @@ write_min() {  # <path> <headline> <updated-iso> [extra-jq]
 
 formats_bounds_action_urls_and_cutoff() {
   local home src out1 out2
-  unset FM_HERMES_DIGEST_SOURCE FM_ASK_HERMES_STUB_MODE || true
+  unset FM_HERMES_DIGEST_SOURCE FM_HERMES_STUB_MODE || true
   home=$(plain_home)
   src="$TMP_ROOT/rich.json"
   write_rich "$src"
@@ -396,36 +410,43 @@ resolves_configured_and_local_sources() {
 }
 
 sends_once_to_ops_and_retries_failure() {
-  local home src log profile count
-  unset FM_HERMES_DIGEST_SOURCE FM_ASK_HERMES_STUB_MODE || true
+  local home src log count digest_dir
+  unset FM_HERMES_DIGEST_SOURCE FM_HERMES_STUB_MODE || true
   home=$(seed_home)
+  digest_dir="$home/data/hermes-bridge/digest"
   src="$TMP_ROOT/send.json"
   write_min "$src" 'Send this' "$(iso_of $((NOW - 15)))"
   FM_HERMES_DIGEST_SOURCE=$src
   reset_calls
-  FM_ASK_HERMES_STUB_MODE=fail
+  FM_HERMES_STUB_MODE=fail
   invoke "$home" --now "$NOW" --timeout 30
-  [ "$INVOKE_RC" -eq 9 ] || fail "failed send exited $INVOKE_RC ($(cat "$STDERR"))"
+  [ "$INVOKE_RC" -eq 1 ] || fail "failed send exited $INVOKE_RC ($(cat "$STDERR"))"
   [ "$(call_count)" -eq 1 ] || fail "failed send call count $(call_count)"
-  assert_absent "$home/data/hermes-bridge/digest/$LONDON.delivered" "a failed send was marked delivered"
-  assert_absent "$home/data/hermes-bridge/digest/$LONDON.sending" "a failed send left the in-flight claim"
-  assert_grep 'exit=9' "$home/data/hermes-bridge/digest/$LONDON.failed" "failure record missing"
-  FM_ASK_HERMES_STUB_MODE=ok
+  assert_absent "$digest_dir/$LONDON.delivered" "a failed send was marked delivered"
+  assert_absent "$digest_dir/$LONDON.sending" "a failed send left the in-flight claim"
+  assert_grep 'exit=1' "$digest_dir/$LONDON.failed" "failure record missing"
+  assert_grep 'outcome=failed' "$digest_dir/$LONDON.failed" "failure outcome missing"
+  assert_grep 'Do this: Send this' "$digest_dir/$LONDON.msg" "a failed send lost the archive"
+  assert_contains "$(cat "$STDERR")" 'did not deliver' "a failed send was silent"
+  FM_HERMES_STUB_MODE=ok
   invoke "$home" --now "$NOW" --timeout 30
   [ "$INVOKE_RC" -eq 0 ] || fail "retry exited $INVOKE_RC ($(cat "$STDERR"))"
   [ "$(call_count)" -eq 2 ] || fail "retry call count $(call_count)"
   assert_contains "$(cat "$STDOUT")" 'Do this: Send this' "retry hid the digest"
-  assert_grep 'date=' "$STDOUT" "retry hid the date"
-  profile=$(tr '\0' '\n' < "$STUB_DIR/args" | awk 'prev == "--profile" { print; exit } { prev = $0 }')
-  [ "$profile" = ops ] || fail "profile was $profile"
-  assert_contains "$(cat "$STUB_DIR/query")" 'Do not post publicly' "ops path skipped the ask wrapper"
-  assert_contains "$(cat "$STUB_DIR/query")" 'Do this: Send this' "ops query lost the digest"
+  assert_contains "$(cat "$STDOUT")" 'via=hermes-send' "retry hid the delivery path"
+  assert_not_contains "$(cat "$STDOUT")$(cat "$STDERR")" "$TARGET" "output named the target"
+  assert_equals "ops" "$(cat "$STUB_DIR/profile")" "send used the ops profile"
+  assert_equals "$TARGET" "$(cat "$STUB_DIR/to")" "send used the configured target"
+  assert_equals "$(cat "$digest_dir/$LONDON.msg")" "$(cat "$STUB_DIR/body")" "sent body is the archived digest"
+  assert_equals "$(printf '%s\n' --profile ops send --to "$TARGET" --file "$digest_dir/$LONDON.msg" --json)" \
+    "$(tail -n 8 < <(tr '\0' '\n' < "$STUB_DIR/args"))" "send argv"
+  [ ! -e "$STUB_DIR/chat" ] || fail "delivery went through a Hermes chat session"
+  assert_absent "$digest_dir/$LONDON.failed" "delivery left the failure record"
+  assert_present "$digest_dir/$LONDON.msg" "delivery dropped the archive"
   log="$home/data/hermes-bridge/log.jsonl"
-  [ -f "$log" ] || fail "exchange log missing"
   [ "$(mode_of "$log")" = 600 ] || fail "log mode $(mode_of "$log")"
-  [ "$(mode_of "$(dirname "$log")")" = 700 ] || fail "log dir mode $(mode_of "$(dirname "$log")")"
-  jq -se 'any(.[]; .topic == "ops" and .profile == "ops" and .direction == "outbound" and .outcome == "ok")' \
-    "$log" >/dev/null || fail "ops log row missing: $(cat "$log")"
+  jq -se 'any(.[]; .target == "hermes-send" and .topic == "ops" and .outcome == "sent")' \
+    "$log" >/dev/null || fail "send log row missing: $(cat "$log")"
   count=$(call_count)
   invoke "$home" --now "$NOW" --timeout 30
   [ "$INVOKE_RC" -eq 0 ] || fail "duplicate exited $INVOKE_RC ($(cat "$STDERR"))"
@@ -435,36 +456,90 @@ sends_once_to_ops_and_retries_failure() {
   invoke "$home" --now "$NOW" --timeout 30
   [ "$INVOKE_RC" -eq 0 ] || fail "delivered date with a missing source exited $INVOKE_RC"
   [ "$(call_count)" -eq "$count" ] || fail "a delivered date sent after the source disappeared"
-  pass "ops delivery is logged once and a failed send stays retryable"
+  pass "the digest is sent once to the ops topic by hermes send and a failed send stays retryable"
 }
 
-recovers_a_successful_claim_and_a_dead_lock() {
-  local home src dead
-  unset FM_HERMES_DIGEST_SOURCE FM_ASK_HERMES_STUB_MODE || true
+refuses_a_missing_target_or_hermes() {
+  local home src digest_dir
+  unset FM_HERMES_DIGEST_SOURCE FM_HERMES_STUB_MODE || true
+  src="$TMP_ROOT/target.json"
+  write_min "$src" 'Target check' "$(iso_of $((NOW - 15)))"
+  FM_HERMES_DIGEST_SOURCE=$src
+  for case_name in absent bare symlink; do
+    home=$(seed_home)
+    digest_dir="$home/data/hermes-bridge/digest"
+    case "$case_name" in
+      absent) rm -f "$home/config/hermes-digest-target" ;;
+      bare) printf '%s\n' telegram > "$home/config/hermes-digest-target" ;;
+      symlink)
+        printf '%s\n' "$TARGET" > "$TMP_ROOT/linked-target"
+        rm -f "$home/config/hermes-digest-target"
+        ln -s "$TMP_ROOT/linked-target" "$home/config/hermes-digest-target"
+        ;;
+    esac
+    reset_calls
+    invoke "$home" --now "$NOW" --timeout 30
+    [ "$INVOKE_RC" -eq 2 ] || fail "$case_name target exited $INVOKE_RC"
+    [ "$(call_count)" -eq 0 ] || fail "$case_name target called hermes"
+    assert_grep 'outcome=refused-target' "$digest_dir/$LONDON.failed" "$case_name target was not recorded"
+    assert_grep 'Do this: Target check' "$digest_dir/$LONDON.msg" "$case_name target lost the archive"
+    assert_absent "$digest_dir/$LONDON.delivered" "$case_name target was marked delivered"
+    assert_absent "$digest_dir/$LONDON.sending" "$case_name target left a claim"
+    assert_contains "$(cat "$STDERR")" 'hermes-digest-target' "$case_name refusal hid the config name"
+  done
   home=$(seed_home)
+  reset_calls
+  FM_HERMES_DIGEST_BIN="$TMP_ROOT/no-such-hermes" invoke "$home" --now "$NOW" --timeout 30
+  [ "$INVOKE_RC" -eq 2 ] || fail "missing hermes exited $INVOKE_RC"
+  assert_grep 'outcome=refused-no-hermes' "$home/data/hermes-bridge/digest/$LONDON.failed" "missing hermes was not recorded"
+  assert_contains "$(cat "$STDERR")" 'nothing was sent' "missing hermes refusal was unclear"
+  pass "a missing or bare target, or a missing hermes, sends nothing and keeps the archive"
+}
+
+unknown_outcomes_keep_the_claim() {
+  local home src digest_dir mode want
+  unset FM_HERMES_DIGEST_SOURCE FM_HERMES_STUB_MODE || true
+  src="$TMP_ROOT/unknown.json"
+  write_min "$src" 'Unknown outcome' "$(iso_of $((NOW - 15)))"
+  FM_HERMES_DIGEST_SOURCE=$src
+  home=$(seed_home)
+  reset_calls
+  FM_HERMES_STUB_MODE=skipped
+  invoke "$home" --now "$NOW" --timeout 30
+  [ "$INVOKE_RC" -eq 1 ] || fail "skipped send exited $INVOKE_RC"
+  assert_absent "$home/data/hermes-bridge/digest/$LONDON.delivered" "a skipped send was marked delivered"
+  assert_absent "$home/data/hermes-bridge/digest/$LONDON.sending" "a skipped send kept the claim"
+  for mode in garbage sleep; do
+    home=$(seed_home)
+    digest_dir="$home/data/hermes-bridge/digest"
+    reset_calls
+    FM_HERMES_STUB_MODE=$mode
+    FM_HERMES_STUB_SLEEP_SECS=5
+    invoke "$home" --now "$NOW" --timeout 1
+    want=3
+    [ "$mode" = sleep ] && want=124
+    [ "$INVOKE_RC" -eq "$want" ] || fail "$mode send exited $INVOKE_RC, not $want ($(cat "$STDERR"))"
+    assert_absent "$digest_dir/$LONDON.delivered" "$mode send was marked delivered"
+    assert_present "$digest_dir/$LONDON.sending" "$mode send dropped the claim"
+    assert_grep 'outcome=unconfirmed' "$digest_dir/$LONDON.failed" "$mode outcome was not recorded"
+    assert_contains "$(cat "$STDERR")" 'unknown outcome' "$mode send was silent"
+    FM_HERMES_STUB_MODE=ok
+    invoke "$home" --now "$NOW" --timeout 30
+    [ "$INVOKE_RC" -eq 3 ] || fail "rerun after $mode exited $INVOKE_RC"
+    [ "$(call_count)" -eq 1 ] || fail "rerun after $mode sent again"
+    rm -f "$digest_dir/$LONDON.sending"
+    invoke "$home" --now "$NOW" --timeout 30
+    [ "$INVOKE_RC" -eq 0 ] || fail "send after clearing the $mode claim exited $INVOKE_RC"
+  done
+  unset FM_HERMES_STUB_SLEEP_SECS
+  pass "a skipped send stays retryable and an unknown outcome blocks a second send"
+}
+
+recovers_a_dead_lock() {
+  local home src dead
+  unset FM_HERMES_DIGEST_SOURCE FM_HERMES_STUB_MODE || true
   src="$TMP_ROOT/recover.json"
   write_min "$src" 'Fresh' "$(iso_of $((NOW - 15)))"
-  mkdir -p "$home/data/hermes-bridge/digest"
-  chmod 700 "$home/data/hermes-bridge" "$home/data/hermes-bridge/digest"
-  {
-    printf '%s\n' 'corr=bbbbbbbbbbbbbbbb'
-    printf '%s\n' '---'
-    printf '%s\n' 'Do this: planted'
-  } > "$home/data/hermes-bridge/digest/$LONDON.sending"
-  jq -nc \
-    --arg corr bbbbbbbbbbbbbbbb \
-    --arg exchange aaaaaaaaaaaaaaaa \
-    '{timestamp:"2026-11-09T13:00:00Z",exchange_id:$exchange,correlation_id:$corr,target:"hermes",topic:"ops",profile:"ops",direction:"outbound",outcome:"ok",exit_code:0,request:"planted",reply:"ack",version:""}' \
-    > "$home/data/hermes-bridge/log.jsonl"
-  chmod 600 "$home/data/hermes-bridge/log.jsonl"
-  FM_HERMES_DIGEST_SOURCE=$TMP_ROOT/missing-status.json
-  reset_calls
-  invoke "$home" --now "$NOW" --timeout 30
-  [ "$INVOKE_RC" -eq 0 ] || fail "claim recovery exited $INVOKE_RC ($(cat "$STDERR"))"
-  assert_contains "$(cat "$STDOUT")" 'already-delivered' "recovered claim did not record delivery"
-  assert_contains "$(cat "$STDOUT")" 'Do this: planted' "recovered claim dropped the stored text"
-  assert_contains "$(cat "$STDOUT")" 'exchange=aaaaaaaaaaaaaaaa' "recovered claim dropped the exchange"
-  [ "$(call_count)" -eq 0 ] || fail "recovered claim sent again"
   home=$(seed_home)
   FM_HERMES_DIGEST_SOURCE=$src
   dead=2147483646
@@ -480,7 +555,7 @@ recovers_a_successful_claim_and_a_dead_lock() {
   invoke "$home" --now "$NOW" --timeout 30
   [ "$INVOKE_RC" -eq 0 ] || fail "dead lock exited $INVOKE_RC ($(cat "$STDERR"))"
   [ "$(call_count)" -eq 1 ] || fail "dead lock did not send ($(cat "$STDERR"))"
-  pass "a logged in-flight claim is not sent again and a dead lock is replaced"
+  pass "a dead lock is replaced"
 }
 
 concurrent_launches_send_one_digest() {
@@ -491,19 +566,19 @@ concurrent_launches_send_one_digest() {
   write_min "$src" 'Only once' "$(iso_of $((NOW - 15)))"
   reset_calls
   FM_HOME="$home" \
-    FM_ASK_HERMES_BIN="$STUB" \
-    FM_ASK_HERMES_STUB_DIR="$STUB_DIR" \
-    FM_ASK_HERMES_STUB_MODE=sleep \
-    FM_ASK_HERMES_STUB_SLEEP_SECS=1 \
+    FM_HERMES_DIGEST_BIN="$STUB" \
+    FM_HERMES_STUB_DIR="$STUB_DIR" \
+    FM_HERMES_STUB_MODE=sleep \
+    FM_HERMES_STUB_SLEEP_SECS=1 \
     FM_HERMES_DIGEST_SOURCE="$src" \
     bash "$ROOT/bin/fm-hermes-daily-digest.sh" --now "$NOW" --timeout 30 \
     >"$TMP_ROOT/out1" 2>"$TMP_ROOT/err1" &
   p1=$!
   FM_HOME="$home" \
-    FM_ASK_HERMES_BIN="$STUB" \
-    FM_ASK_HERMES_STUB_DIR="$STUB_DIR" \
-    FM_ASK_HERMES_STUB_MODE=sleep \
-    FM_ASK_HERMES_STUB_SLEEP_SECS=1 \
+    FM_HERMES_DIGEST_BIN="$STUB" \
+    FM_HERMES_STUB_DIR="$STUB_DIR" \
+    FM_HERMES_STUB_MODE=sleep \
+    FM_HERMES_STUB_SLEEP_SECS=1 \
     FM_HERMES_DIGEST_SOURCE="$src" \
     bash "$ROOT/bin/fm-hermes-daily-digest.sh" --now "$NOW" --timeout 30 \
     >"$TMP_ROOT/out2" 2>"$TMP_ROOT/err2" &
@@ -539,6 +614,16 @@ EOF
   FM_HOME="$home" bash "$ROOT/bin/fm-hermes-schedule.sh" --help >"$STDOUT" || fail "schedule help failed"
   assert_contains "$(cat "$STDOUT")" 'never loads' "help hid the no-load rule"
   set +e
+  PATH="$fake:$PATH" FM_HOME="$home" \
+    bash "$ROOT/bin/fm-hermes-schedule.sh" install --launch-agents-dir "$dir" >"$STDOUT" 2>"$STDERR"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "install without a digest target exited $rc"
+  assert_contains "$(cat "$STDERR")" 'hermes-digest-target' "refusal did not name the target config"
+  assert_absent "$dir/dev.firstmate.hermes-daily-digest.plist" "a digest job without a target was written"
+  mkdir -p "$home/config"
+  printf '%s\n' "$TARGET" > "$home/config/hermes-digest-target"
+  set +e
   PATH="$fake:$PATH" FM_HOME="$home" FM_HERMES_DIGEST_SOURCE='https://example.com/a?b=1&c=2' \
     bash "$ROOT/bin/fm-hermes-schedule.sh" install --launch-agents-dir "$dir" >"$STDOUT" 2>"$STDERR"
   rc=$?
@@ -563,6 +648,7 @@ EOF
   if grep -q -e '.bashrc' -e '.env' -e 'bash -l' "$digest" "$health"; then
     fail "plist sources a shell or credential file"
   fi
+  assert_no_grep "$TARGET" "$digest" "the plist carries the target"
   assert_grep '<integer>1800</integer>' "$health" "port check is not every 30 minutes"
   assert_grep "$home/bin/fm-grokbot-port-health.sh" "$health" "health program is not under FM_HOME"
   if grep -q '<key>StartCalendarInterval</key>' "$health"; then
@@ -605,8 +691,8 @@ scheduled_digest_runs_under_its_plist_environment() {
   mkdir -p "$userbin"
   cat > "$userbin/hermes" << EOF
 #!/bin/sh
-printf 'x\n' >> "$calls"
-printf '%s\n' ack
+printf '%s\n' "\$*" >> "$calls"
+printf '%s\n' '{"success": true}'
 EOF
   chmod +x "$userbin/hermes"
   src="$TMP_ROOT/plist-env.json"
@@ -635,6 +721,7 @@ print(e["PATH"]); print(e["FM_HOME"]); print(e["FM_HERMES_DIGEST_SOURCE"]); prin
   set -e
   [ "$rc" -eq 0 ] || fail "digest under the plist environment exited $rc ($(cat "$STDERR"))"
   [ "$(wc -l < "$calls" | tr -d ' ')" -eq 1 ] || fail "hermes was not called once under the plist environment"
+  assert_grep "--profile ops send --to $TARGET --file " "$calls" "the scheduled run did not use hermes send"
   assert_contains "$(cat "$STDOUT")" 'Plist env headline' "digest text was not printed"
   mkdir -p "$TMP_ROOT/emptybin"
   set +e
@@ -653,7 +740,9 @@ formats_empty_groups_without_inventing_items
 refuses_bad_sources
 resolves_configured_and_local_sources
 sends_once_to_ops_and_retries_failure
-recovers_a_successful_claim_and_a_dead_lock
+refuses_a_missing_target_or_hermes
+unknown_outcomes_keep_the_claim
+recovers_a_dead_lock
 concurrent_launches_send_one_digest
 installs_launchd_templates_without_loading_them
 scheduled_digest_runs_under_its_plist_environment

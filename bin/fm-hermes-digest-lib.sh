@@ -39,11 +39,38 @@
 # the headline, otherwise a line that nothing is waiting.
 #
 # FM_HERMES_DIGEST_STALE_SECONDS overrides the 36-hour bound in tests.
+#
+# Delivery target: $FM_HOME/config/hermes-digest-target, a regular file
+# whose first line is the operator's approved ops topic in hermes send
+# --to form, platform:chat_id or platform:chat_id:thread_id (for example
+# telegram:<chat_id>:<thread_id>). A bare platform, which would mean that
+# profile's home channel, is refused. There is no environment override and
+# no default. fm_hermes_digest_target prints the value; its errors never
+# print it.
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   printf '%s\n' 'fm-hermes-digest-lib.sh is sourced, not executed' >&2
   exit 2
 fi
+
+fm_hermes_digest_target() {  # prints the configured ops target, or returns 2
+  local home=${FM_HOME:-} cfg value
+  case "$home" in
+    /*) ;;
+    *) fm_hermes_digest_die "FM_HOME must be an absolute path"; return ;;
+  esac
+  cfg=$home/config/hermes-digest-target
+  if [ ! -f "$cfg" ] || [ -L "$cfg" ]; then
+    fm_hermes_digest_die "the digest target is not configured: config/hermes-digest-target is absent or not a regular file"
+    return
+  fi
+  value=$(head -n 1 "$cfg" | tr -d '\r')
+  if ! [[ $value =~ ^[a-z][a-z0-9_]*:[A-Za-z0-9_@.+#-]+(:[A-Za-z0-9_-]+)?$ ]]; then
+    fm_hermes_digest_die "config/hermes-digest-target is not platform:chat_id[:thread_id]"
+    return
+  fi
+  printf '%s' "$value"
+}
 
 FM_HERMES_DIGEST_STALE_DEFAULT=129600
 
