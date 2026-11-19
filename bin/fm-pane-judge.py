@@ -14,6 +14,7 @@ Usage:
   fm-pane-judge.py shadow --registry FILE --main-home DIR --duration SECS
                           [--interval SECS] [--hosts LIST] [--out FILE]
                           [--manifest-dir DIR] [--max-cycles N] [--state-dir DIR]
+                          [--publish HOST:PATH]
   fm-pane-judge.py summary [--verdicts FILE] [--outcomes FILE] [--manifest-dir DIR]
                            [--window SECS] [--min-labelled N] [--state-dir DIR]
   fm-pane-judge.py budget [--state-dir DIR]
@@ -34,8 +35,11 @@ judge          Gate each snapshot, judge only the ambiguous ones within budget,
 shadow         Run collect + judge every --interval seconds (default 300) until
                --duration elapses or --max-cycles is reached, writing the start
                and end manifests under --manifest-dir. Exits nonzero without a
-               start manifest when the collector, credential, or model catalog
-               preflight fails.
+               start manifest when the collector, credential, model catalog, or
+               (with --publish) first publish preflight fails. A stop signal
+               ends the run without starting another collection.
+               --publish mirrors the newest verdict rows to an authorized host
+               over BatchMode ssh after every cycle that wrote rows.
 summary        Compare verdicts with human or mate outcome labels and print the
                shadow-gate verdict.
 budget         Print the shared spend and call ledger.
@@ -265,7 +269,8 @@ def tail_lines(path, count, max_bytes=65536):
     return lines[-count:]
 
 
-STATUS_RE = re.compile(r'^\s*([a-z][a-z-]*)\s*(?:\[([^\]]*)\])?\s*:')
+# A status line may carry any number of bracket groups, e.g. `paused [at=1] [key=k]:`.
+STATUS_RE = re.compile(r'^\s*([a-z][a-z-]*)\s*((?:\[[^\]]*\]\s*)*):')
 PR_RE = re.compile(r'https://[^\s)\]>"\']+/(?:pull|pulls|merge_requests)/\d+')
 
 
@@ -332,9 +337,13 @@ def git_facts(worktree, base):
     head = git('rev-parse', 'HEAD')
     if head is None:
         return None
-    porcelain = git('status', '--porcelain=v1', '--untracked-files=normal')
+    rc, porcelain = run(['git', '-C', worktree, 'status', '--porcelain=v1', '--untracked-files=all'],
+                        timeout=15, env=env)
+    entries = [line for line in porcelain.splitlines() if line.strip()] if rc == 0 else None
     upstream = git('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}')
-    facts = {'head': head[:40], 'dirty_files': None if porcelain is None else len([l for l in porcelain.splitlines() if l.strip()]),
+    artifacts = [e for e in entries or [] if is_browser_artifact(e)]
+    facts = {'head': head[:40], 'dirty_files': None if entries is None else len(entries) - len(artifacts),
+             'ignored_artifacts': None if entries is None else len(artifacts),
              'upstream': upstream, 'unpushed_commits': None, 'commits_ahead_of_base': None, 'base_ref': None,
              'last_commit_ts': int_or_none(git('log', '-1', '--format=%ct'))}
     if upstream:
@@ -345,6 +354,22 @@ def git_facts(worktree, base):
             facts['commits_ahead_of_base'] = int_or_none(git('rev-list', '--count', f'{ref}..HEAD'))
             break
     return facts
+
+
+# Untracked output of browser and proof tooling, never deliverable source:
+# Playwright MCP's scratch directory, and media or notes under a top-level proof/.
+ARTIFACT_DIRS = ('.playwright-mcp/',)
+PROOF_SUFFIXES = ('.png', '.jpg', '.jpeg', '.webp', '.gif', '.mp4', '.webm', '.md', '.txt')
+
+
+def is_browser_artifact(entry):
+    """Only an untracked (??) entry with a plain path can be a tooling artifact."""
+    if not entry.startswith('?? ') or entry[3:].startswith('"'):
+        return False
+    path = entry[3:]
+    if path.startswith(ARTIFACT_DIRS):
+        return True
+    return path.startswith('proof/') and path.lower().endswith(PROOF_SUFFIXES)
 
 
 def proc_table():
@@ -1193,8 +1218,63 @@ def write_json(path, value):
     os.replace(tmp, path)
 
 
+PUBLISH_LINES = 5000
+# Runs on the remote host: one lock beside the target, refuse foreign content, atomic rename.
+REMOTE_PUBLISH = r'''set -eu
+p=$1
+mkdir -p -- "$(dirname -- "$p")"
+exec 9>>"$p.lock"
+flock -w 30 9
+if [ -s "$p" ] && ! head -n 1 -- "$p" | grep -q '"schema":"fm-pane-judge.verdict.v1"'; then
+  echo "refusing: $p holds content that is not pane-judge verdicts" >&2
+  exit 3
+fi
+t="$p.tmp.$$"
+cat > "$t"
+mv -f -- "$t" "$p"
+'''
+
+
+def publish_target(value):
+    host, sep, path = (value or '').partition(':')
+    path = path[2:] if path.startswith('~/') else path
+    if (not sep or host not in AUTHORIZED_REMOTE_HOSTS or not path or path.startswith('/')
+            or '..' in path.split('/') or not re.fullmatch(r'[A-Za-z0-9._/-]+', path)):
+        raise SystemExit('--publish must be <authorized-host>:<path under the remote home>')
+    return host, path
+
+
+def publish(out, target):
+    """Mirror the newest verdict rows to the remote file, serialized locally and remotely."""
+    host, path = target
+    os.makedirs(state_dir(), exist_ok=True)
+    with open(os.path.join(state_dir(), 'publish.lock'), 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            with open(out, 'rb') as fh:
+                fcntl.flock(fh, fcntl.LOCK_SH)
+                data = fh.read()
+        except FileNotFoundError:
+            data = b''
+        lines = [line for line in data.splitlines(keepends=True) if line.endswith(b'\n')][-PUBLISH_LINES:]
+        payload = b''.join(lines)
+        remote = ' '.join(['bash', '-c', shlex.quote(REMOTE_PUBLISH), 'fm-pane-judge-publish', shlex.quote(path)])
+        rc, _ = run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', host, remote], timeout=90, stdin=payload)
+    return {'status': 'ok' if rc == 0 else 'failed', 'rc': rc, 'rows': len(lines),
+            'sha256': hashlib.sha256(payload).hexdigest(), 'at': iso(now_epoch())}
+
+
+def file_mark(path):
+    try:
+        st = os.stat(path)
+        return (st.st_size, st.st_mtime_ns)
+    except OSError:
+        return None
+
+
 def cmd_shadow(args):
     out = args.out or default_out()
+    target = publish_target(args.publish) if args.publish else None
     manifest_dir = args.manifest_dir or os.path.join(FM_HOME, 'data', 'pane-judge-shadow')
     hosts = hosts_arg(args.hosts)
     started = now_epoch()
@@ -1202,6 +1282,7 @@ def cmd_shadow(args):
             'interval': args.interval, 'duration': args.duration, 'pid': os.getpid(),
             'model': PRIMARY_MODEL, 'fallback_model': FALLBACK_MODEL, 'daily_usd_cap': DAILY_USD_CAP,
             'lane_daily_calls': LANE_DAILY_CALLS, 'enter_confidence': ENTER_CONFIDENCE,
+            'publish': ':'.join(target) if target else None,
             'homes': {h: v for h, v in registry_homes(args.registry, args.main_home).items() if h in hosts},
             **source_identity()}
     stop = {'reason': None}
@@ -1218,13 +1299,19 @@ def cmd_shadow(args):
     preflight['collector'] = {h: (report.get(h) if isinstance(report.get(h), dict) and 'error' in report.get(h)
                                   else 'ok') for h in hosts}
     preflight['lanes'] = {h: sum(1 for s in snaps if s['host'] == h) for h in hosts}
+    published = None
+    if target:
+        preflight['publish'] = publish(out, target)
+        published = file_mark(out) if preflight['publish']['status'] == 'ok' else None
     ok = (preflight['credential'] and (preflight['catalog_primary'] or preflight['catalog_fallback'])
-          and all(v == 'ok' for v in preflight['collector'].values()))
-    if not ok:
+          and all(v == 'ok' for v in preflight['collector'].values())
+          and (not target or preflight['publish']['status'] == 'ok'))
+    if stop['reason'] is not None or not ok:
+        reason = stop['reason'] or 'preflight-failed'
         write_json(os.path.join(manifest_dir, 'manifest-end.json'),
                    dict(base, phase='end', started_at=started, ended_at=now_epoch(), ended_at_iso=iso(now_epoch()),
-                        exit_reason='preflight-failed', preflight=preflight))
-        print(canonical({'exit_reason': 'preflight-failed', 'preflight': preflight}))
+                        exit_reason=reason, preflight=preflight))
+        print(canonical({'exit_reason': reason, 'preflight': preflight}))
         return 1
     write_json(os.path.join(manifest_dir, 'manifest-start.json'),
                dict(base, phase='start', started_at=started, started_at_iso=iso(started),
@@ -1241,16 +1328,23 @@ def cmd_shadow(args):
         cycles += 1
         for k, v in stats.items():
             totals[k] = totals.get(k, 0) + v
-        append_jsonl(os.path.join(manifest_dir, 'cycles.jsonl'),
-                     {'cycle': cycles, 'at': iso(cycle_start), 'lanes': len(snaps), 'collector': report,
-                      'stats': stats})
+        cycle = {'cycle': cycles, 'at': iso(cycle_start), 'lanes': len(snaps), 'collector': report, 'stats': stats}
+        if target and file_mark(out) != published:
+            cycle['publish'] = publish(out, target)
+            if cycle['publish']['status'] == 'ok':
+                published = file_mark(out)
+            else:
+                totals['publish-failed'] = totals.get('publish-failed', 0) + 1
+        append_jsonl(os.path.join(manifest_dir, 'cycles.jsonl'), cycle)
         if args.max_cycles and cycles >= args.max_cycles:
             stop['reason'] = 'max-cycles'
             break
         while stop['reason'] is None and now_epoch() < min(deadline, cycle_start + args.interval):
             time.sleep(min(5, max(0.1, min(deadline, cycle_start + args.interval) - now_epoch())))
+        if stop['reason'] is not None:
+            break
         if now_epoch() >= deadline:
-            stop['reason'] = stop['reason'] or 'duration-complete'
+            stop['reason'] = 'duration-complete'
             break
         snaps, report = collect_all(args.registry, args.main_home, hosts)
     ended = now_epoch()
@@ -1388,6 +1482,7 @@ def main(argv=None):
     p.add_argument('--out')
     p.add_argument('--manifest-dir')
     p.add_argument('--max-cycles', type=int, default=0)
+    p.add_argument('--publish', help='mirror verdict rows to <authorized-host>:<path under the remote home>')
     p.set_defaults(fn=cmd_shadow)
     p = sub.add_parser('summary')
     p.add_argument('--verdicts')

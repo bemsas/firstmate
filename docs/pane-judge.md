@@ -24,8 +24,8 @@ Each lane becomes one JSON object; every field may be `null`, and `null` always 
 | `busy` `{state, event, source, ts}` | the semantic busy record `state/<id>.busy-state` |
 | `process` `{shell_pid, shell_only, harness_alive, foreground, build_procs, build_cpu_ticks, build_cpu_active}` | Herdr `pane process-info` plus a one-second `/proc` CPU sample of test and build descendants, excluding the harness itself |
 | `pane_tail`, `pane_sha` | the last 80 lines of Herdr `pane read --source recent-unwrapped` |
-| `git` `{head, dirty_files, upstream, unpushed_commits, commits_ahead_of_base, base_ref, last_commit_ts}` | read-only git in the worktree with optional locks off |
-| `pr_url`, `last_event`, `status_tail` | `pr=` metadata, else the newest pull or merge request URL in the status log, and its last event |
+| `git` `{head, dirty_files, ignored_artifacts, upstream, unpushed_commits, commits_ahead_of_base, base_ref, last_commit_ts}` | read-only git in the worktree with optional locks off; `dirty_files` counts every tracked change and untracked file except browser artifacts, which `ignored_artifacts` counts |
+| `pr_url`, `last_event`, `status_tail` | `pr=` metadata, else the newest pull or merge request URL in the status log, and its last event, whose line may carry any number of bracket groups such as `[at=..] [key=..]` |
 | `report_exists`, `brief_dod` | `data/<id>/report.md` and the brief's Definition of done section |
 | `tool_ring` | the last 10 events of `state/<id>.tool-ring.jsonl`, any fields, when present |
 | `silence_seconds` | the caller's value, else the judge's own pane-change tracking and the newest tool-ring `ts` |
@@ -42,6 +42,7 @@ The model sees a lane only in one of two ambiguity classes, and every other lane
 
 A lane with active build CPU always settles, so a running build is never classified.
 A declared `needs-decision`, `blocked`, `paused`, or `failed` event settles the lane unless the busy hook proves later activity (busy after the declaration, or idle more than 600 seconds after it).
+Browser artifacts are untracked files under `.playwright-mcp/`, plus untracked images, videos, Markdown, or text under a top-level `proof/`; any tracked change and any other untracked file still counts as dirty.
 Unmet requires positive evidence: dirty files or unpushed commits; for a pull-request mode, no recorded pull request with no work pushed or none committed; for `local-only`, nothing committed; for a scout, no report.
 Unknown facts settle as unknown and are never read as unmet or stalled.
 An unchanged lane (same gate, `seq`, pane hash, and DoD facts) is not judged twice.
@@ -91,11 +92,17 @@ Each judged or refused lane appends one JSON line; `--out` defaults to `state/pa
 
 A consumer must ignore any row whose `shadow` is `true` and any `label` of `unknown`.
 This version writes shadow rows only and has no live publication mode.
+The step-5 actuator on `akamai_vm` reads rows from `~/.fm-actuator/verdicts.jsonl`, which `shadow --publish` fills (below); until its reader skips `shadow: true` rows, it must stay off.
 
 ## Shadow audit and outcome labels
 
 `shadow` runs collection and judging every `--interval` seconds for `--duration` seconds.
 It writes `manifest-start.json` only after its preflight proves the credential, a usable model catalog entry, and a working collector on every requested host, then appends one line per cycle to `cycles.jsonl` and finishes with `manifest-end.json`.
+A stop signal ends the run at the next safe point and never starts another collection; the end manifest records `signal-<n>`.
+With `--publish <host>:<path>`, the run mirrors the newest 5,000 complete verdict rows to that path under the remote home after every cycle that wrote rows.
+The host must be an authorized remote host and the path must stay under the remote home.
+The copy runs over BatchMode ssh under a local `publish.lock` and a remote `<path>.lock`, lands through a temporary file and an atomic rename, and refuses to replace a file whose first line is not a pane-judge verdict.
+A first publish is part of the preflight, so an unreachable or refused target stops the run before `manifest-start.json`; later failures are counted in `cycles.jsonl` and retried next cycle.
 Ground truth is a separate JSONL of human or mate labels, schema `fm-pane-judge.outcome.v1` with `lane` (or `host`, `home`, `task`), `ts`, one of the six labels, a non-empty `labeler`, and an optional `note`.
 `summary` matches each verdict to the nearest outcome on the same lane within 900 seconds; unlabelled verdicts and unlabelled outcomes are never counted as agreement.
 It reports `pass` only when the same run's `manifest-end.json` records at least 24 hours elapsed, whenever its last verdict fell, with at least 20 labelled matches, agreement of 85% or more, no emitted `needs-restart` on an active build or against a non-restart outcome, and every day's spend under $0.50.

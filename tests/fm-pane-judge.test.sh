@@ -470,6 +470,118 @@ PY
   pass "shadow writes start and end manifests only after preflight and the summary counts only labelled outcomes"
 }
 
+collect_one() {  # <dir> <home> -> the "ok" lane snapshot
+  PATH="$1/bin:$PATH" python3 "$JUDGE" collect-local --host desktop --home "fleet=$2" | grep '"task":"ok"'
+}
+
+test_keyed_status_and_browser_artifacts() {
+  local dir home wt snap
+  dir=$(world artifacts)
+  home="$dir/fleet"
+  wt="$dir/wt"
+  mkdir -p "$home/state"
+  fm_git_init_commit "$wt" >/dev/null 2>&1 || fail "git fixture failed"
+  mkdir -p "$wt/proof"
+  printf 'notes\n' > "$wt/proof/notes.md"
+  git -C "$wt" add proof/notes.md
+  git -C "$wt" -c user.name=t -c user.email=t@example.invalid commit -qm proof
+  printf 'kind=ship\nmode=direct-PR\nworktree=%s\nbackend=herdr\nherdr_session=s\nherdr_pane_id=w1:p1\n' "$wt" > "$home/state/ok.meta"
+  fake_herdr "$dir/bin" "$dir/herdr.log" "$wt"
+  # Status: an unkeyed line parses (control), then the owner's keyed wait must win.
+  printf 'done [at=100]: https://github.com/o/r/pull/9 ready\n' > "$home/state/ok.status"
+  snap=$(collect_one "$dir" "$home")
+  printf '%s\n' "$snap" | grep -q '"last_event":{"at":100,"verb":"done"}' || fail "unkeyed status line not parsed"
+  printf 'needs-decision [at=200] [key=nm-review]: ask-user findings=review-7\n' >> "$home/state/ok.status"
+  snap=$(collect_one "$dir" "$home")
+  printf '%s\n' "$snap" | grep -q '"last_event":{"at":200,"verb":"needs-decision"}' || fail "keyed status line not parsed"
+  [ "$(printf '%s\n' "$snap" | gate_of)" = declared:needs-decision ] || fail "a keyed declared wait must settle in Tier 1"
+  printf 'resolved [key=nm-review] [at=300]: answered\ndone [at=301]: https://github.com/o/r/pull/9 ready\n' >> "$home/state/ok.status"
+  # Browser artifacts: untracked Playwright scratch and proof media never count as unmet work.
+  mkdir -p "$wt/.playwright-mcp"
+  printf 'x\n' > "$wt/.playwright-mcp/page-1.yml"
+  printf 'png\n' > "$wt/proof/shot.png"
+  snap=$(collect_one "$dir" "$home")
+  printf '%s\n' "$snap" | grep -q '"dirty_files":0' || fail "browser artifacts counted as dirty"
+  printf '%s\n' "$snap" | grep -q '"ignored_artifacts":2' || fail "ignored artifacts not reported"
+  [ "$(printf '%s\n' "$snap" | gate_of)" = idle-dod-met ] || fail "clean PR lane with only artifacts must be met"
+  # Counterfactuals: untracked source, an untracked non-media file under proof/, and a tracked proof edit all count.
+  printf 'print(1)\n' > "$wt/new_feature.py"
+  snap=$(collect_one "$dir" "$home")
+  printf '%s\n' "$snap" | grep -q '"dirty_files":1' || fail "untracked source must count"
+  [ "$(printf '%s\n' "$snap" | gate_of)" = idle-unmet-dod ] || fail "untracked source keeps DoD unmet"
+  rm "$wt/new_feature.py"
+  printf '#!/bin/sh\n' > "$wt/proof/capture.sh"
+  collect_one "$dir" "$home" | grep -q '"dirty_files":1' || fail "untracked non-media proof file must count"
+  rm "$wt/proof/capture.sh"
+  printf 'edited\n' >> "$wt/proof/notes.md"
+  collect_one "$dir" "$home" | grep -q '"dirty_files":1' || fail "a tracked proof edit must count"
+  pass "keyed status lines settle declared waits and only untracked browser and proof media are ignored as dirt"
+}
+
+fake_ssh() {  # <bin-dir> <remote-home>: run the remote command locally in a stand-in home
+  mkdir -p "$1" "$2"
+  cat > "$1/ssh" <<SH
+#!/usr/bin/env bash
+while [ "\$#" -gt 0 ]; do case "\$1" in -o) shift 2 ;; *) break ;; esac; done
+printf '%s\n' "\$1" >> '$2/.ssh-hosts'
+shift
+cd '$2' && HOME='$2' exec bash -c "\$*"
+SH
+  chmod +x "$1/ssh"
+}
+
+test_shadow_stop_and_publish() {
+  local dir home wt pid i rc
+  dir=$(world publish)
+  home="$dir/main"
+  wt="$dir/wt"
+  mkdir -p "$home/state" "$home/data"
+  : > "$home/data/secondmates.md"
+  fm_git_init_commit "$wt" >/dev/null 2>&1 || fail "git fixture failed"
+  printf 'print(1)\n' > "$wt/unfinished.py"
+  printf 'kind=ship\nmode=direct-PR\nworktree=%s\nbackend=herdr\nherdr_session=s\nherdr_pane_id=w1:p1\n' "$wt" > "$home/state/ok.meta"
+  fake_herdr "$dir/bin" "$dir/herdr.log" "$wt"
+  fake_ssh "$dir/bin" "$dir/remote"
+  stub_start "$dir"
+  answer "$dir" needs-nudge 0.9
+  # Always called in a subshell: exec makes the background pid the judge itself.
+  shadow_in() {
+    PATH="$dir/bin:$PATH" FM_HOME="$dir/home" FM_PANE_JUDGE_ENV_FILE="$dir/env" \
+      FM_PANE_JUDGE_API_BASE="http://127.0.0.1:$(cat "$dir/port")" exec python3 "$JUDGE" shadow \
+      --registry "$home/data/secondmates.md" --main-home "$home" --hosts desktop --state-dir "$dir/pj" \
+      --out "$dir/out.jsonl" "$@"
+  }
+  ( shadow_in --duration 60 --interval 1 --publish other_host:x --manifest-dir "$dir/m0" ) >/dev/null 2>&1 &&
+    fail "an unauthorized publish host must be refused"
+  ( shadow_in --duration 600 --interval 300 --manifest-dir "$dir/m1" \
+    --publish 'akamai_vm:~/.fm-actuator/verdicts.jsonl' ) > "$dir/run1.out" 2>&1 &
+  pid=$!
+  for i in $(seq 1 200); do [ -s "$dir/m1/cycles.jsonl" ] && break; sleep 0.05; done
+  [ -s "$dir/m1/cycles.jsonl" ] || fail "first cycle never completed"
+  kill -TERM "$pid"
+  for i in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+  kill -0 "$pid" 2>/dev/null && fail "a stop during the interval must end the run promptly"
+  wait "$pid"
+  grep -q '"exit_reason": "signal-15"' "$dir/m1/manifest-end.json" || { cat "$dir/run1.out" >&2; fail "stop reason not recorded"; }
+  [ "$(grep -c 'agent get' "$dir/herdr.log")" = 1 ] || fail "a stop during the interval started another collection"
+  cmp -s "$dir/out.jsonl" "$dir/remote/.fm-actuator/verdicts.jsonl" || fail "published file differs from the verdict rows"
+  [ "$(grep -c '"schema":"fm-pane-judge.verdict.v1"' "$dir/remote/.fm-actuator/verdicts.jsonl")" = 1 ] || fail "verdict row not published"
+  [ -e "$dir/remote/.fm-actuator/verdicts.jsonl.lock" ] || fail "remote publish lock missing"
+  [ "$(sort -u "$dir/remote/.ssh-hosts")" = akamai_vm ] || fail "publish went to an unexpected host"
+  grep -q '"publish": "akamai_vm:.fm-actuator/verdicts.jsonl"' "$dir/m1/manifest-start.json" || fail "publish target not in manifest"
+  grep -q '"publish":{"at":"[^"]*","rc":0,"rows":1,' "$dir/m1/cycles.jsonl" || fail "cycle publish result not recorded"
+  printf 'owned by someone else\n' > "$dir/remote/.fm-actuator/verdicts.jsonl"
+  ( shadow_in --duration 60 --interval 1 --max-cycles 1 --manifest-dir "$dir/m2" \
+    --publish 'akamai_vm:.fm-actuator/verdicts.jsonl' ) >/dev/null 2>&1
+  rc=$?
+  stub_stop
+  [ "$rc" = 1 ] || fail "a refused first publish must fail the preflight"
+  [ -e "$dir/m2/manifest-start.json" ] && fail "a refused first publish must not start the audit"
+  [ "$(cat "$dir/remote/.fm-actuator/verdicts.jsonl")" = 'owned by someone else' ] || fail "foreign remote content overwritten"
+  pass "a stop during the interval starts no new collection and verdicts mirror atomically to the authorized host only"
+}
+
 fm_test_run test_gate_classes test_request_shape_and_redaction test_verdict_contract_and_dedupe \
   test_hysteresis_contradiction_and_pid_override test_budget_lock_and_fail_closed \
-  test_collection_exclusion_and_identity test_shadow_manifests_and_summary
+  test_collection_exclusion_and_identity test_shadow_manifests_and_summary \
+  test_keyed_status_and_browser_artifacts test_shadow_stop_and_publish
