@@ -8,7 +8,7 @@ These command-line and terminal facts apply to pane-backed sessions; for T3 Code
 
 | Fact | Value |
 |---|---|
-| Busy state | Unknown until a semantic source is live-verified: the app-server turn lifecycle is unreachable for a pane worker, and project lifecycle hooks did not fire for a Firstmate-launched worker. |
+| Busy state | A ship or scout worker reads the `codex-rollout` pull source: the rollout Codex writes into its task-private home, where `task_started` opens a turn and `task_complete` or an Escape's `turn_aborted` closes it, trusted only for verified `cli_version` values (`../../../../../bin/fm-busy-lib.sh`). A secondmate or primary has no private home and stays unknown: the app-server turn lifecycle is unreachable for a pane, and project lifecycle hooks did not fire for a Firstmate-launched worker. |
 | Exit command | `/quit`; its slash popup needs about one second between text and Enter, which the shared submit path used by the control plane handles. |
 | Interrupt | Single Escape. |
 | Skill invocation | `$<skill>`, for example `$no-mistakes`; `/<skill>` is Claude-only and Codex rejects it as "Unrecognized command". |

@@ -61,7 +61,7 @@
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, rex-native, t3code-native, tern-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
-#   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
+#   cursor-transcript, codex-rollout, codex-rollout-unverified, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target, launch-prompt
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
@@ -146,9 +146,19 @@
 # fm_busy_codex_hooks_verified): the approved contract prefers Codex's
 # app-server turn lifecycle with capability negotiation, and sanctions its
 # stable lifecycle hooks as the intermediate. Neither is usable on the
-# installed binary, so Codex classifies unknown codex-unverified rather than
-# falling back to idle, and fm-spawn installs no Codex busy wiring.
-# docs/verification/supervision.md owns the evidence for both probes.
+# installed binary, so fm-spawn installs no Codex busy writer.
+# A Codex ship or scout worker instead gets the codex-rollout pull source: it
+# runs in a task-private Codex home (bin/fm-codex-worker.py), so the session
+# log Codex itself writes there (sessions/**/rollout-*.jsonl) belongs to that
+# task alone. fm_busy_codex_turn_state folds the newest codex-tui rollout's
+# structural event_msg lines: task_started opens a turn, task_complete and
+# turn_aborted (written on an Escape interrupt) close it. Like muse and
+# cursor it has no writer, arm, or gen. It is trusted only for the
+# cli_version values in FM_BUSY_CODEX_ROLLOUT_VERIFIED_VERSIONS; any other
+# version classifies unknown codex-rollout-unverified, and a worker with no
+# private home or no rollout yet (a secondmate, or a launch before its first
+# turn) keeps unknown codex-unverified - never idle.
+# docs/verification/supervision.md owns the evidence for every probe.
 #
 # Sourcing: set -u and set -e safe; no subshell-unfriendly globals.
 
@@ -210,6 +220,58 @@ fm_busy_codex_hooks_verified() {
 # classifier reports unknown codex-unverified until it opens.
 fm_busy_codex_semantic_source() {
   fm_busy_codex_appserver_observable || fm_busy_codex_hooks_verified
+}
+
+# Codex rollout pull source (see the header). Verified live 2026-11-19 on
+# codex-cli 0.170.0 through the worker launch path; the live guard
+# tests/fm-codex-rollout-live-e2e.test.sh refreshes the evidence.
+FM_BUSY_CODEX_ROLLOUT_VERIFIED_VERSIONS="0.170.0"
+# Only the tail is folded; a turn whose opening event scrolled out of it reads
+# none (unknown), never idle.
+FM_BUSY_CODEX_ROLLOUT_TAIL_BYTES=${FM_BUSY_CODEX_ROLLOUT_TAIL_BYTES:-16777216}
+
+# fm_busy_codex_rollout: the newest interactive (originator codex-tui) rollout
+# in <state>/<id>.codex-home, or failure. The private home is recreated at
+# every launch, so a relaunch can never fold its predecessor's log.
+fm_busy_codex_rollout() {  # <state-dir> <id>
+  local home="$1/$2.codex-home" f newest=''
+  [ -d "$home/sessions" ] && [ ! -L "$home" ] || return 1
+  for f in "$home"/sessions/*/*/*/rollout-*.jsonl; do
+    [ -f "$f" ] || continue
+    head -c 65536 "$f" | head -1 | grep -q '"type":"session_meta","payload":{.*"originator":"codex-tui"' || continue
+    if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then newest=$f; fi
+  done
+  [ -n "$newest" ] || return 1
+  printf '%s' "$newest"
+}
+
+# fm_busy_codex_rollout_version: the cli_version its session_meta line records.
+fm_busy_codex_rollout_version() {  # <rollout>
+  head -c 65536 "$1" | head -1 | LC_ALL=C sed -n 's/.*"cli_version":"\([^"]*\)".*/\1/p'
+}
+
+fm_busy_codex_rollout_verified() {  # <version>
+  [ -n "${1:-}" ] || return 1
+  case " $FM_BUSY_CODEX_ROLLOUT_VERIFIED_VERSIONS " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# fm_busy_codex_turn_state: busy | settled | none from the last structural
+# lifecycle line. The match is anchored at the line start, where only a real
+# event can appear: JSON escapes every quote inside a content string.
+fm_busy_codex_turn_state() {  # <rollout>
+  local last
+  [ -f "$1" ] || return 1
+  last=$(tail -c "$FM_BUSY_CODEX_ROLLOUT_TAIL_BYTES" "$1" \
+    | LC_ALL=C grep -oE '^[{]"timestamp":"[^"]*",("ordinal":[0-9]+,)?"type":"event_msg","payload":[{]"type":"(task_started|task_complete|turn_aborted)"' \
+    | tail -1)
+  case "$last" in
+    *'"task_started"') printf 'busy' ;;
+    *'"task_complete"' | *'"turn_aborted"') printf 'settled' ;;
+    *) printf 'none' ;;
+  esac
 }
 
 fm_busy_record_path() {  # <state-dir> <id>
@@ -1152,6 +1214,18 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       ;;
     codex*)
       if ! fm_busy_codex_semantic_source; then
+        if log=$(fm_busy_codex_rollout "$state" "$id"); then
+          if ! fm_busy_codex_rollout_verified "$(fm_busy_codex_rollout_version "$log")"; then
+            printf 'unknown codex-rollout-unverified'
+            return 0
+          fi
+          case "$(fm_busy_codex_turn_state "$log" 2>/dev/null)" in
+            busy) printf 'busy codex-rollout' ;;
+            settled) printf 'idle codex-rollout' ;;
+            *) printf 'unknown codex-rollout' ;;
+          esac
+          return 0
+        fi
         printf 'unknown codex-unverified'
         return 0
       fi

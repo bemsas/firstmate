@@ -232,6 +232,7 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | OpenCode | 2.0.21 | Plugin `session.execution.*` (OpenCode 1 `session.status`/`session.idle` retained as legacy inputs) | Verified on 2026-10-01 via `opencode run --standalone`: the live event stream delivered `session.execution.started` then `session.execution.succeeded` for a tool-using turn, and the plugin maps them to `busy`/`idle`; `tests/fm-busy-adapter-wiring.test.sh` pins both the legacy and the `session.execution.*` mappings and the latched-session scoping. |
 | Claude | 2.1.220 (Claude Code) | Hooks `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd` | `UserPromptSubmit` fired for the argv launch prompt and each steer, and `Stop` closed every completed turn. A mid-stream Escape interrupt fired no closing hook, which is why the firstmate-controlled clear exists. `StopFailure` was reproduced live on 2.1.317 (see [StopFailure auto-arm](#stopfailure-auto-arm)); `SessionEnd` remains wired from the hook names present in the installed binary without a live abnormal-path reproduction. |
 | Codex | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`. |
+| Codex worker | codex-cli 0.170.0 | Rollout pull source `codex-rollout` in the task-private Codex home | Verified on 2026-11-19 through `bin/fm-codex-worker.py` prepare/launch in a private tmux server: the newest `codex-tui` rollout recorded `task_started` when the turn opened, `turn_aborted` on an Escape interrupt, and `task_complete` when the next turn finished, and `fm_busy_classify` read busy, idle, idle in turn. See below. |
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
 
@@ -246,6 +247,18 @@ The daemon refused with `managed standalone Codex install not found`, and an int
 In this 2026-07-28 Codex 0.145.0 semantic-busy probe, Firstmate-written lifecycle project hooks under `<worktree>/.codex/hooks.json` fired for neither an interactive pane whose directory trust was granted nor `codex exec`, in both cases with `--dangerously-bypass-hook-trust`, while an untracked global probe fired in the same runs; Firstmate does not ship, install, recommend, or depend on that global path.
 Codex also exposes no `StopFailure` hook, so an API-error turn end would need separate coverage even after hook discovery works.
 The app-server protocol schema does define the required lifecycle (`turn/started`, plus a `turn/completed` status of `completed`, `interrupted`, `failed`, or `inProgress`), so the gate is a reachability problem rather than a protocol gap.
+
+A Codex ship or scout worker does not depend on either path: it runs in a task-private Codex home, and Codex writes that session's own rollout there.
+It was measured on 2026-11-19 on Linux 7.2.15-2-omarchy x86_64 with codex-cli 0.170.0 (`model_reasoning_effort=low`, workspace-write sandbox) launched through the worker launch path in a private tmux server.
+
+```text
+$ FM_CODEX_ROLLOUT_LIVE_E2E=1 bash tests/fm-codex-rollout-live-e2e.test.sh
+1..1
+ok - codex 0.170.0: rollout source reads busy during a turn, idle after Escape and after completion
+FM_TEST_COMPLETE
+```
+
+Codex secondmates and primaries run in the operator's own Codex home and keep `unknown codex-unverified`.
 
 Deterministic entry points:
 

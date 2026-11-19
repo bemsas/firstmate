@@ -333,6 +333,70 @@ test_missing_record_unknown_not_idle() {
   pass "a converted adapter with no record classifies unknown, never idle"
 }
 
+# The codex-rollout pull source folds the rollout Codex writes into a worker's
+# task-private home; these fixtures mirror the live 0.170.0 shapes recorded in
+# docs/verification/supervision.md.
+codex_rollout_fixture() {  # <state> <id> <cli-version> <originator> [name]
+  local dir="$1/$2.codex-home/sessions/2026/11/19" f
+  mkdir -p "$dir"
+  f="$dir/rollout-${5:-a}.jsonl"
+  printf '{"timestamp":"2026-11-19T20:39:26.000Z","ordinal":0,"type":"session_meta","payload":{"id":"x","cwd":"/w","originator":"%s","cli_version":"%s","source":"cli"}}\n' "$4" "$3" > "$f"
+  printf '%s' "$f"
+}
+
+codex_event() {  # <rollout> <task_started|task_complete|turn_aborted>
+  printf '{"timestamp":"2026-11-19T20:40:00.000Z","ordinal":9,"type":"event_msg","payload":{"type":"%s","turn_id":"t"}}\n' "$2" >> "$1"
+}
+
+test_codex_rollout_pull_source() {
+  local state f out
+  state=$(new_state_dir codex-rollout)
+  f=$(codex_rollout_fixture "$state" cx1 0.170.0 codex-tui)
+  out=$(fm_busy_classify tmux w1 codex cx1 "$state")
+  [ "$out" = "unknown codex-rollout" ] || fail "a rollout with no turn event must be unknown, got '$out'"
+  codex_event "$f" task_started
+  out=$(fm_busy_classify tmux w1 codex cx1 "$state" '› Ask Codex to do anything')
+  [ "$out" = "busy codex-rollout" ] || fail "task_started must classify busy whatever the footer says, got '$out'"
+  printf '{"timestamp":"2026-11-19T20:40:01.000Z","ordinal":10,"type":"response_item","payload":{"type":"message","content":[{"type":"output_text","text":"{\\"type\\":\\"event_msg\\",\\"payload\\":{\\"type\\":\\"task_complete\\"}}"}]}}\n' >> "$f"
+  out=$(fm_busy_classify tmux w1 codex cx1 "$state")
+  [ "$out" = "busy codex-rollout" ] || fail "an event name quoted inside content must not close the turn, got '$out'"
+  codex_event "$f" turn_aborted
+  out=$(fm_busy_classify tmux w1 codex cx1 "$state" '• Working (6s • esc to interrupt)')
+  [ "$out" = "idle codex-rollout" ] || fail "turn_aborted (Escape interrupt) must close the turn, got '$out'"
+  codex_event "$f" task_started
+  codex_event "$f" task_complete
+  out=$(fm_busy_classify tmux w1 codex cx1 "$state")
+  [ "$out" = "idle codex-rollout" ] || fail "task_complete must close the turn, got '$out'"
+  codex_event "$f" task_started
+  out=$(FM_BUSY_CODEX_ROLLOUT_TAIL_BYTES=40; fm_busy_classify tmux w1 codex cx1 "$state")
+  [ "$out" = "unknown codex-rollout" ] || fail "an event cut off by the tail bound must be unknown, got '$out'"
+  pass "codex-rollout: task_started opens, task_complete and turn_aborted close, quoted text never does"
+}
+
+test_codex_rollout_fails_safe() {
+  local state f g out
+  state=$(new_state_dir codex-rollout-safe)
+  f=$(codex_rollout_fixture "$state" cx2 0.171.0 codex-tui)
+  codex_event "$f" task_complete
+  out=$(fm_busy_classify tmux w1 codex cx2 "$state")
+  [ "$out" = "unknown codex-rollout-unverified" ] || fail "an unverified cli_version must not classify, got '$out'"
+  f=$(codex_rollout_fixture "$state" cx3 0.170.0 codex_exec)
+  codex_event "$f" task_complete
+  out=$(fm_busy_classify tmux w1 codex cx3 "$state")
+  [ "$out" = "unknown codex-unverified" ] || fail "a non-interactive rollout is not the pane's turn, got '$out'"
+  f=$(codex_rollout_fixture "$state" cx4 0.170.0 codex-tui old)
+  codex_event "$f" task_complete
+  fm_touch_epoch 1000000000 "$f"
+  g=$(codex_rollout_fixture "$state" cx4 0.170.0 codex-tui new)
+  codex_event "$g" task_started
+  out=$(fm_busy_classify tmux w1 codex cx4 "$state")
+  [ "$out" = "busy codex-rollout" ] || fail "the newest interactive rollout must win, got '$out'"
+  mkdir -p "$state/real-home/sessions"; ln -s "$state/real-home" "$state/cx5.codex-home"
+  out=$(fm_busy_classify tmux w1 codex cx5 "$state")
+  [ "$out" = "unknown codex-unverified" ] || fail "a symlinked private home must be refused, got '$out'"
+  pass "codex-rollout fails safe: unverified versions, non-interactive logs and symlinked homes stay unknown"
+}
+
 test_malformed_record_unknown() {
   local state gen out
   state=$(new_state_dir malformed)
@@ -850,6 +914,8 @@ test_launch_prompt_requires_a_captured_tail
 test_grok_regex_isolated
 test_codex_unverified_gate
 test_kimi_unverified_gate
+test_codex_rollout_pull_source
+test_codex_rollout_fails_safe
 test_pi_stream_version_floor_accepts_verified_rejects_unverified
 test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides
