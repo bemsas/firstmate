@@ -570,6 +570,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/pane-judge.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/usage-warner.md",
       "audience": "operator-current"
     },

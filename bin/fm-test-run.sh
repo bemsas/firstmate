@@ -861,6 +861,7 @@ tests/fm-on.test.sh 11473
 tests/fm-opencode-primary-live-e2e.test.sh 47
 tests/fm-operational-input.test.sh 2404
 tests/fm-osc7501.test.sh 14000
+tests/fm-pane-judge.test.sh 15000
 tests/fm-pane-retire.test.sh 10400
 tests/fm-parent-channel-scan-exclusion.test.sh 10427
 tests/fm-peek-remote.test.sh 1082
