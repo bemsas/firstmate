@@ -4221,7 +4221,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID" \
   "$STATE/.broken-session-relaunch-$ID" "$STATE/.broken-session-bound-$ID" \
   "$STATE/.broken-session-since-$ID" "$STATE/.broken-session-park-$ID" "$STATE/.broken-session-$ID.lock" \
-  "$STATE/$ID.tool-ring.jsonl" "$STATE/$ID.tool-ring.jsonl.lock"
+  "$STATE/$ID.tool-ring.jsonl" "$STATE/$ID.tool-ring.jsonl.lock" "$STATE/$ID.nudge-gate"
 # kiro's per-task home is a directory (its relocated KIRO_HOME holds the hook
 # agent config, the trust setting, and this task's sessions), so it needs a
 # recursive removal rather than the file rm above.

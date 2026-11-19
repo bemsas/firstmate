@@ -298,6 +298,8 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-nudge-gate-lib.sh
+. "$SCRIPT_DIR/fm-nudge-gate-lib.sh"
 # Steering-inbox loss detection: bin/fm-task-inbox-lib.sh owns the record,
 # doorbell, re-ring ladder, and unavailable-endpoint contracts; this watcher
 # supplies their live endpoint and busy checks plus wake emission
@@ -639,6 +641,37 @@ inbox_steer_busy() {  # <window> <backend> <task> <tail40>
   fi
 }
 
+# inbox_focus_hold: OFF unless the home creates config/human-focus-gate. On a
+# Herdr endpoint it reads the pane's turn projection and holds a watcher
+# doorbell re-ring while a client has the pane focused and for the focus
+# cooldown after (bin/fm-nudge-gate-lib.sh, focus mode: a lost doorbell on an
+# idle worker must still be re-rung, so completion_seq never holds it). A held
+# ring types nothing and is reported to the ladder as a deferred ring, so an
+# instruction nobody reads still escalates. INBOX_FOCUS_SEQ keeps the projected
+# completion_seq for the record after a ring. 0 = hold, 1 = ring.
+inbox_focus_hold() {  # <backend> <window> <task>
+  local proj focused decision
+  # shellcheck disable=SC2034 # read by the ring call sites after this returns
+  INBOX_FOCUS_SEQ=-
+  [ -e "$CONFIG/human-focus-gate" ] && [ "$1" = herdr ] || return 1
+  fm_backend_source herdr || return 1
+  proj=$(fm_backend_herdr_turn_projection "$2") || return 1
+  INBOX_FOCUS_SEQ=${proj#*completion_seq=}
+  INBOX_FOCUS_SEQ=${INBOX_FOCUS_SEQ%% *}
+  # Herdr's focused flag is the session pointer, which outlives a detached
+  # viewer; only a focused pane with a viewer present (or unknown) is held.
+  case "$proj" in
+    *'focused=true client=absent') focused=false ;;
+    *'focused=true client='*) focused=true ;;
+    *) focused=false ;;
+  esac
+  decision=$(fm_nudge_gate_decide "$STATE" "$3" "$INBOX_FOCUS_SEQ" "$focused")
+  case "$decision" in
+    hold\ *) triage_log "steer-inbox ring held: $3 ${decision#hold }"; return 0 ;;
+  esac
+  return 1
+}
+
 # Steering-inbox loss detection, one cheap check per recorded window per poll.
 # bin/fm-task-inbox-lib.sh owns delivery, busy-deferral, retry, and escalation policy.
 # Endpoint and busy checks precede delivery so recovery never types into a busy,
@@ -694,8 +727,14 @@ inbox_steer_check() {  # <window> <task>
   case "$verb" in
     ring)
       ring_rc=0
-      FM_COMPOSER_HARNESS=$(window_harness "$w") \
-        fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      if inbox_focus_hold "$backend" "$w" "$task"; then
+        ring_rc=1
+      else
+        FM_COMPOSER_HARNESS=$(window_harness "$w") \
+          fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+        [ "$ring_rc" -ne 0 ] || [ ! -e "$CONFIG/human-focus-gate" ] \
+          || fm_nudge_gate_record "$STATE" "$task" "${INBOX_FOCUS_SEQ:--}" || true
+      fi
       if [ "$ring_rc" -eq 3 ]; then
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
         return 0
@@ -715,8 +754,14 @@ inbox_steer_check() {  # <window> <task>
       ;;
     retry)
       ring_rc=0
-      FM_COMPOSER_HARNESS=$(window_harness "$w") \
-        fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      if inbox_focus_hold "$backend" "$w" "$task"; then
+        ring_rc=1
+      else
+        FM_COMPOSER_HARNESS=$(window_harness "$w") \
+          fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+        [ "$ring_rc" -ne 0 ] || [ ! -e "$CONFIG/human-focus-gate" ] \
+          || fm_nudge_gate_record "$STATE" "$task" "${INBOX_FOCUS_SEQ:--}" || true
+      fi
       if ! fm_task_inbox_clear_retry "$STATE" "$task" "$rec" && [ -f "$rec" ]; then
         reason="stale: $w (steering-inbox retry mark unremovable: ${rec%/*}/.retry-ring cannot be removed, so $rec would ring on every poll - inspect the inbox directory)"
         fm_wake_append stale "$w" "$reason" || exit 1

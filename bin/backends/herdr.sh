@@ -3963,6 +3963,37 @@ fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
   printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null
 }
 
+# fm_backend_herdr_turn_projection: one `agent get` read projected to
+#   agent_status=<status> completion_seq=<uint|-> focused=<true|false> client=<present|absent|unknown>
+# completion_seq is AgentInfo.completion_seq (Herdr 0.9.5 API schema: "the
+# current idle transition completed work, independently of who has viewed it";
+# null until the first completed turn, and observed live to carry the agent's
+# state-change counter, so it orders turns but does not count them) and
+# focused is AgentInfo.focused, the session's focused-pane pointer. That
+# pointer persists after a viewer detaches (observed live: true with no client
+# attached), so client= adds fm_backend_herdr_foreground_client_present's
+# answer only when focused is true; a focused pane is human-visible only while
+# client=present. Neither field carries a timestamp. Prints nothing and fails
+# when the target cannot be read; bin/fm-nudge-gate-lib.sh owns what the
+# fields gate.
+fm_backend_herdr_turn_projection() {  # <target>
+  local out line client=unknown rc=0
+  fm_backend_herdr_target_ready "$1" || return 1
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+  line=$(printf '%s' "$out" | jq -r '.result.agent // empty
+    | select(type == "object" and (.agent_status | type) == "string" and (.focused | type) == "boolean")
+    | "agent_status=\(.agent_status) completion_seq=\(if (.completion_seq | type) == "number" then .completion_seq else "-" end) focused=\(.focused)"' 2>/dev/null)
+  [ -n "$line" ] || return 1
+  case "$line" in
+    *focused=true)
+      fm_backend_herdr_foreground_client_present "$FM_BACKEND_HERDR_SESSION" || rc=$?
+      case "$rc" in 0) client=present ;; 1) client=absent ;; esac
+      ;;
+    *) client=absent ;;
+  esac
+  printf '%s client=%s' "$line" "$client"
+}
+
 # fm_backend_herdr_busy_state: semantic busy state from herdr's native
 # agent-state detection (agent.get), the "first backend where fm_session_busy_state
 # gets real semantics" per the design report. See

@@ -4261,6 +4261,41 @@ test_busy_state_working_maps_to_busy() {
   pass "fm_backend_herdr_busy_state: working -> busy"
 }
 
+test_turn_projection_reads_completion_seq_and_focus() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/proj-seq"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"idle","completion_seq":7,"focused":true,"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_FAKE_HERDR_FOREGROUND_REASON=cleared \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_turn_projection default:w1:p2' "$ROOT" )
+  [ "$out" = "agent_status=idle completion_seq=7 focused=true client=present" ] || fail "projection misread, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''agent'$'\x1f''get'$'\x1f''w1:p2' "projection did not call agent get"
+
+  dir="$TMP_ROOT/proj-null"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working","completion_seq":null,"focused":false}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_turn_projection default:w1:p2' "$ROOT" )
+  [ "$out" = "agent_status=working completion_seq=- focused=false client=absent" ] || fail "a null completion_seq must read '-', got '$out'"
+
+  dir="$TMP_ROOT/proj-detached"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"idle","completion_seq":4,"focused":true}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_turn_projection default:w1:p2' "$ROOT" )
+  [ "$out" = "agent_status=idle completion_seq=4 focused=true client=absent" ] \
+    || fail "a persisted focus pointer with no viewer must read client=absent, got '$out'"
+
+  dir="$TMP_ROOT/proj-old"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  if PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_turn_projection default:w1:p2' "$ROOT" >/dev/null; then
+    fail "a server without the focused field must not project a guessed focus"
+  fi
+  pass "fm_backend_herdr_turn_projection: completion_seq, focus, and live-viewer presence; no guess without focus"
+}
+
 test_busy_state_done_and_blocked_map_to_idle() {
   local dir log resp fb out
   dir="$TMP_ROOT/busy-done"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -6687,6 +6722,7 @@ test_kill_is_best_effort
 test_current_path_reads_cwd
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
+test_turn_projection_reads_completion_seq_and_focus
 test_busy_state_unknown_on_no_agent
 test_composer_state_bare_prompt_is_empty
 test_composer_state_styled_placeholder_draft_is_pending

@@ -1179,6 +1179,16 @@ A Claude ship or scout always feeds its ring through the hooks `bin/fm-spawn.sh`
 `bin/fm-tool-ring.py`'s header owns the ring format, the patterns, and the detector output.
 The flag is a home-local supervision preference and is not inherited by secondmate homes.
 
+## Human-focus doorbell hold (config/human-focus-gate)
+
+The optional local, gitignored `config/human-focus-gate` presence flag opts this home into holding the watcher's steering-inbox doorbell re-rings on a Herdr worker that a person is looking at.
+With it present, a re-ring or retry ring types nothing while the worker's pane is the focused pane of a session with a live viewer attached, and for two minutes after it was last seen that way (`FM_NUDGE_FOCUS_COOLDOWN_SECS`).
+A held ring still counts toward the ladder, so an instruction nobody reads still escalates to the supervisor.
+The first doorbell `bin/fm-send.sh` rings, and every non-Herdr worker, is unchanged.
+Herdr reports focus as a session pointer without a timestamp, so focus is seen only when a due ring checks it; a viewer who looked and left between checks is not seen.
+`bin/fm-nudge-gate-lib.sh` owns the hold rules, and `bin/backends/herdr.sh`'s `fm_backend_herdr_turn_projection` owns the Herdr reading.
+The flag is a home-local supervision preference and is not inherited by secondmate homes.
+
 ## Pause ceiling (config/pause-ceiling)
 
 The optional local, gitignored `config/pause-ceiling` presence flag opts this home into a default-off ceiling on declared `paused:` waits.

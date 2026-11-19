@@ -1109,3 +1109,28 @@ Deterministic entry point:
 ```sh
 tests/fm-precompact-handoff.test.sh
 ```
+
+## Herdr turn projection
+
+This supports [Human-focus doorbell hold](../configuration.md#human-focus-doorbell-hold-confighuman-focus-gate): Herdr's `agent get` carries `completion_seq` and `focused`, and `focused` is a session pointer rather than proof that a person is watching.
+It was measured on 2026-11-19 on Linux 7.2.15-2-omarchy x86_64 with herdr 0.9.5 in an isolated `fm-lab-` session driven only through the lab helper, with codex-cli 0.170.0 launched through the worker launch path and no viewer attached.
+Lines are the lab's `agent get` projections, de-duplicated:
+
+```text
+t+2 {"agent":"codex","agent_status":"unknown","completion_seq":null,"focused":true,"state_change_seq":0}
+t+3 {"agent":"codex","agent_status":"blocked","completion_seq":null,"focused":true,"state_change_seq":1}
+t+4 {"agent":"codex","agent_status":"working","completion_seq":null,"focused":true,"state_change_seq":3}
+2nd t+2 {"agent":"codex","agent_status":"idle","completion_seq":4,"focused":true,"state_change_seq":4}
+foreground viewer probe (no viewer attached): {"id":"cli:terminal:title:clear","result":{"changed":false,"reason":"no_foreground_client","type":"client_window_title"}}
+```
+
+`completion_seq` stays null until the first completed turn and then carries the agent's state-change counter, so it orders completed turns without counting them.
+`focused` read true with no viewer attached, which is why `fm_backend_herdr_turn_projection` adds the foreground-viewer probe before a focused pane is treated as seen by a person.
+A second completed turn was not captured in this run.
+
+Deterministic entry points:
+
+```sh
+tests/fm-nudge-gate.test.sh
+tests/fm-backend-herdr.test.sh
+```
