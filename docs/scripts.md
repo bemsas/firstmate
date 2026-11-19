@@ -153,6 +153,10 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-control-lib.sh`      | One executable owner of the control-plane verb allowlist, per-harness interrupt/exit mechanics, per-backend capability, and the endpoint-absence proof `exit`, `stop`, and `relaunch` read |
 | `fm-busy-lib.sh`         | Single owner of the semantic busy-state contract: verdicts, source attribution, per-harness sources, and the optional Pi model-stream evidence and ordering contract |
 | `fm-busy-event.sh`       | The only writer of task busy and progress evidence under the contract in `fm-busy-lib.sh`; its header and help own lifecycle and optional stream operations |
+| `fm-tool-ring.py`        | Keep a worker's hash-only tool-event ring and detect repeated-action loops in it |
+| `fm-agy-worker-hooks.sh` | Write an agy ship or scout worker's workspace busy hooks |
+| `fm-nudge-gate-lib.sh`   | Decide whether a pane nudge is held by completion-seq idempotency or human focus |
+| `fm-precompact-handoff.py` | Write a Claude primary's PreCompact handoff and serve its cached turn digest |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for composer capture, verified submit, and the submit-time busy check |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
 | `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes                       |
