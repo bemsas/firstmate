@@ -649,9 +649,10 @@ deliver_interrupt() {
     printf '%s' "$cancel"
     return 0
   fi
-  # Devin does not emit Stop for cancellation. Capture this incarnation before
-  # keys, then invalidate its state conservatively rather than claiming idle.
-  if [ "$HARNESS" = devin ]; then
+  # Devin and agy do not emit a closing hook for cancellation (agy verified on
+  # 1.5.12). Capture this incarnation before keys, then invalidate its state
+  # conservatively rather than claiming idle.
+  if [ "$HARNESS" = devin ] || [ "$HARNESS" = agy ]; then
     devin_gen=$(fm_busy_current_gen "$STATE" "$ID" 2>/dev/null || true)
   fi
   # T3 Code has no keys: its native interrupt confirms the run's end itself.
@@ -667,7 +668,7 @@ deliver_interrupt() {
     cancel=not-running
   else
     cancel=$(interrupt_cancel_claim)
-    if [ "$HARNESS" = devin ] && [ -n "$devin_gen" ]; then
+    if { [ "$HARNESS" = devin ] || [ "$HARNESS" = agy ]; } && [ -n "$devin_gen" ]; then
       "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$ID" unknown \
         --gen "$devin_gen" --source fm-interrupt --event interrupt >/dev/null 2>&1 || true
     fi

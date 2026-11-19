@@ -553,6 +553,10 @@ if [ "${1:-}" = models ]; then
   printf 'gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n'
   exit 0
 fi
+if [ "${1:-}" = --version ] && [ -n "${FM_FAKE_AGY_VERSION:-}" ]; then
+  printf '%s\n' "$FM_FAKE_AGY_VERSION"
+  exit 0
+fi
 echo "fake agy must never execute" >&2
 exit 9
 SH
@@ -620,6 +624,7 @@ run_agy_spawn() {
     FM_FAKE_AGY_ASSUME_TRUSTED="${FM_FAKE_AGY_ASSUME_TRUSTED:-0}" \
     FM_FAKE_AGY_RACE="${FM_FAKE_AGY_RACE:-0}" \
     FM_FAKE_AGY_ANSWER="${FM_FAKE_AGY_ANSWER:-works}" \
+    FM_FAKE_AGY_VERSION="${FM_FAKE_AGY_VERSION:-}" \
     FM_AGY_READY_POLLS=4 FM_AGY_POLL_INTERVAL=0 FM_AGY_MODELS_TIMEOUT=${FM_AGY_MODELS_TIMEOUT:-1} \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness agy --mode no-mistakes --yolo off "$@" 2>&1
@@ -911,7 +916,87 @@ test_agy_spawn_arms_no_busy_wiring() {
     [ -e "$sidecar" ] || continue
     fail "agy spawn left an adapter sidecar behind: $sidecar"
   done
-  pass "fm-spawn: agy arms no busy wiring and writes no sidecar"
+  assert_absent "$WT_DIR/.agents/hooks.json" "an unverified agy version must not get workspace hooks"
+  pass "fm-spawn: an unverified agy arms no busy wiring and writes no sidecar"
+}
+
+# A verified agy ship gets workspace hooks: PreInvocation opens, Stop closes
+# only on fullyIdle true, PostToolUse feeds the tool ring, every hook prints
+# nothing, and the file stays out of the worker's commits.
+test_agy_verified_worker_gets_workspace_busy_hooks() {
+  local id rec out rc statedir hooks cmd
+  id="agy-hooks-z8-$$"
+  rec=$(make_agy_spawn_case hooks "$id")
+  read_agy_spawn_record "$rec"
+  out=$(FM_FAKE_AGY_VERSION=1.5.12 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash-low)
+  rc=$?
+  expect_code 0 "$rc" "verified agy spawn should succeed: $out"
+  statedir="$HOME_DIR/state"
+  hooks="$WT_DIR/.agents/hooks.json"
+  assert_present "$statedir/$id.busy-gen" "a verified agy worker must arm a busy generation"
+  jq -e '.firstmate.PreInvocation[0].command and .firstmate.Stop[0].command and .firstmate.PostToolUse[0].hooks[0].command' \
+    "$hooks" >/dev/null || fail "agy hooks file lacks the three handlers"
+  [ -z "$(git -C "$WT_DIR" status --porcelain)" ] || fail "agy hooks file dirtied the worktree: $(git -C "$WT_DIR" status --porcelain)"
+  [ "$(fm_busy_classify tmux fake:win agy "$id" "$statedir")" = "busy fm-spawn" ] || fail "seed must read busy fm-spawn"
+  cmd=$(jq -r '.firstmate.PreInvocation[0].command' "$hooks")
+  out=$(printf '{"hookEventName":"PreInvocation"}' | sh -c "$cmd")
+  [ -z "$out" ] || fail "PreInvocation hook printed output, which agy treats as a decision: $out"
+  [ "$(fm_busy_classify tmux fake:win agy "$id" "$statedir")" = "busy agy-hook" ] || fail "PreInvocation must open the turn"
+  cmd=$(jq -r '.firstmate.Stop[0].command' "$hooks")
+  out=$(printf '{"hookEventName":"Stop","fullyIdle":false}' | sh -c "$cmd")
+  [ -z "$out" ] || fail "Stop hook printed output: $out"
+  [ "$(fm_busy_classify tmux fake:win agy "$id" "$statedir")" = "busy agy-hook" ] || fail "a Stop that is not fullyIdle must not close the turn"
+  rm -f "$statedir/$id.turn-ended"
+  printf '{"hookEventName":"Stop","fullyIdle":true,"terminationReason":"NO_TOOL_CALL"}' | sh -c "$cmd"
+  [ "$(fm_busy_classify tmux fake:win agy "$id" "$statedir")" = "idle agy-hook" ] || fail "a fullyIdle Stop must close the turn"
+  assert_present "$statedir/$id.turn-ended" "a fullyIdle Stop keeps the turn-ended notification"
+  cmd=$(jq -r '.firstmate.PostToolUse[0].hooks[0].command' "$hooks")
+  out=$(printf '{"hookEventName":"PostToolUse","toolCall":{"name":"run_command","args":{"CommandLine":"echo secret-abc"}},"error":""}' | sh -c "$cmd")
+  [ -z "$out" ] || fail "PostToolUse hook printed output: $out"
+  assert_grep '"src":"agy-hook"' "$statedir/$id.tool-ring.jsonl" "PostToolUse must feed the tool ring"
+  assert_no_grep 'secret-abc' "$statedir/$id.tool-ring.jsonl" "the ring must not store agy tool arguments"
+  pass "fm-spawn: a verified agy worker gets clean workspace busy hooks that open, close on fullyIdle, and feed the ring"
+}
+
+test_agy_tracked_hooks_file_is_left_alone() {
+  local id rec out rc before
+  id="agy-tracked-z9-$$"
+  rec=$(make_agy_spawn_case tracked "$id")
+  read_agy_spawn_record "$rec"
+  # The project tracks its own agy hooks on the base the task branch starts from.
+  before='{"project":{"Stop":[]}}'
+  mkdir -p "$PROJ_DIR/.agents"
+  printf '%s\n' "$before" > "$PROJ_DIR/.agents/hooks.json"
+  git -C "$PROJ_DIR" add .agents/hooks.json
+  git -C "$PROJ_DIR" -c user.name=t -c user.email=t@t commit -qm 'project hooks'
+  git -C "$PROJ_DIR" push -q origin "HEAD:$(git -C "$PROJ_DIR" rev-parse --abbrev-ref HEAD)"
+  out=$(FM_FAKE_AGY_VERSION=1.5.12 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash-low)
+  rc=$?
+  expect_code 0 "$rc" "agy spawn over a tracked hooks file should still succeed: $out"
+  assert_equals "$(cat "$WT_DIR/.agents/hooks.json")" "$before" "a project's own hooks file must never be rewritten"
+  assert_absent "$HOME_DIR/state/$id.busy-gen" "no busy generation without hooks to clear it"
+  pass "fm-spawn: an agy worktree that carries its own .agents/hooks.json keeps it and the rendered fallback"
+}
+
+# An agy record is never trusted over two live signals that both say the pane
+# is not in a turn (an Escape interrupt fires no closing hook), and it is never
+# turned into idle.
+test_agy_busy_record_contradicted_by_native_and_row_reads_unknown() {
+  local statedir gen out
+  statedir="$TMP_ROOT/agy-stale/state"; mkdir -p "$statedir"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$statedir" ast)
+  "$ROOT/bin/fm-busy-event.sh" apply "$statedir" ast busy --gen "$gen" --source agy-hook --event pre-invocation
+  out=$(fm_backend_busy_state() { printf idle; }; fm_busy_classify herdr s:w1:p1 agy ast "$statedir" $'reply\n? for shortcuts')
+  [ "$out" = "unknown agy-hook-stale" ] || fail "native idle plus no status row must read unknown, got '$out'"
+  out=$(fm_backend_busy_state() { printf idle; }; fm_busy_classify herdr s:w1:p1 agy ast "$statedir" $'Generating...\nesc to cancel')
+  [ "$out" = "busy agy-hook" ] || fail "the pinned row keeps the record busy during a long tool call, got '$out'"
+  out=$(fm_backend_busy_state() { printf busy; }; fm_busy_classify herdr s:w1:p1 agy ast "$statedir" $'? for shortcuts')
+  [ "$out" = "busy agy-hook" ] || fail "native busy keeps the record, got '$out'"
+  out=$(fm_busy_classify tmux fake:win agy ast "$statedir" $'? for shortcuts')
+  [ "$out" = "busy agy-hook" ] || fail "one signal alone never downgrades the record, got '$out'"
+  pass "an agy busy record reads unknown only when Herdr native idle and the missing status row agree"
 }
 
 test_agy_ancestry_detects_the_native_command_name
@@ -944,3 +1029,6 @@ test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn
 test_agy_missing_binary_refuses_before_pane_creation
 test_agy_secondmate_launch_pre_trusts_home_and_records_meta
 test_agy_spawn_arms_no_busy_wiring
+test_agy_verified_worker_gets_workspace_busy_hooks
+test_agy_tracked_hooks_file_is_left_alone
+test_agy_busy_record_contradicted_by_native_and_row_reads_unknown

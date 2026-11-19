@@ -48,6 +48,13 @@
 #   cortex-hook      Cortex Code per-task plugin hooks (UserPromptSubmit opens;
 #                    Stop, which also fires on an Escape interrupt, and
 #                    SessionEnd close)
+#   agy-hook         agy workspace hooks for a ship or scout (.agents/hooks.json
+#                    written by fm-spawn): PreInvocation opens, Stop with
+#                    fullyIdle true closes. An Escape interrupt fires no hook
+#                    (verified live on agy 1.5.12), so fm-control invalidates
+#                    to unknown after its own interrupt, and a busy record that
+#                    Herdr's native status AND the rendered status row both
+#                    contradict classifies unknown agy-hook-stale, never idle.
 #   kiro-hook        Kiro V2 agent-config hooks (userPromptSubmit opens; stop
 #                    closes) - kiro's ONLY state source; its per-turn stop hook
 #                    also keeps the turn-ended notification touch
@@ -61,7 +68,7 @@
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, rex-native, t3code-native, tern-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
-#   cursor-transcript, codex-rollout, codex-rollout-unverified, missing, malformed, gen-mismatch, source-mismatch,
+#   cursor-transcript, codex-rollout, codex-rollout-unverified, agy-hook-stale, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target, launch-prompt
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
@@ -107,8 +114,9 @@
 # a real busy verdict once any hook has posted, and it defers to whatever
 # harness-specific trust pre-registration already exists (fm-claude-trust.sh,
 # GEMINI_CLI_TRUST_WORKSPACE) to stop the dialog from appearing at all.
-# Apart from the launch-prompt backstop above, Grok, Rovo, and AGY are the only
-# harnesses whose rendered text is their SOLE classification, because none of
+# Apart from the launch-prompt backstop above, Grok, Rovo, and AGY without a
+# hook record are the only harnesses whose rendered text is their SOLE
+# classification, because none of
 # their structured lifecycles was credited-live-verified
 # in the approved audit (Rovo's clean ACP stopReason lives outside the TUI
 # path firstmate drives, see references/harness/rovo.md; agy 1.5.12's
@@ -221,6 +229,35 @@ fm_busy_codex_hooks_verified() {
 # classifier reports unknown codex-unverified until it opens.
 fm_busy_codex_semantic_source() {
   fm_busy_codex_appserver_observable || fm_busy_codex_hooks_verified
+}
+
+# agy hook writer gate: fm-spawn writes the worker's workspace hooks only for
+# these agy --version strings, live-verified as an open/close pair
+# (docs/verification/agy.md); any other version keeps the rendered fallback.
+FM_BUSY_AGY_HOOK_VERIFIED_VERSIONS="1.5.12"
+
+fm_busy_agy_hooks_verified() {  # <agy --version output>
+  [ -n "${1:-}" ] || return 1
+  case " $FM_BUSY_AGY_HOOK_VERIFIED_VERSIONS " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# fm_busy_agy_record_contradicted: 0 only when two independent live signals
+# both say an agy pane is not in a turn: Herdr's native verdict reads idle and
+# the captured tail lacks the pinned `esc to cancel` row. Anything less (no
+# Herdr backend, an unreadable native verdict, an uncapturable tail) keeps the
+# record, so the stale-record downgrade never rests on one vendor surface.
+fm_busy_agy_record_contradicted() {  # <backend> <target> [tail40]
+  local backend=$1 target=$2 tail40=${3-}
+  [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1 || return 1
+  [ "$(fm_backend_busy_state herdr "$target" 2>/dev/null || true)" = idle ] || return 1
+  if [ -z "$tail40" ]; then
+    command -v fm_backend_capture >/dev/null 2>&1 || return 1
+    tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
+  fi
+  ! printf '%s' "$tail40" | fm_busy_agy_tail_busy
 }
 
 # Codex rollout pull source (see the header). Verified live 2026-11-19 on
@@ -394,6 +431,7 @@ fm_busy_sources_for_harness() {  # <harness>
   local adapter=
   case "${1:-}" in
     claude*) adapter=claude-hook ;;
+    agy) adapter=agy-hook ;;
     codex*)
       fm_busy_codex_semantic_source || { printf ''; return 0; }
       adapter='codex-hook codex-appserver'
@@ -1067,10 +1105,9 @@ fm_busy_rovo_tail_busy() {
 # shows `? for shortcuts` instead). The `Generating...` spinner word that
 # renders beside it is deliberately NOT matched: it is a free-floating output
 # line, so ordinary worker output echoing the word would classify an idle
-# worker as busy. agy's workspace hooks close no turn on an Escape interrupt
-# (docs/verification/agy.md), so this fallback stays the only pane-side
-# source; it is never armed as a semantic writer
-# (fm_busy_sources_for_harness trusts nothing for agy).
+# worker as busy. It is the pane-side source for every agy launch without an
+# agy-hook record (an unverified version, a secondmate, or a worktree with its
+# own .agents/hooks.json), and it also backs fm_busy_agy_record_contradicted.
 fm_busy_agy_tail_busy() {
   grep -v '^[[:space:]]*$' | tail -12 \
     | grep -qiE 'esc[[:space:]]+to[[:space:]]+cancel'
@@ -1260,6 +1297,9 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       if [ "$r_state" = busy ] && [ "$r_source" = fm-spawn ] && [ -n "$tail40" ] \
         && printf '%s' "$tail40" | fm_busy_launch_prompt_parked "$harness"; then
         printf 'unknown launch-prompt'
+      elif [ "$r_state" = busy ] && [ "$harness" = agy ] \
+        && fm_busy_agy_record_contradicted "$backend" "$target" "$tail40"; then
+        printf 'unknown agy-hook-stale'
       else
         printf '%s %s' "$r_state" "$r_source"
       fi

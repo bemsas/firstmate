@@ -3046,9 +3046,9 @@ launch_template() {
   # reason cursor clears them: agy publishes no marker of its own and does not
   # clear an inherited CLAUDECODE (verified in the /proc environ of a live 1.2.0
   # TUI), so bin/fm-harness.sh must not read an agy worker as its launcher.
-  # agy's workspace hooks fire no closing event on an Escape interrupt, so a
-  # hook-fed record could strand busy; busy state stays a rendered-tail
-  # fallback (bin/fm-busy-lib.sh) and nothing is armed below.
+  # A verified agy ship or scout also gets workspace busy hooks (written with
+  # the other adapter wiring); otherwise busy state stays the rendered-tail
+  # fallback (bin/fm-busy-lib.sh).
   agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __AGYBIN__ --prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)" __MODELFLAG____EFFORTFLAG__--dangerously-skip-permissions' ;;
   # kiro (Kiro CLI, V2 engine): a positional prompt starts the supervised
   # interactive session and auto-submits the brief (verified: a positional
@@ -6049,7 +6049,15 @@ agy_pane_shows_trust_dialog() {  # <plain-pane-capture>
 }
 
 agy_pane_is_working() {  # <plain-pane-capture>
+  # The seed fm-spawn writes for a hook-wired worker is not proof the brief
+  # started, so a seed falls back to the evidence an unwired agy launch uses:
+  # Herdr's native busy verdict or the pinned `esc to cancel` row.
   case "$(fm_busy_classify "$BACKEND" "$T" agy "$ID" "$STATE" "$1")" in
+    'busy fm-spawn')
+      [ "$(fm_backend_busy_state "$BACKEND" "$T" 2>/dev/null || true)" = busy ] && return 0
+      printf '%s' "$1" | fm_busy_agy_tail_busy && return 0
+      return 1
+      ;;
     busy*) return 0 ;;
   esac
   return 1
@@ -6676,6 +6684,24 @@ BUSY_GEN=
     }
     [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
     ;;
+  agy)
+    # A ship or scout gets workspace hooks (written below) only on a verified
+    # agy version, a templated launch, and a worktree that does not already
+    # carry its own .agents/hooks.json; every other agy launch arms nothing and
+    # keeps the rendered-tail fallback (bin/fm-busy-lib.sh).
+    AGY_HOOK_WIRING=0
+    if [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH" -eq 0 ] \
+      && [ ! -e "$WT/.agents/hooks.json" ] && [ ! -L "$WT/.agents/hooks.json" ] \
+      && ! git -C "$WT" ls-files --error-unmatch .agents/hooks.json >/dev/null 2>&1 \
+      && fm_busy_agy_hooks_verified "$("$AGY_BIN" --version 2>/dev/null | head -1)"; then
+      AGY_HOOK_WIRING=1
+      BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
+        echo "error: failed to arm the busy-state contract for $ID" >&2
+        exit 1
+      }
+      [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
+    fi
+    ;;
   gemini | devin | commandcode | polytoken | cortex | kiro | hermes)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
@@ -6768,6 +6794,18 @@ BUSY_GEN=
       mkdir -p "$WT/.claude"
       printf '{%s}\n' "$hooks_json" >"$WT/.claude/settings.local.json"
       exclude_path '.claude/settings.local.json'
+    fi
+    ;;
+  agy)
+    if [ "${AGY_HOOK_WIRING:-0}" -eq 1 ]; then
+      # Workspace busy hooks; bin/fm-agy-worker-hooks.sh owns their contents.
+      agy_turnend=-
+      [ "$busy_notify_turnend" != true ] || agy_turnend=$TURNEND
+      "$SCRIPT_DIR/fm-agy-worker-hooks.sh" "$WT" "$STATE_REAL" "$ID" "$BUSY_GEN" "$agy_turnend" || {
+        echo "error: failed to write agy worker hooks for $ID" >&2
+        exit 1
+      }
+      exclude_path '.agents/hooks.json'
     fi
     ;;
   devin)

@@ -10,7 +10,7 @@ Verified as a full Firstmate harness (Primary, Secondmate, and Crewmate/Scout).
 |---|---|
 | Binary | Absolute `agy` from `PATH`, refused if absent; a Go-compiled single binary, so the live process name is exactly `agy` with `argv[0]=agy`. |
 | Launch | `agy --prompt-interactive "<brief>" --model <id> --effort <level> --dangerously-skip-permissions`, with the resolved absolute binary; the brief auto-submits with no extra Enter. The spawn pre-registers the worktree in agy's trust store first, then waits for a busy turn (answering the folder-trust dialog if it renders anyway) before reporting success. |
-| Busy state | No hook writer is armed, because agy 1.5.12 fires no closing hook on an Escape interrupt (`../../../../../docs/verification/agy.md`), so nothing is seeded; on Herdr the native `working` status classifies busy, and everywhere else the `agy-regex` rendered-tail fallback in `../../../../../bin/fm-busy-lib.sh` does. |
+| Busy state | A verified (1.5.12) ship or scout whose worktree has no `.agents/hooks.json` of its own gets workspace hooks (`../../../../../bin/fm-agy-worker-hooks.sh`): `PreInvocation` opens a turn, a `fullyIdle` `Stop` closes it, and because an Escape fires no hook, `fm-control` invalidates to unknown after an interrupt (`../../../../../docs/verification/agy.md`). Every other agy launch arms nothing; on Herdr the native `working` status classifies busy, and everywhere else the `agy-regex` rendered-tail fallback in `../../../../../bin/fm-busy-lib.sh` does. |
 | Rendered tail | Busy status row carries `esc to cancel` on the left; the idle row shows `? for shortcuts` instead. The `Generating...` word beside the braille spinner is free-floating output and is not a signal. |
 | Turn end | No turn-end hook or notification touch exists; completion arrives through the worker status protocol and, on Herdr, the native return to `idle`. |
 | Exit | `/quit`, one Enter; the process exits. |
@@ -44,9 +44,11 @@ agy is included in the session-lock name vocabulary in `../../../../../bin/fm-se
 
 ## Worker busy state and turn end
 
-`../../../../../bin/fm-spawn.sh` arms no busy generation for agy and writes no sidecar, exactly because no writer could ever clear a seeded record.
-`fm_busy_agy_tail_busy` matches the pinned `esc to cancel` status row alone, hardcoded with no environment override, and `fm_busy_classify` reports `unknown agy-regex` rather than idle when it is absent, because a long turn can scroll the marker out of the captured tail.
-Teardown removes nothing agy-specific because the spawn leaves nothing behind.
+On a verified agy version, `../../../../../bin/fm-spawn.sh` arms a busy generation for a ship or scout whose worktree has no `.agents/hooks.json` of its own and writes that file through `../../../../../bin/fm-agy-worker-hooks.sh`, kept out of the worker's commits by the worktree exclude.
+The spawn readiness gate never counts the seeded record as proof the brief started; it still waits for Herdr's native busy verdict, the pinned row, or a real hook event.
+Every other agy launch arms nothing and writes no sidecar, because no writer could clear a seeded record there.
+`fm_busy_agy_tail_busy` matches the pinned `esc to cancel` status row alone, hardcoded with no environment override, and without an agy-hook record `fm_busy_classify` reports `unknown agy-regex` rather than idle when it is absent, because a long turn can scroll the marker out of the captured tail.
+The workspace hooks file is removed with the worktree at cleanup.
 
 ## Primary and secondmate integration
 

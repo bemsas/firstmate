@@ -1175,7 +1175,7 @@ With it present, a busy ship or scout whose recent tool calls form one of the lo
 It only changes when the supervisor is notified: nothing is sent to the worker, and no interrupt, nudge, or relaunch follows from it.
 With the flag absent the watcher reads no ring and the busy bound is unchanged.
 
-A Claude ship or scout always feeds its ring through the hooks `bin/fm-spawn.sh` writes, and a Codex worker's ring is derived from the rollout in its task-private Codex home, so turning the flag on needs no relaunch.
+A Claude ship or scout, and a hook-wired agy ship or scout, always feeds its ring through the hooks `bin/fm-spawn.sh` writes, and a Codex worker's ring is derived from the rollout in its task-private Codex home, so turning the flag on needs no relaunch.
 `bin/fm-tool-ring.py`'s header owns the ring format, the patterns, and the detector output.
 The flag is a home-local supervision preference and is not inherited by secondmate homes.
 

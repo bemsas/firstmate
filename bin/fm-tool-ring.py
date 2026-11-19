@@ -8,7 +8,7 @@
 # THE RING. state/<id>.tool-ring.jsonl holds at most RING_MAX (20) events,
 # oldest first, one JSON object per line, replaced atomically under
 # state/<id>.tool-ring.jsonl.lock:
-#   {"v":1,"ts":<epoch seconds, float>,"src":"claude-hook"|"codex-rollout",
+#   {"v":1,"ts":<epoch seconds, float>,"src":"claude-hook"|"agy-hook"|"codex-rollout",
 #    "kind":"tool"|"message"|"compact","tool":"<tool name or empty>",
 #    "sig":"<12 hex: hash of tool name + canonical input, or of message text>",
 #    "out":"<12 hex: hash of the tool output or error text, or empty>",
@@ -18,10 +18,12 @@
 # status is an HTTP status found in a failed call's error text (401, 403, 429);
 # context is true when that error text reports a full context window.
 #
-# append reads one native Claude hook payload: PostToolUse (a successful
+# append reads one native hook payload. Claude: PostToolUse (a successful
 # call), PostToolUseFailure (error true, from .error), Stop (a message event
-# from .last_assistant_message), PreCompact (a compact event). Anything else
-# is ignored. It always exits 0 and prints nothing, so it can never block or
+# from .last_assistant_message), PreCompact (a compact event). agy: PostToolUse
+# with .toolCall {name, args} and .error (agy sends no tool output, so out
+# hashes the error text and is the same for every successful call). Anything
+# else is ignored. It always exits 0 and prints nothing, so it can never block or
 # alter the worker's turn.
 #
 # A Codex worker needs no hook: detect --codex-rollout derives the same events
@@ -84,7 +86,17 @@ def status_of(text):
     return int(match.group(1)) if match else None
 
 
+def from_agy(payload, now):
+    call = payload.get('toolCall') if isinstance(payload.get('toolCall'), dict) else {}
+    tool = str(call.get('name') or '')
+    err = text_of(payload.get('error') or '')
+    return event('tool', 'agy-hook', now, tool, digest([tool, call.get('args')]), digest(err), bool(err),
+                 status_of(err) if err else None, bool(CONTEXT_RE.search(err)))
+
+
 def from_claude(payload, now):
+    if payload.get('hookEventName') == 'PostToolUse' and 'toolCall' in payload:
+        return from_agy(payload, now)
     name = payload.get('hook_event_name')
     if name in ('PostToolUse', 'PostToolUseFailure'):
         tool = str(payload.get('tool_name') or '')

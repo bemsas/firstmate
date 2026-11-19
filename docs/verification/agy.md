@@ -162,10 +162,10 @@ In primary and secondmate homes, watcher commands are classified by the shared a
 Supervision continuity uses synchronous Stop-hook parking via `bin/fm-turnend-guard-agy.sh`, running `bin/fm-watch-arm.sh` (or the supervision host) which waits under the 28800s hook timeout until woken by an incoming event (bounded only when the optional `FM_AGY_PARK_TIMEOUT` is set) and falls back to bounded repair nagging via `bin/fm-turnend-guard.sh --agy`.
 Session lock verification recognizes `agy` process ancestry via `bin/fm-session-lock-lib.sh`.
 
-## Worker hooks: no closing event on an interrupt
+## Worker hooks: open, close, and no closing event on an interrupt
 
-agy 1.5.12 loads `<workspace>/.agents/hooks.json` for an interactive worker, but its lifecycle cannot back a semantic busy record.
-It was measured on 2026-11-19 on Linux with agy 1.5.12 (Gemini 4 Carbon, `--effort low`) in a scratch git workspace on a private tmux server, with `PreInvocation`, `PostToolUse` and `Stop` hooks that log each payload.
+agy 1.5.12 loads `<workspace>/.agents/hooks.json` for an interactive worker.
+It was first measured on 2026-11-19 on Linux with agy 1.5.12 (Gemini 4 Carbon, `--effort low`) in a scratch git workspace on a private tmux server, with `PreInvocation`, `PostToolUse` and `Stop` hooks that log each payload.
 The first turn ran `sleep 40` and was interrupted with Escape; the second turn completed.
 The hook log, as written by the hooks:
 
@@ -176,8 +176,19 @@ Stop 1795122933.5 fullyIdle=True term=NO_TOOL_CALL err=
 ```
 
 The interrupted turn logged its `PreInvocation` and nothing else: no `Stop` and no `PostToolUse` for the cancelled command.
-A record opened on `PreInvocation` would therefore read busy after every interrupt until the next turn, so no agy busy writer is armed and the rendered-tail fallback above stays the worker source.
-`Stop` carries `fullyIdle` and `terminationReason`, and per-session `--settings` rejects a `hooks` key (`Error: --settings: unknown setting "hooks"`), so worker hooks could only come from the workspace file or a plugin.
+Per-session `--settings` rejects a `hooks` key (`Error: --settings: unknown setting "hooks"`), so worker hooks come from the workspace file.
+
+A verified agy ship or scout therefore gets the busy hooks `bin/fm-agy-worker-hooks.sh` writes: `PreInvocation` opens a turn and a `Stop` whose payload reports `fullyIdle` true closes it.
+The interrupt gap is covered the Devin way rather than by guessing idle: `bin/fm-control.sh` invalidates the record to unknown after its own interrupt, and `fm_busy_classify` reads a busy agy record as `unknown agy-hook-stale` only when Herdr's native verdict reads idle and the pinned `esc to cancel` row is absent together.
+A worktree that already carries `.agents/hooks.json`, an unverified version, or a secondmate keeps the rendered-tail fallback above.
+The live guard writes the exact generated file and drives one interrupted and one completed turn:
+
+```text
+$ FM_AGY_WORKER_HOOKS_LIVE_E2E=1 bash tests/fm-agy-worker-hooks-live-e2e.test.sh
+1..1
+ok - agy 1.5.12: worker hooks open on PreInvocation, close on a fullyIdle Stop, stay open on Escape, and feed the ring
+FM_TEST_COMPLETE
+```
 
 ## What is still unproven
 

@@ -424,6 +424,21 @@ test_devin_interrupt_invalidates_busy() {
   pass "fm-control Devin interrupt: second press only after the armed hint, then busy invalidated without fabricating idle"
 }
 
+# agy fires no closing hook on an Escape interrupt (verified on 1.5.12), so a
+# hook-wired agy worker's busy record is invalidated the Devin way.
+test_agy_interrupt_invalidates_busy() {
+  local dir out gen
+  dir=$(new_case agy-busy)
+  add_task "$dir" t1 agy
+  alive_as "$dir" agy
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  "$ROOT/bin/fm-busy-event.sh" apply "$dir/home/state" t1 busy --gen "$gen" --source agy-hook --event pre-invocation
+  out=$(run_control "$dir" t1 interrupt) || fail "agy interrupt failed: $out"
+  assert_grep 'state=unknown source=fm-interrupt' "$dir/home/state/t1.busy-state" 'an interrupted agy turn stayed busy'
+  assert_no_grep 'state=idle' "$dir/home/state/t1.busy-state" 'an agy interrupt must not fabricate idle'
+  pass "fm-control agy interrupt: the hook-fed busy record is invalidated to unknown, never idle"
+}
+
 # The revert-picker hazard: on an idle Devin a fast double Escape opens the
 # /revert picker, where Enter reverts file changes. A turn that ended just
 # before the interrupt must get exactly one Escape and keep its busy record.
@@ -1359,6 +1374,7 @@ test_opencode_exit_matches_recorded_major
 test_opencode2_exit_retries_ctrl_c_once
 test_interrupt_sends_each_harness_verified_key
 test_devin_interrupt_invalidates_busy
+test_agy_interrupt_invalidates_busy
 test_devin_idle_interrupt_sends_one_press
 test_devin_exit_after_turn_ended_types_quit_once
 test_devin_interrupt_dismisses_revert_picker
