@@ -15,6 +15,11 @@
 # Program arguments and logs are absolute paths under FM_HOME.
 # The environment is FM_HOME and a minimal PATH. Nothing sources a shell
 # profile or a credential file. RunAtLoad is false.
+# The PATH is /usr/bin:/bin:/usr/sbin:/sbin after the directories where the
+# caller's PATH finds each tool the job needs: hermes and jq for the digest,
+# jq for the port check. FM_HERMES_SCHEDULE_PATH replaces that whole value.
+# A job whose tools do not resolve on its PATH is refused and nothing is
+# written, because launchd does not read a shell profile.
 # When config/hermes-digest-source or FM_HERMES_DIGEST_SOURCE is set, the
 # digest plist copies that source into its environment.
 #
@@ -49,6 +54,8 @@ Write or remove the user LaunchAgent plists for the morning digest and the
 Grok Bot port check. This command never loads or bootstraps a job.
 Hour 7 and minute 0 follow the Mac timezone. Set that timezone to
 Europe/London so 07:00 follows London daylight-saving time.
+Each job PATH pins the directories where this shell finds hermes and jq.
+FM_HERMES_SCHEDULE_PATH replaces that PATH. A tool missing from it is refused.
 EOF
 }
 
@@ -69,12 +76,38 @@ require_home() {
   [ -d "$home" ] || { printf '%s\n' 'error: FM_HOME is not a directory' >&2; exit 2; }
 }
 
-schedule_path() {
+SYSTEM_PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+job_path() {  # <tool...> -> the PATH a job needs, or refuse
+  local path tool found dir
   if [ -n "${FM_HERMES_SCHEDULE_PATH:-}" ]; then
-    printf '%s' "$FM_HERMES_SCHEDULE_PATH"
-    return 0
+    path=$FM_HERMES_SCHEDULE_PATH
+  else
+    path=$SYSTEM_PATH
+    for tool in "$@"; do
+      found=$(command -v "$tool" 2>/dev/null || true)
+      case "$found" in
+        /*) ;;
+        *) continue ;;
+      esac
+      dir=${found%/*}
+      case ":$path:" in
+        *":$dir:"*) ;;
+        *) path=$dir:$path ;;
+      esac
+    done
   fi
-  printf '%s' '/usr/bin:/bin:/usr/sbin:/sbin'
+  for tool in "$@"; do
+    found=$(PATH=$path command -v "$tool" 2>/dev/null || true)
+    case "$found" in
+      /*) ;;
+      *)
+        printf 'error: %s is not on the job PATH; install it or set FM_HERMES_SCHEDULE_PATH\n' "$tool" >&2
+        return 2
+        ;;
+    esac
+  done
+  printf '%s' "$path"
 }
 
 source_env_lines() {
@@ -89,9 +122,8 @@ source_env_lines() {
   fi
 }
 
-plist_header() {  # <label> <script> <stdout> <stderr> <calendar-or-interval-xml>
-  local label=$1 script=$2 out=$3 err=$4 when=$5 path home
-  path=$(schedule_path)
+plist_header() {  # <label> <script> <stdout> <stderr> <calendar-or-interval-xml> <path>
+  local label=$1 script=$2 out=$3 err=$4 when=$5 path=$6 home
   home=$FM_HOME
   cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -144,7 +176,8 @@ EOF
     "$FM_HOME/bin/fm-hermes-daily-digest.sh" \
     "$FM_HOME/data/hermes-bridge/digest-launchd.out" \
     "$FM_HOME/data/hermes-bridge/digest-launchd.err" \
-    "$when"
+    "$when" \
+    "$digest_path"
 }
 
 health_plist() {
@@ -158,7 +191,8 @@ EOF
     "$FM_HOME/bin/fm-grokbot-port-health.sh" \
     "$FM_HOME/data/hermes-bridge/grokbot-port-health-launchd.out" \
     "$FM_HOME/data/hermes-bridge/grokbot-port-health-launchd.err" \
-    "$when"
+    "$when" \
+    "$health_path"
 }
 
 require_dir_arg() {
@@ -193,8 +227,8 @@ esac
 require_home
 
 case "$cmd" in
-  print-digest) digest_plist; exit 0 ;;
-  print-health) health_plist; exit 0 ;;
+  print-digest) digest_path=$(job_path hermes jq) || exit 2; digest_plist; exit 0 ;;
+  print-health) health_path=$(job_path jq) || exit 2; health_plist; exit 0 ;;
 esac
 
 dir=''
@@ -212,6 +246,8 @@ dir=$(require_dir_arg "$dir")
 
 case "$cmd" in
   install)
+    digest_path=$(job_path hermes jq) || exit 2
+    health_path=$(job_path jq) || exit 2
     mkdir -p "$dir"
     digest_plist | write_plist "$dir" "$DIGEST_LABEL"
     health_plist | write_plist "$dir" "$HEALTH_LABEL"

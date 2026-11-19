@@ -534,6 +534,8 @@ printf '%s\n' "\$*" >> "$TMP_ROOT/launchctl.log"
 exit 0
 EOF
   chmod +x "$fake/launchctl"
+  printf '#!/bin/sh\nexit 0\n' > "$fake/hermes"
+  chmod +x "$fake/hermes"
   FM_HOME="$home" bash "$ROOT/bin/fm-hermes-schedule.sh" --help >"$STDOUT" || fail "schedule help failed"
   assert_contains "$(cat "$STDOUT")" 'never loads' "help hid the no-load rule"
   set +e
@@ -551,7 +553,8 @@ EOF
   assert_grep '<integer>0</integer>' "$digest" "minute is not 0"
   assert_grep '<false/>' "$digest" "RunAtLoad was not false"
   assert_grep "$home/bin/fm-hermes-daily-digest.sh" "$digest" "digest program is not under FM_HOME"
-  assert_grep '/usr/bin:/bin:/usr/sbin:/sbin' "$digest" "PATH was not the minimal default"
+  assert_grep "<string>$fake:" "$digest" "PATH did not pin the hermes directory first"
+  assert_grep '/usr/bin:/bin:/usr/sbin:/sbin</string>' "$digest" "PATH did not end with the minimal default"
   assert_grep 'https://example.com/a?b=1&amp;c=2' "$digest" "source was not XML-escaped"
   assert_grep "$home/data/hermes-bridge/digest-launchd.out" "$digest" "digest log left the home"
   if grep -q '<key>StartInterval</key>' "$digest"; then
@@ -590,6 +593,61 @@ EOF
   pass "launchd templates install without loading a job"
 }
 
+scheduled_digest_runs_under_its_plist_environment() {
+  local home dir userbin src calls rc plist_env prog
+  unset FM_HERMES_SCHEDULE_ALLOW_USER_AGENT FM_HERMES_SCHEDULE_PATH FM_HERMES_DIGEST_SOURCE || true
+  command -v python3 >/dev/null 2>&1 || fail "python3 is required to read the plist"
+  home=$(seed_home)
+  ln -s "$ROOT/bin" "$home/bin"
+  dir="$TMP_ROOT/agents-env"
+  userbin="$TMP_ROOT/userbin"
+  calls="$TMP_ROOT/userbin-calls"
+  mkdir -p "$userbin"
+  cat > "$userbin/hermes" << EOF
+#!/bin/sh
+printf 'x\n' >> "$calls"
+printf '%s\n' ack
+EOF
+  chmod +x "$userbin/hermes"
+  src="$TMP_ROOT/plist-env.json"
+  write_min "$src" "Plist env headline" "$(iso_of "$(date +%s)")"
+  set +e
+  PATH="$userbin:$PATH" FM_HOME="$home" FM_HERMES_DIGEST_SOURCE="$src" \
+    bash "$ROOT/bin/fm-hermes-schedule.sh" install --launch-agents-dir "$dir" >"$STDOUT" 2>"$STDERR"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "install exited $rc ($(cat "$STDERR"))"
+  plist_env=$(python3 -c 'import plistlib, sys
+d = plistlib.load(open(sys.argv[1], "rb"))
+e = d["EnvironmentVariables"]
+print(e["PATH"]); print(e["FM_HOME"]); print(e["FM_HERMES_DIGEST_SOURCE"]); print(d["ProgramArguments"][0])' \
+    "$dir/dev.firstmate.hermes-daily-digest.plist") || fail "digest plist did not parse"
+  prog=$(printf '%s\n' "$plist_env" | sed -n 4p)
+  set +e
+  (
+    cd "$home" && env -i HOME="$TMP_ROOT" \
+      PATH="$(printf '%s\n' "$plist_env" | sed -n 1p)" \
+      FM_HOME="$(printf '%s\n' "$plist_env" | sed -n 2p)" \
+      FM_HERMES_DIGEST_SOURCE="$(printf '%s\n' "$plist_env" | sed -n 3p)" \
+      "$prog"
+  ) >"$STDOUT" 2>"$STDERR"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "digest under the plist environment exited $rc ($(cat "$STDERR"))"
+  [ "$(wc -l < "$calls" | tr -d ' ')" -eq 1 ] || fail "hermes was not called once under the plist environment"
+  assert_contains "$(cat "$STDOUT")" 'Plist env headline' "digest text was not printed"
+  mkdir -p "$TMP_ROOT/emptybin"
+  set +e
+  FM_HERMES_SCHEDULE_PATH="$TMP_ROOT/emptybin" FM_HOME="$home" \
+    bash "$ROOT/bin/fm-hermes-schedule.sh" install --launch-agents-dir "$TMP_ROOT/agents-refused" >"$STDOUT" 2>"$STDERR"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "install with no hermes on the job PATH exited $rc"
+  assert_contains "$(cat "$STDERR")" 'hermes is not on the job PATH' "refusal did not name hermes"
+  assert_absent "$TMP_ROOT/agents-refused/dev.firstmate.hermes-daily-digest.plist" "a job without hermes was written"
+  pass "a scheduled digest finds hermes under its plist environment, and a job without it is refused"
+}
+
 formats_bounds_action_urls_and_cutoff
 formats_empty_groups_without_inventing_items
 refuses_bad_sources
@@ -598,3 +656,4 @@ sends_once_to_ops_and_retries_failure
 recovers_a_successful_claim_and_a_dead_lock
 concurrent_launches_send_one_digest
 installs_launchd_templates_without_loading_them
+scheduled_digest_runs_under_its_plist_environment
