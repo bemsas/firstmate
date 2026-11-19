@@ -6743,7 +6743,20 @@ BUSY_GEN=
       j_stop=$(json_escape "${stop_turnend}$busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       stop_entry="\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stop\"}]}],"
     fi
-    hooks_json="\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_submit\"}]}],${stop_entry}\"StopFailure\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stopfail\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_sessionend\"}]}]}"
+    # A ship or scout also feeds its tool ring (bin/fm-tool-ring.py owns the
+    # format and the loop detector): every finished or failed tool call, each
+    # turn's closing message, and each compaction. The writer stores names and
+    # hashes only and never fails a hook.
+    ring_entries=
+    if [ "$KIND" != secondmate ]; then
+      j_ring=$(json_escape "$(shell_quote "$FM_ROOT/bin/fm-tool-ring.py") append $(shell_quote "$STATE_REAL") $(shell_quote "$ID") 2>/dev/null || true")
+      ring_hook="{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_ring\"}]}"
+      ring_entries="\"PostToolUse\":[$ring_hook],\"PostToolUseFailure\":[$ring_hook],\"PreCompact\":[$ring_hook],"
+      if [ -n "$stop_entry" ]; then
+        stop_entry="\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stop\"}]},$ring_hook],"
+      fi
+    fi
+    hooks_json="\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_submit\"}]}],${stop_entry}${ring_entries}\"StopFailure\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stopfail\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_sessionend\"}]}]}"
     if [ "$KIND" = secondmate ]; then
       session_keys='"feedbackDrafts":"off",'
       if [ "$KEEP_AI_TRAILERS" != 1 ]; then

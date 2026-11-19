@@ -1168,6 +1168,17 @@ With the flag absent the wedge timer spends no current-state read for it and kee
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
 [`architecture.md`](architecture.md) owns the deferral contract and `bin/fm-classify-lib.sh`'s `crew_run_is_validating` owns which verdicts count.
 
+## Tool-loop early inspection (config/loop-detect)
+
+The optional local, gitignored `config/loop-detect` presence flag opts this home into checking a busy worker's tool ring for a repeated-action loop.
+With it present, a busy ship or scout whose recent tool calls form one of the loop patterns enters the watcher's wedge inspection timer at once instead of after `FM_BUSY_TURN_MAX_SECS`, and the stale notification names the pattern (`tool loop: <pattern>`).
+It only changes when the supervisor is notified: nothing is sent to the worker, and no interrupt, nudge, or relaunch follows from it.
+With the flag absent the watcher reads no ring and the busy bound is unchanged.
+
+A Claude ship or scout always feeds its ring through the hooks `bin/fm-spawn.sh` writes, and a Codex worker's ring is derived from the rollout in its task-private Codex home, so turning the flag on needs no relaunch.
+`bin/fm-tool-ring.py`'s header owns the ring format, the patterns, and the detector output.
+The flag is a home-local supervision preference and is not inherited by secondmate homes.
+
 ## Pause ceiling (config/pause-ceiling)
 
 The optional local, gitignored `config/pause-ceiling` presence flag opts this home into a default-off ceiling on declared `paused:` waits.

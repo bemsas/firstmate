@@ -98,7 +98,10 @@
 #                          progress (state/<id>.turn-ended, the native progress
 #                          marker beside it, or the spawn record before either
 #                          exists); an opted-in Pi model stream silent past
-#                          FM_STREAM_SILENT_MAX_SECS crosses that bound early.
+#                          FM_STREAM_SILENT_MAX_SECS crosses that bound early,
+#                          and, where config/loop-detect arms it, a worker whose
+#                          tool ring shows a loop (bin/fm-tool-ring.py) crosses
+#                          it at once.
 #                          Past that bound, a declared external
 #                          wait or verified captain-held transfer uses the long
 #                          pause recheck cadence; under daemon-backed afk an
@@ -2199,7 +2202,7 @@ wedge_write_escalation_count() {  # <window> <window-key> <escalation-file> <sin
 # that wake and its count instead of surfacing an obsolete observation.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash> [dialog-name] [stream snapshot]
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 dialog=${7-} since age n prev reason evidence guard guard_note
-  local stream_snapshot=${8:-} stream_ts stream_detail='' append_status
+  local stream_snapshot=${8:-} stream_ts stream_detail='' loop_detail='' append_status
   local _wkey _wrollback_sentinel _wrb_ts _wrb_cap_reason _wrb_cap_status _wrb_rm_status
   local _wrb_since _wrb_now _wrb_age _wrb_cap_ts _wrb_gate
   _wkey=$(window_key "$win")
@@ -2331,6 +2334,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           read -r _ _ _ stream_ts <<< "$stream_snapshot"
           stream_detail=", model stream silent for $(( $(date +%s) - stream_ts ))s (foreground request)"
         fi
+        case "$label" in
+          'busy (tool loop: '*) loop_detail=", ${label#busy (}"; loop_detail=${loop_detail%)} ;;
+        esac
         # The count is cap state - the only state the ceiling below is computed
         # from - so whatever the counter file holds is validated to a count here,
         # like every other marker this ladder reads, rather than reaching the
@@ -2342,9 +2348,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # so a close, progress, or replacement during the publication lock wait
         # cannot leave an escalation counted for a wake that never went out.
         [ -n "$stream_snapshot" ] || wedge_write_escalation_count "$win" "$_wkey" "$escalation_file" "$since_file" "$n"
-        reason="stale: $win (idle ${age}s, possible wedge, escalation $n$stream_detail$guard_note)"
+        reason="stale: $win (idle ${age}s, possible wedge, escalation $n$stream_detail$loop_detail$guard_note)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n$stream_detail, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone$guard_note)"
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n$stream_detail$loop_detail, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone$guard_note)"
         fi
         # Cap-fire block: when FM_WEDGE_MAX_ESCALATIONS is configured above 0
         # and the per-window escalation counter has reached the bound, emit
@@ -2481,9 +2487,37 @@ wedge_defer_t3code_running() {  # <window> <since-file> <triage-label> <idle-age
 # Progress is actual observed activity, never a timer or a busy footer.
 # This probe does not emit a wake or change semantic busy state.
 # The caller checks busy state and routes a crossed bound through inspection.
+# busy_loop_verdict: OFF unless the home creates config/loop-detect. Prints the
+# loop pattern bin/fm-tool-ring.py finds in the task's tool ring (a Claude
+# worker's hook-fed ring, or a Codex worker's task-private rollout), or fails.
+# Read-only: the verdict only makes a busy pane a wedge suspect early, through
+# the same wedge timer and stale wake as any other suspect; nothing is sent to
+# the worker.
+busy_loop_verdict() {  # <task>
+  local task=$1 harness rollout line
+  [ -e "$CONFIG/loop-detect" ] || return 1
+  if [ -f "$STATE/$task.tool-ring.jsonl" ]; then
+    line=$("$SCRIPT_DIR/fm-tool-ring.py" detect "$STATE" "$task" 2>/dev/null) || return 1
+  else
+    harness=$(grep '^harness=' "$STATE/$task.meta" 2>/dev/null | cut -d= -f2- || true)
+    case "$harness" in codex*) ;; *) return 1 ;; esac
+    rollout=$(fm_busy_codex_rollout "$STATE" "$task") || return 1
+    line=$("$SCRIPT_DIR/fm-tool-ring.py" detect "$STATE" "$task" --codex-rollout "$rollout" 2>/dev/null) || return 1
+  fi
+  case "$line" in
+    verdict=loop\ pattern=*) line=${line#verdict=loop pattern=}; printf '%s' "${line%% *}" ;;
+    *) return 1 ;;
+  esac
+}
+
 busy_turn_over_age() {  # <task>
   local task=$1 f progress harness snapshot gen request rev ts age model_ts model_age
   BUSY_STREAM_SNAPSHOT=
+  BUSY_LOOP_PATTERN=
+  if BUSY_LOOP_PATTERN=$(busy_loop_verdict "$task"); then
+    return 0
+  fi
+  BUSY_LOOP_PATTERN=
   if [ "$STREAM_SILENT_MAX_SECS" -gt 0 ]; then
     harness=$(grep '^harness=' "$STATE/$task.meta" 2>/dev/null | cut -d= -f2- || true)
     if snapshot=$(fm_busy_stream_read "$STATE" "$task" "$harness"); then
@@ -2708,6 +2742,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
     fi
     rm -f "$stream_episode"
   fi
+  [ -z "${BUSY_LOOP_PATTERN:-}" ] || label="busy (tool loop: $BUSY_LOOP_PATTERN)"
   wedge_timer_check "$win" "$since_file" "$label" "$escalation_file" "$task" "$h" "$dialog" "$stream_snapshot"
   return 1
 }

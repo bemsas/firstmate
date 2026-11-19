@@ -675,6 +675,34 @@ test_claude_hooks_semantic_lifecycle() {
   pass "claude hooks open on UserPromptSubmit and close on Stop, StopFailure, and SessionEnd"
 }
 
+test_claude_crewmate_feeds_tool_ring() {
+  local rec id=busy-cl-ring out state settings cmd i
+  rec=$(make_spawn_case claude-ring claude "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  settings="$WT_DIR/.claude/settings.local.json"
+  for ev in PostToolUse PostToolUseFailure PreCompact; do
+    jq -e ".hooks[\"$ev\"][0].hooks[0].command | test(\"fm-tool-ring.py\")" "$settings" >/dev/null \
+      || fail "claude crewmate settings lack the $ev tool-ring hook"
+  done
+  jq -e '[.hooks.Stop[].hooks[].command | select(test("fm-tool-ring.py"))] | length == 1' "$settings" >/dev/null \
+    || fail "claude crewmate Stop lacks exactly one tool-ring hook beside the busy hook"
+  cmd=$(jq -r '.hooks.PostToolUseFailure[0].hooks[0].command' "$settings")
+  for i in 1 2 3; do
+    printf '{"hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_input":{"command":"pnpm build"},"error":"Exit code 1 secret-token-xyz"}' \
+      | sh -c "$cmd" || fail "tool-ring hook must exit 0"
+  done
+  assert_no_grep 'secret-token-xyz' "$state/$id.tool-ring.jsonl" "the ring must not store tool text"
+  out=$("$ROOT/bin/fm-tool-ring.py" detect "$state" "$id")
+  assert_contains "$out" "verdict=loop pattern=repeat_action_error" "three identical failed calls must read as a loop"
+  run_claude_hook "$settings" Stop || fail "Stop busy hook still runs"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "idle claude-hook" ] || fail "the ring hook must not disturb the busy Stop hook, got '$out'"
+  pass "a claude crewmate feeds its tool ring from PostToolUse, PostToolUseFailure, Stop and PreCompact"
+}
+
 test_claude_hooks_stale_incarnation_harmless() {
   local rec id=busy-cl-2 out state settings
   rec=$(make_spawn_case claude-stale claude "$id")
@@ -990,6 +1018,7 @@ test_secondmate_claude_spawn_arms_busy_for_the_stall_gate() {
   launch=$(cat "$case_dir/launch.log")
   assert_present "$state/$id.busy-state" "claude secondmate spawn did not arm the busy contract"
   assert_present "$settings" "claude secondmate spawn did not write hook settings"
+  assert_no_grep 'fm-tool-ring.py' "$settings" "a secondmate must not feed a worker tool ring"
   assert_contains "$launch" "--settings '$settings'" \
     "claude secondmate launch did not pass the state settings file"
   [ ! -e "$sm/.claude/settings.local.json" ] \
@@ -1339,6 +1368,7 @@ test_opencode_plugin_v2_execution_lifecycle
 test_opencode_plugin_applies_events_in_emission_order
 test_opencode_plugin_v2_applies_events_in_emission_order
 test_claude_hooks_semantic_lifecycle
+test_claude_crewmate_feeds_tool_ring
 test_claude_hooks_stale_incarnation_harmless
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless

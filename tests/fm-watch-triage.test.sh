@@ -4713,6 +4713,53 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+test_tool_loop_uses_inspection_timer() {
+  local dir state fakebin out capture_file window key gen pid mode now i
+  for mode in armed unarmed; do
+    dir=$(make_case "tool-loop-$mode"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-loop-$mode"
+    key=$(watch_window_key "$window")
+    printf 'Working...' > "$capture_file"
+    printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/loop.meta"
+    gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" loop)
+    "$ROOT/bin/fm-busy-event.sh" apply "$state" loop busy --gen "$gen" --source claude-hook --event user-prompt-submit
+    printf 'working: setup complete\n' > "$state/loop.status"
+    seen_sig "$state/loop.status" > "$state/.seen-loop_status"
+    for i in 1 2 3; do
+      printf '{"hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_input":{"command":"pnpm build"},"error":"Exit code 1"}' \
+        | "$ROOT/bin/fm-tool-ring.py" append "$state" loop
+    done
+    mkdir -p "$dir/config"
+    [ "$mode" = unarmed ] || : > "$dir/config/loop-detect"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" FM_BUSY_TURN_MAX_SECS=99999 \
+      FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$WATCH" > "$out" &
+    pid=$!
+    wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "tool loop $mode surfaced before inspection delay: $(cat "$out")"; }
+    if [ "$mode" = armed ]; then
+      [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "an armed tool loop did not enter the inspection timer at once"; }
+    else
+      [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "an unarmed home started the inspection timer on a tool loop"; }
+    fi
+    reap "$pid"
+    [ "$mode" = armed ] || continue
+    ack_stopped_cycle "$state" || fail "cannot acknowledge test stop"
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    printf 'Working... next tick' > "$capture_file"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" FM_BUSY_TURN_MAX_SECS=99999 \
+      FM_WEDGE_MAX_ESCALATIONS=0 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 100 || { reap "$pid"; fail "an armed tool loop never surfaced"; }
+    grep -F 'tool loop: repeat_action_error' "$out" >/dev/null || fail "loop reason missing: $(cat "$out")"
+    grep -F 'possible wedge' "$out" >/dev/null || fail "tool loop bypassed the inspection reason"
+    [ ! -e "$state/.control-relaunch-loop" ] || fail "a tool loop must not relaunch the worker"
+  done
+  pass "a tool loop on a busy pane enters the inspection timer at once only where config/loop-detect arms it"
+}
+
 test_pi_stream_silence_uses_inspection_timer() {
   local dir state fakebin out capture_file window key gen snapshot pid mode enabled
   for mode in enabled disabled negative invalid_option leading maximum overflow closed foreign fresh malformed stale resumed racing; do
@@ -5439,6 +5486,7 @@ fm_test_run \
   test_long_endpoint_keeps_stale_history \
   test_window_keys_encode_supported_endpoint_bytes \
   test_pi_stream_silence_uses_inspection_timer \
+  test_tool_loop_uses_inspection_timer \
   test_pi_model_progress_and_legacy_fallback \
   test_pi_stream_publication_lock_revalidation \
   test_pi_stream_uninterrupted_publication \
