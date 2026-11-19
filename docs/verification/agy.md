@@ -162,6 +162,23 @@ In primary and secondmate homes, watcher commands are classified by the shared a
 Supervision continuity uses synchronous Stop-hook parking via `bin/fm-turnend-guard-agy.sh`, running `bin/fm-watch-arm.sh` (or the supervision host) which waits under the 28800s hook timeout until woken by an incoming event (bounded only when the optional `FM_AGY_PARK_TIMEOUT` is set) and falls back to bounded repair nagging via `bin/fm-turnend-guard.sh --agy`.
 Session lock verification recognizes `agy` process ancestry via `bin/fm-session-lock-lib.sh`.
 
+## Worker hooks: no closing event on an interrupt
+
+agy 1.5.12 loads `<workspace>/.agents/hooks.json` for an interactive worker, but its lifecycle cannot back a semantic busy record.
+It was measured on 2026-11-19 on Linux with agy 1.5.12 (Gemini 4 Carbon, `--effort low`) in a scratch git workspace on a private tmux server, with `PreInvocation`, `PostToolUse` and `Stop` hooks that log each payload.
+The first turn ran `sleep 40` and was interrupted with Escape; the second turn completed.
+The hook log, as written by the hooks:
+
+```text
+PreInvocation 1795122905.9 fullyIdle=None term=None err=
+PreInvocation 1795122927.7 fullyIdle=None term=None err=
+Stop 1795122933.5 fullyIdle=True term=NO_TOOL_CALL err=
+```
+
+The interrupted turn logged its `PreInvocation` and nothing else: no `Stop` and no `PostToolUse` for the cancelled command.
+A record opened on `PreInvocation` would therefore read busy after every interrupt until the next turn, so no agy busy writer is armed and the rendered-tail fallback above stays the worker source.
+`Stop` carries `fullyIdle` and `terminationReason`, and per-session `--settings` rejects a `hooks` key (`Error: --settings: unknown setting "hooks"`), so worker hooks could only come from the workspace file or a plugin.
+
 ## What is still unproven
 
 The unauthenticated failure mode was never observed; this host's agy runs signed in, so any auth prompt is a fail-loud credential blocker, not a handled dialog.
