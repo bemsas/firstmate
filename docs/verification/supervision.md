@@ -1076,3 +1076,23 @@ Unverified sessions retain the foreground protocol, whose existing live guard re
 The native proof above was a real adapter smoke; it did not add a test case or modify the foreground live guard.
 `tests/fm-codex-stop-park.test.sh` separately covers the opt-in and version gates, single-flight claim, fallback latch, final-result delivery when supervision ends, owner-gone watcher exit and retained quiet boundary against a fake `codex`.
 [The Codex protocol](../supervision-protocols/codex.md) owns operating instructions; script headers own registration, failure fallback and process ownership.
+
+## Supervisor continuity hooks
+
+This supports [Supervisor continuity hooks](../configuration.md#supervisor-continuity-hooks-claude-primary): Claude Code fires `PreCompact` with a `transcript_path` whose human prompts carry `origin.kind` `human`, and adds `UserPromptSubmit` `hookSpecificOutput.additionalContext` to model context.
+It was measured on 2026-11-19 on Linux 7.2.15-2-omarchy x86_64 with Claude Code 2.1.328 (`claude-haiku-5-5`), with both hooks registered through `--settings` in a throwaway project.
+The first case reads back a canary that exists only in the cached alert file the inject hook serves; the second compacts the resumed session with `/compact`.
+
+```text
+$ FM_PRECOMPACT_HANDOFF_LIVE_E2E=1 bash tests/fm-precompact-handoff-live-e2e.test.sh
+1..2
+ok - claude 2.1.328 (Claude Code): inject digest reaches model context
+ok - claude 2.1.328 (Claude Code): PreCompact writes the handoff from the real transcript
+FM_TEST_COMPLETE
+```
+
+Deterministic entry point:
+
+```sh
+tests/fm-precompact-handoff.test.sh
+```
