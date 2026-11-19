@@ -519,27 +519,39 @@ test_keyed_status_and_browser_artifacts() {
 }
 
 fake_ssh() {  # <bin-dir> <remote-home>: run the remote command locally in a stand-in home
+  # <remote-home>/.down makes the transport fail; <remote-home>/.truncate holds a byte
+  # count after which the upload stream ends early, as a dropped connection would.
   mkdir -p "$1" "$2"
   cat > "$1/ssh" <<SH
 #!/usr/bin/env bash
 while [ "\$#" -gt 0 ]; do case "\$1" in -o) shift 2 ;; *) break ;; esac; done
 printf '%s\n' "\$1" >> '$2/.ssh-hosts'
 shift
-cd '$2' && HOME='$2' exec bash -c "\$*"
+[ ! -e '$2/.down' ] || exit 255
+cd '$2' || exit 255
+if [ -s '$2/.truncate' ]; then
+  head -c "\$(cat '$2/.truncate')" | HOME='$2' bash -c "\$*"
+else
+  HOME='$2' exec bash -c "\$*"
+fi
 SH
   chmod +x "$1/ssh"
 }
 
 test_shadow_stop_and_publish() {
-  local dir home wt pid i rc
+  local dir home wt pid i rc dest
   dir=$(world publish)
   home="$dir/main"
   wt="$dir/wt"
+  dest="$dir/remote/.fm-actuator/verdicts.jsonl"
   mkdir -p "$home/state" "$home/data"
   : > "$home/data/secondmates.md"
   fm_git_init_commit "$wt" >/dev/null 2>&1 || fail "git fixture failed"
   printf 'print(1)\n' > "$wt/unfinished.py"
-  printf 'kind=ship\nmode=direct-PR\nworktree=%s\nbackend=herdr\nherdr_session=s\nherdr_pane_id=w1:p1\n' "$wt" > "$home/state/ok.meta"
+  for i in 1 2; do
+    printf 'kind=ship\nmode=direct-PR\nworktree=%s\nbackend=herdr\nherdr_session=s\nherdr_pane_id=w1:p%s\n' \
+      "$wt" "$i" > "$home/state/lane$i.meta"
+  done
   fake_herdr "$dir/bin" "$dir/herdr.log" "$wt"
   fake_ssh "$dir/bin" "$dir/remote"
   stub_start "$dir"
@@ -563,22 +575,45 @@ test_shadow_stop_and_publish() {
   kill -0 "$pid" 2>/dev/null && fail "a stop during the interval must end the run promptly"
   wait "$pid"
   grep -q '"exit_reason": "signal-15"' "$dir/m1/manifest-end.json" || { cat "$dir/run1.out" >&2; fail "stop reason not recorded"; }
-  [ "$(grep -c 'agent get' "$dir/herdr.log")" = 1 ] || fail "a stop during the interval started another collection"
-  cmp -s "$dir/out.jsonl" "$dir/remote/.fm-actuator/verdicts.jsonl" || fail "published file differs from the verdict rows"
-  [ "$(grep -c '"schema":"fm-pane-judge.verdict.v1"' "$dir/remote/.fm-actuator/verdicts.jsonl")" = 1 ] || fail "verdict row not published"
-  [ -e "$dir/remote/.fm-actuator/verdicts.jsonl.lock" ] || fail "remote publish lock missing"
+  [ "$(grep -c 'agent get' "$dir/herdr.log")" = 2 ] || fail "a stop during the interval started another collection"
+  # Two judged rows in one cycle mean two publishes, one right after each append.
+  python3 - "$dir/m1/cycles.jsonl" <<'PY' || fail "each appended row must be published on its own"
+import json, sys
+cycle = json.loads(open(sys.argv[1]).readline())
+rows = [p['rows'] for p in cycle['publish']]
+assert rows == [1, 2] and all(p['status'] == 'ok' for p in cycle['publish']), cycle['publish']
+PY
+  cmp -s "$dir/out.jsonl" "$dest" || fail "published file differs from the verdict rows"
+  [ -e "$dest.lock" ] || fail "remote publish lock missing"
   [ "$(sort -u "$dir/remote/.ssh-hosts")" = akamai_vm ] || fail "publish went to an unexpected host"
   grep -q '"publish": "akamai_vm:.fm-actuator/verdicts.jsonl"' "$dir/m1/manifest-start.json" || fail "publish target not in manifest"
-  grep -q '"publish":{"at":"[^"]*","rc":0,"rows":1,' "$dir/m1/cycles.jsonl" || fail "cycle publish result not recorded"
-  printf 'owned by someone else\n' > "$dir/remote/.fm-actuator/verdicts.jsonl"
-  ( shadow_in --duration 60 --interval 1 --max-cycles 1 --manifest-dir "$dir/m2" \
-    --publish 'akamai_vm:.fm-actuator/verdicts.jsonl' ) >/dev/null 2>&1
+  cp "$dest" "$dir/before.jsonl"
+  # Each fresh run below exercises its preflight publish as the upload under test.
+  republish() {
+    ( shadow_in --duration 60 --interval 1 --max-cycles 1 --manifest-dir "$1" \
+      --publish 'akamai_vm:.fm-actuator/verdicts.jsonl' ) >/dev/null 2>&1
+  }
+  printf '10\n' > "$dir/remote/.truncate"
+  republish "$dir/m2"
+  rc=$?
+  : > "$dir/remote/.truncate"
+  [ "$rc" = 1 ] || fail "a truncated upload must fail the publish"
+  cmp -s "$dir/before.jsonl" "$dest" || fail "a truncated upload replaced the destination"
+  find "$dir/remote/.fm-actuator" -name '*.tmp.*' | grep -q . && fail "a truncated upload left a temporary file"
+  touch "$dir/remote/.down"
+  republish "$dir/m3"
+  rc=$?
+  mv "$dir/remote/.down" "$dir/remote/.was-down"
+  [ "$rc" = 1 ] || fail "an unreachable host must fail the publish"
+  [ -e "$dir/m3/manifest-start.json" ] && fail "a failed first publish must not start the audit"
+  cmp -s "$dir/before.jsonl" "$dest" || fail "a failed transport changed the destination"
+  printf 'owned by someone else\n' > "$dest"
+  republish "$dir/m4"
   rc=$?
   stub_stop
   [ "$rc" = 1 ] || fail "a refused first publish must fail the preflight"
-  [ -e "$dir/m2/manifest-start.json" ] && fail "a refused first publish must not start the audit"
-  [ "$(cat "$dir/remote/.fm-actuator/verdicts.jsonl")" = 'owned by someone else' ] || fail "foreign remote content overwritten"
-  pass "a stop during the interval starts no new collection and verdicts mirror atomically to the authorized host only"
+  [ "$(cat "$dest")" = 'owned by someone else' ] || fail "foreign remote content overwritten"
+  pass "a stop during the interval starts no new collection and each verdict row mirrors verified and atomically to the authorized host only"
 }
 
 fm_test_run test_gate_classes test_request_shape_and_redaction test_verdict_contract_and_dedupe \

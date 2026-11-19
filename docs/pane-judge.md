@@ -99,10 +99,11 @@ The step-5 actuator on `akamai_vm` reads rows from `~/.fm-actuator/verdicts.json
 `shadow` runs collection and judging every `--interval` seconds for `--duration` seconds.
 It writes `manifest-start.json` only after its preflight proves the credential, a usable model catalog entry, and a working collector on every requested host, then appends one line per cycle to `cycles.jsonl` and finishes with `manifest-end.json`.
 A stop signal ends the run at the next safe point and never starts another collection; the end manifest records `signal-<n>`.
-With `--publish <host>:<path>`, the run mirrors the newest 5,000 complete verdict rows to that path under the remote home after every cycle that wrote rows.
+With `--publish <host>:<path>`, the run mirrors the newest 5,000 complete verdict rows to that path under the remote home immediately after each appended row.
 The host must be an authorized remote host and the path must stay under the remote home.
-The copy runs over BatchMode ssh under a local `publish.lock` and a remote `<path>.lock`, lands through a temporary file and an atomic rename, and refuses to replace a file whose first line is not a pane-judge verdict.
-A first publish is part of the preflight, so an unreachable or refused target stops the run before `manifest-start.json`; later failures are counted in `cycles.jsonl` and retried next cycle.
+The copy runs over BatchMode ssh under a local `publish.lock` and a remote `<path>.lock`, lands in a temporary file, and is promoted by an atomic rename only when its byte count and SHA-256 match the values sent with it, so an interrupted upload leaves the previous file untouched.
+It refuses to replace a file whose first line is not a pane-judge verdict.
+A first publish is part of the preflight, so an unreachable or refused target stops the run before `manifest-start.json`; every publish result is listed in that cycle's `cycles.jsonl` line, and a failed one is retried at the end of each cycle until the mirror matches.
 Ground truth is a separate JSONL of human or mate labels, schema `fm-pane-judge.outcome.v1` with `lane` (or `host`, `home`, `task`), `ts`, one of the six labels, a non-empty `labeler`, and an optional `note`.
 `summary` matches each verdict to the nearest outcome on the same lane within 900 seconds; unlabelled verdicts and unlabelled outcomes are never counted as agreement.
 It reports `pass` only when the same run's `manifest-end.json` records at least 24 hours elapsed, whenever its last verdict fell, with at least 20 labelled matches, agreement of 85% or more, no emitted `needs-restart` on an active build or against a non-restart outcome, and every day's spend under $0.50.

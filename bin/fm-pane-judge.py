@@ -39,7 +39,8 @@ shadow         Run collect + judge every --interval seconds (default 300) until
                (with --publish) first publish preflight fails. A stop signal
                ends the run without starting another collection.
                --publish mirrors the newest verdict rows to an authorized host
-               over BatchMode ssh after every cycle that wrote rows.
+               over BatchMode ssh right after each appended row; the receiver
+               promotes an upload only when its size and SHA-256 match.
 summary        Compare verdicts with human or mate outcome labels and print the
                shadow-gate verdict.
 budget         Print the shared spend and call ledger.
@@ -1230,8 +1231,15 @@ if [ -s "$p" ] && ! head -n 1 -- "$p" | grep -q '"schema":"fm-pane-judge.verdict
   exit 3
 fi
 t="$p.tmp.$$"
+trap 'rm -f -- "$t"' EXIT
 cat > "$t"
+# Promote only the exact payload: an early EOF leaves the previous file untouched.
+if [ "$(wc -c < "$t" | tr -d ' ')" != "$2" ] || [ "$(sha256sum < "$t" | cut -d' ' -f1)" != "$3" ]; then
+  echo "refusing: incomplete upload for $p" >&2
+  exit 4
+fi
 mv -f -- "$t" "$p"
+trap - EXIT
 '''
 
 
@@ -1254,14 +1262,17 @@ def publish(out, target):
             with open(out, 'rb') as fh:
                 fcntl.flock(fh, fcntl.LOCK_SH)
                 data = fh.read()
+                mark = file_mark(out)
         except FileNotFoundError:
-            data = b''
+            data, mark = b'', None
         lines = [line for line in data.splitlines(keepends=True) if line.endswith(b'\n')][-PUBLISH_LINES:]
         payload = b''.join(lines)
-        remote = ' '.join(['bash', '-c', shlex.quote(REMOTE_PUBLISH), 'fm-pane-judge-publish', shlex.quote(path)])
-        rc, _ = run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', host, remote], timeout=90, stdin=payload)
-    return {'status': 'ok' if rc == 0 else 'failed', 'rc': rc, 'rows': len(lines),
-            'sha256': hashlib.sha256(payload).hexdigest(), 'at': iso(now_epoch())}
+        digest = hashlib.sha256(payload).hexdigest()
+        remote = ' '.join(['bash', '-c', shlex.quote(REMOTE_PUBLISH), 'fm-pane-judge-publish', shlex.quote(path),
+                           str(len(payload)), digest])
+        rc, _ = run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', host, remote], timeout=50, stdin=payload)
+    return {'status': 'ok' if rc == 0 else 'failed', 'rc': rc, 'rows': len(lines), 'bytes': len(payload),
+            'sha256': digest, 'at': iso(now_epoch()), 'mark': mark if rc == 0 else None}
 
 
 def file_mark(path):
@@ -1302,7 +1313,7 @@ def cmd_shadow(args):
     published = None
     if target:
         preflight['publish'] = publish(out, target)
-        published = file_mark(out) if preflight['publish']['status'] == 'ok' else None
+        published = preflight['publish'].get('mark')
     ok = (preflight['credential'] and (preflight['catalog_primary'] or preflight['catalog_fallback'])
           and all(v == 'ok' for v in preflight['collector'].values())
           and (not target or preflight['publish']['status'] == 'ok'))
@@ -1320,21 +1331,32 @@ def cmd_shadow(args):
     deadline = started + args.duration
     while stop['reason'] is None:
         cycle_start = now_epoch()
-        stats = {}
+        stats, publishes = {}, []
         for snap in snaps:
             if stop['reason']:
                 break
-            judge_one(snap, out, key, stats)
+            # Publish right after each appended row, so a row reaches the VM within one transfer.
+            if judge_one(snap, out, key, stats) and target:
+                result = publish(out, target)
+                publishes.append(result)
+                if result['status'] == 'ok':
+                    published = result['mark']
+                else:
+                    totals['publish-failed'] = totals.get('publish-failed', 0) + 1
         cycles += 1
         for k, v in stats.items():
             totals[k] = totals.get(k, 0) + v
         cycle = {'cycle': cycles, 'at': iso(cycle_start), 'lanes': len(snaps), 'collector': report, 'stats': stats}
+        # A failed per-row publish is retried once per cycle until the mirror matches.
         if target and file_mark(out) != published:
-            cycle['publish'] = publish(out, target)
-            if cycle['publish']['status'] == 'ok':
-                published = file_mark(out)
+            result = publish(out, target)
+            publishes.append(result)
+            if result['status'] == 'ok':
+                published = result['mark']
             else:
                 totals['publish-failed'] = totals.get('publish-failed', 0) + 1
+        if publishes:
+            cycle['publish'] = publishes
         append_jsonl(os.path.join(manifest_dir, 'cycles.jsonl'), cycle)
         if args.max_cycles and cycles >= args.max_cycles:
             stop['reason'] = 'max-cycles'
