@@ -46,6 +46,27 @@ test_recent_attempts_resets_after_rearmed() {
   pass 'attempt counter resets after a rearmed ledger row'
 }
 
+test_error_class_splits_auth_quota_generic() {
+  local c
+  for c in $'API Error: 401 {"type":"authentication_error"}' $'API Error: 403 Forbidden' \
+    $'API Error: OAuth token has expired. Please run /login' $'Provider error (401): invalid api key'; do
+    [ "$(fm_broken_session_error_class "$c")" = auth ] || fail "auth banner misread: $c"
+  done
+  for c in $'API Error: 429 {"type":"rate_limit_error"}' $'API Error: Too Many Requests' \
+    $'Provider error (429): RESOURCE_EXHAUSTED' $'API Error: usage limit reached\nYour limit resets at 3pm (UTC)'; do
+    [ "$(fm_broken_session_error_class "$c")" = quota ] || fail "quota banner misread: $c"
+  done
+  for c in $'API Error: 500 internal' $'API Error: response stopped arriving' $'Content generator not initialized'; do
+    [ "$(fm_broken_session_error_class "$c")" = generic ] || fail "generic banner misread: $c"
+  done
+  [ "$(fm_broken_session_error_class $'API Error: 401 then 429 rate limit')" = auth ] || fail 'auth must win over quota'
+  [ "$(fm_broken_session_error_class $'I added a 429 rate limit retry\nAPI Error: 500 internal')" = generic ] \
+    || fail 'ordinary output above the banner must not change its class'
+  [ "$(fm_broken_session_reset_hint $'API Error: usage limit reached\nYour limit resets at 3pm (UTC)')" = 'resets at 3pm' ] \
+    || fail "reset hint not extracted: $(fm_broken_session_reset_hint $'Your limit resets at 3pm (UTC)')"
+  pass 'error class splits 401/403 auth, 429 quota and generic banners, judged on banner lines only'
+}
+
 make_broken_probe_case() {
   local name=$1 pane_text=$2
   local dir=$TMP_ROOT/$name fakebin state meta capture
@@ -92,6 +113,27 @@ test_probe_marks_idle_alive_api_error_as_broken() {
   pass 'probe marks an idle alive worker with a visible API error as broken'
 }
 
+test_probe_parks_auth_and_quota_without_relaunch() {
+  local fakebin state out
+  out=$(make_broken_probe_case probe-auth $'✻ Idle\nAPI Error: 401 {"type":"authentication_error"}\n') \
+    || fail 'probe fixture setup failed'
+  fakebin=${out%%$'\n'*}
+  state=${out#*$'\n'}
+  PATH="$fakebin:$BASE_PATH" FM_HOME="${state%/state}" FM_STATE_OVERRIDE=$state \
+    fm_broken_session_probe "$state" "$state/ship1.meta" ship1
+  [ "$FM_BROKEN_STATUS" = auth ] || fail "expected auth, got $FM_BROKEN_STATUS (${FM_BROKEN_DETAIL:-})"
+  out=$(make_broken_probe_case probe-quota $'✻ Idle\nAPI Error: 429 rate_limit_error\nresets at 21:00 UTC\n') \
+    || fail 'probe fixture setup failed'
+  fakebin=${out%%$'\n'*}
+  state=${out#*$'\n'}
+  PATH="$fakebin:$BASE_PATH" FM_HOME="${state%/state}" FM_STATE_OVERRIDE=$state \
+    fm_broken_session_probe "$state" "$state/ship1.meta" ship1
+  [ "$FM_BROKEN_STATUS" = quota ] || fail "expected quota, got $FM_BROKEN_STATUS (${FM_BROKEN_DETAIL:-})"
+  assert_contains "$FM_BROKEN_DETAIL" 'resets at 21:00 UTC' 'quota detail carries the visible reset time'
+  assert_absent "$state/.broken-session-relaunch-ship1" 'a probe never writes the relaunch ledger'
+  pass 'probe reports auth and quota banners as their own statuses, never as relaunchable broken'
+}
+
 test_probe_skips_busy_pane_with_error_banner() {
   local fakebin state out
   out=$(make_broken_probe_case probe-busy $'✻ Working…\nAPI Error: token limit\n') \
@@ -112,5 +154,7 @@ test_probe_skips_busy_pane_with_error_banner() {
 test_capture_matches_documented_api_error_banners
 test_capture_rejects_ordinary_idle_pane_text
 test_recent_attempts_resets_after_rearmed
+test_error_class_splits_auth_quota_generic
+test_probe_parks_auth_and_quota_without_relaunch
 test_probe_marks_idle_alive_api_error_as_broken
 test_probe_skips_busy_pane_with_error_banner

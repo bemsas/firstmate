@@ -208,6 +208,10 @@
 #   check: task <id> auto-relaunch failed after broken model session: <detail>
 #   check: task <id> auto-relaunch paused after <n> attempts in <s>s; ...
 #                          the broken-session relaunch bound was exceeded
+#   check: task <id> needs a credential or login, not a relaunch (<detail>)
+#   check: task <id> is waiting out a rate or usage limit, not relaunched (<detail>)
+#                          the banner was a 401/403 or a 429; it is never
+#                          relaunched and is reported once per episode
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock. A live holder whose beacon is stale
@@ -1289,7 +1293,7 @@ broken_session_tick() {
     err=''
     case "$FM_BROKEN_STATUS" in
       clear)
-        rm -f "$since_file"
+        rm -f "$since_file" "$STATE/.broken-session-park-$id"
         if [ -e "$bound_marker" ] || [ -L "$bound_marker" ]; then
           if fm_broken_session_ledger_add "$STATE" "$id" rearmed \
             && rm -f "$bound_marker"; then
@@ -1322,6 +1326,23 @@ broken_session_tick() {
         else
           reason="check: task $id auto-relaunch failed after broken model session: $(fm_broken_session_first_line "$FM_BROKEN_REL_OUT")"
           notify_key="broken-session-failed-$id-$now"
+        fi
+        ;;
+      auth|quota)
+        # Never relaunched: the same credential or limit would fail again. One
+        # notification per episode; the park marker clears on the next clear probe.
+        rm -f "$since_file"
+        if [ "$(cat "$STATE/.broken-session-park-$id" 2>/dev/null)" != "$FM_BROKEN_STATUS" ]; then
+          if printf '%s\n' "$FM_BROKEN_STATUS" > "$STATE/.broken-session-park-$id"; then
+            if [ "$FM_BROKEN_STATUS" = auth ]; then
+              reason="check: task $id needs a credential or login, not a relaunch ($FM_BROKEN_DETAIL; backend=$FM_BROKEN_BACKEND)"
+            else
+              reason="check: task $id is waiting out a rate or usage limit, not relaunched ($FM_BROKEN_DETAIL; backend=$FM_BROKEN_BACKEND)"
+            fi
+            notify_key="broken-session-$FM_BROKEN_STATUS-$id-$now"
+          else
+            err='broken-session park marker could not be written'
+          fi
         fi
         ;;
       skip)

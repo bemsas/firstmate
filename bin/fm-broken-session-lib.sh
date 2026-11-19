@@ -20,6 +20,21 @@
 #   - Provider error (
 #   - Content generator not initialized
 #
+# Error class (fm_broken_session_error_class), read only from the matched banner
+# lines and the two lines after each, decides whether a relaunch can help:
+#   - auth: 401 or 403, Unauthorized, Forbidden, authentication_error,
+#     permission_error, an invalid API key, an expired OAuth token, or a login
+#     prompt. A relaunch reuses the same credential, so the probe reports
+#     FM_BROKEN_STATUS=auth and nothing is relaunched; the watcher raises one
+#     credential notification per episode.
+#   - quota: 429, rate limit, Too Many Requests, usage limit, quota exceeded,
+#     RESOURCE_EXHAUSTED. A relaunch would only hit the same limit, so the probe
+#     reports FM_BROKEN_STATUS=quota with any visible reset time in
+#     FM_BROKEN_DETAIL and nothing is relaunched; the watcher raises one
+#     notification per episode and the pane is left to resume after the reset.
+#   - generic: everything else keeps the bounded relaunch below.
+# Auth wins when a banner carries both, because a credential needs a human.
+#
 # Relaunch uses the same control-plane transaction as a manual relaunch: the
 # isolated copy, branch, and task records stay authoritative; only the worker
 # endpoint is replaced and a progress note is appended to the instructions.
@@ -58,6 +73,29 @@ fm_broken_session_capture_matches() {  # <visible-capture-text>
     'API Error|Named models unavailable|Provider error \(|Content generator not initialized'
 }
 
+# fm_broken_session_error_class <visible-capture-text>: auth | quota | generic,
+# judged only on banner lines (see the header), never on ordinary pane output.
+fm_broken_session_error_class() {
+  local banner
+  banner=$(printf '%s\n' "${1:-}" | grep -Ei -A2 \
+    'API Error|Named models unavailable|Provider error \(|Content generator not initialized')
+  if printf '%s' "$banner" | grep -Eqi \
+    '(^|[^0-9])(401|403)([^0-9]|$)|unauthori[sz]ed|forbidden|authentication_error|permission_error|invalid[ _-]?(x-)?api[ _-]?key|oauth token (has )?expired|please run /login|not logged in'; then
+    printf 'auth'
+  elif printf '%s' "$banner" | grep -Eqi \
+    '(^|[^0-9])429([^0-9]|$)|rate[ _-]?limit|too many requests|usage limit|quota exceeded|resource_exhausted'; then
+    printf 'quota'
+  else
+    printf 'generic'
+  fi
+}
+
+# fm_broken_session_reset_hint <visible-capture-text>: the first visible
+# "resets at ..." / "try again in ..." phrase, or nothing.
+fm_broken_session_reset_hint() {
+  printf '%s\n' "${1:-}" | grep -oEi '(resets?|try again)( at| in| after)? [^.;()]{1,60}' | head -1 | sed 's/[[:space:]]*$//'
+}
+
 fm_broken_session_ledger_add() {  # <state> <id> <attempt|relaunched|failed|rearmed>
   printf '%s\t%s\n' "$(date +%s)" "$3" >> "$1/.broken-session-relaunch-$2" 2>/dev/null
 }
@@ -89,13 +127,13 @@ fm_broken_session_unlock() {  # <state> <id>
 # fm_broken_session_probe <state> <meta> <id>
 #
 # Read-only classification for one ordinary worker. Populates:
-#   FM_BROKEN_STATUS   clear|broken|skip
+#   FM_BROKEN_STATUS   clear|broken|auth|quota|skip (auth and quota are never relaunched)
 #   FM_BROKEN_DETAIL   human-readable cause when broken
 #   FM_BROKEN_BACKEND  backend name when known
 #   FM_BROKEN_WINDOW   endpoint target when known
 fm_broken_session_probe() {
   local state=$1 meta=$2 id=$3
-  local kind backend target w label capture busy verdict agent_state since_file now age
+  local kind backend target w label capture busy verdict agent_state since_file now age hint
   FM_BROKEN_STATUS=skip
   FM_BROKEN_DETAIL=
   FM_BROKEN_BACKEND=
@@ -147,8 +185,21 @@ fm_broken_session_probe() {
     FM_BROKEN_DETAIL="agent $agent_state with error banner visible"
     return 0
   }
-  FM_BROKEN_STATUS=broken
-  FM_BROKEN_DETAIL='API error banner visible with idle semantic state and live agent'
+  case "$(fm_broken_session_error_class "$capture")" in
+    auth)
+      FM_BROKEN_STATUS=auth
+      FM_BROKEN_DETAIL='authentication error (401/403) banner with idle semantic state and live agent; a relaunch reuses the same credential'
+      ;;
+    quota)
+      FM_BROKEN_STATUS=quota
+      hint=$(fm_broken_session_reset_hint "$capture")
+      FM_BROKEN_DETAIL="rate or usage limit (429) banner with idle semantic state and live agent${hint:+; $hint}"
+      ;;
+    *)
+      FM_BROKEN_STATUS=broken
+      FM_BROKEN_DETAIL='API error banner visible with idle semantic state and live agent'
+      ;;
+  esac
   return 0
 }
 
