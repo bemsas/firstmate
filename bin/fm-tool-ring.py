@@ -11,7 +11,7 @@
 #   {"v":1,"ts":<epoch seconds, float>,"src":"claude-hook"|"agy-hook"|"codex-rollout",
 #    "kind":"tool"|"message"|"compact","tool":"<tool name or empty>",
 #    "sig":"<12 hex: hash of tool name + canonical input, or of message text>",
-#    "out":"<12 hex: hash of the tool output or error text, or empty>",
+#    "out":"<12 hex: hash of the tool output or error text; empty = unknown>",
 #    "error":true|false,"status":<401|403|429|null>,"context":true|false}
 # Only names and hashes are kept, never tool input, output, or message text, so
 # the ring can be read by any supervisor or judge without carrying secrets.
@@ -21,9 +21,9 @@
 # append reads one native hook payload. Claude: PostToolUse (a successful
 # call), PostToolUseFailure (error true, from .error), Stop (a message event
 # from .last_assistant_message), PreCompact (a compact event). agy: PostToolUse
-# with .toolCall {name, args} and .error (agy sends no tool output, so out
-# hashes the error text and is the same for every successful call). Anything
-# else is ignored. It always exits 0 and prints nothing, so it can never block or
+# with .toolCall {name, args} and .error (agy sends no tool output, so a
+# successful call's out is empty - unknown - and only a failed call's out
+# hashes its error text). Anything else is ignored. It always exits 0 and prints nothing, so it can never block or
 # alter the worker's turn.
 #
 # A Codex worker needs no hook: detect --codex-rollout derives the same events
@@ -39,9 +39,11 @@
 # Patterns, after OpenHands' StuckDetector, checked in this order over the
 # newest events:
 #   repeat_action_error        the last 3 tool events: same sig, all errors
-#   repeat_action_observation  the last 4 tool events: same sig and same out
+#   repeat_action_observation  the last 4 tool events: same sig and same known
+#                              (non-empty) out
 #   alternating                the last 6 tool events alternate two distinct
-#                              (sig, out) pairs A B A B A B
+#                              (sig, out) pairs A B A B A B, every out known
+# An unknown out is never treated as an identical observation.
 #   monologue                  the last 3 events are identical message events
 #   context_loop               the last 3 events are compact events, or failed
 #                              calls whose error text reports a full context
@@ -90,7 +92,7 @@ def from_agy(payload, now):
     call = payload.get('toolCall') if isinstance(payload.get('toolCall'), dict) else {}
     tool = str(call.get('name') or '')
     err = text_of(payload.get('error') or '')
-    return event('tool', 'agy-hook', now, tool, digest([tool, call.get('args')]), digest(err), bool(err),
+    return event('tool', 'agy-hook', now, tool, digest([tool, call.get('args')]), digest(err) if err else '', bool(err),
                  status_of(err) if err else None, bool(CONTEXT_RE.search(err)))
 
 
@@ -219,10 +221,10 @@ def find_loop(events):
     if len(last3) == 3 and len({e['sig'] for e in last3}) == 1 and all(e.get('error') for e in last3):
         return 'repeat_action_error', last3
     last4 = tools[-4:]
-    if len(last4) == 4 and len({(e['sig'], e['out']) for e in last4}) == 1:
+    if len(last4) == 4 and all(e.get('out') for e in last4) and len({(e['sig'], e['out']) for e in last4}) == 1:
         return 'repeat_action_observation', last4
     last6 = tools[-6:]
-    if len(last6) == 6:
+    if len(last6) == 6 and all(e.get('out') for e in last6):
         a, b = (last6[0]['sig'], last6[0]['out']), (last6[1]['sig'], last6[1]['out'])
         pairs = [(e['sig'], e['out']) for e in last6]
         if a != b and pairs == [a, b, a, b, a, b]:

@@ -51,7 +51,7 @@
 #   agy-hook         agy workspace hooks for a ship or scout (.agents/hooks.json
 #                    written by fm-spawn): PreInvocation opens, Stop with
 #                    fullyIdle true closes. An Escape interrupt fires no hook
-#                    (verified live on agy 1.5.12), so fm-control invalidates
+#                    (verified live on agy 1.5.12 and 1.5.13), so fm-control invalidates
 #                    to unknown after its own interrupt, and a busy record that
 #                    Herdr's native status AND the rendered status row both
 #                    contradict classifies unknown agy-hook-stale, never idle.
@@ -119,7 +119,7 @@
 # classification, because none of
 # their structured lifecycles was credited-live-verified
 # in the approved audit (Rovo's clean ACP stopReason lives outside the TUI
-# path firstmate drives, see references/harness/rovo.md; agy 1.5.12's
+# path firstmate drives, see references/harness/rovo.md; agy 1.5.12 and 1.5.13
 # workspace hooks fire no closing event on an Escape interrupt, see
 # references/harness/agy.md); each is scoped to
 # its own harness= and can never classify another adapter.
@@ -234,7 +234,7 @@ fm_busy_codex_semantic_source() {
 # agy hook writer gate: fm-spawn writes the worker's workspace hooks only for
 # these agy --version strings, live-verified as an open/close pair
 # (docs/verification/agy.md); any other version keeps the rendered fallback.
-FM_BUSY_AGY_HOOK_VERIFIED_VERSIONS="1.5.12"
+FM_BUSY_AGY_HOOK_VERIFIED_VERSIONS="1.5.12 1.5.13"
 
 fm_busy_agy_hooks_verified() {  # <agy --version output>
   [ -n "${1:-}" ] || return 1

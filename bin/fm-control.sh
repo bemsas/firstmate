@@ -650,7 +650,7 @@ deliver_interrupt() {
     return 0
   fi
   # Devin and agy do not emit a closing hook for cancellation (agy verified on
-  # 1.5.12). Capture this incarnation before keys, then invalidate its state
+  # 1.5.12 and 1.5.13). Capture this incarnation before keys, then invalidate its state
   # conservatively rather than claiming idle.
   if [ "$HARNESS" = devin ] || [ "$HARNESS" = agy ]; then
     devin_gen=$(fm_busy_current_gen "$STATE" "$ID" 2>/dev/null || true)

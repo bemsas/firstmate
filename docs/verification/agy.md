@@ -190,6 +190,15 @@ ok - agy 1.5.12: worker hooks open on PreInvocation, close on a fullyIdle Stop, 
 FM_TEST_COMPLETE
 ```
 
+The same day agy updated itself to 1.5.13; the guard first refused it as unverified, and after 1.5.13 was added to the verified list it passed:
+
+```text
+$ FM_AGY_WORKER_HOOKS_LIVE_E2E=1 bash tests/fm-agy-worker-hooks-live-e2e.test.sh
+1..1
+ok - agy 1.5.13: worker hooks open on PreInvocation, close on a fullyIdle Stop, stay open on Escape, and feed the ring
+FM_TEST_COMPLETE
+```
+
 ## What is still unproven
 
 The unauthenticated failure mode was never observed; this host's agy runs signed in, so any auth prompt is a fail-loud credential blocker, not a handled dialog.

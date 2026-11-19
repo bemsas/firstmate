@@ -112,6 +112,32 @@ test_detect_leaves_progress_alone() {
   pass "detect leaves changing outputs, distinct calls and broken alternations alone"
 }
 
+# agy reports no output for a successful call, so its observation is unknown;
+# unknown observations must never prove a repeat, while known outputs and
+# repeated errors still do.
+test_unknown_agy_outputs_never_prove_a_repeat() {
+  local state="$TMP_ROOT/agy-unknown" i out ok='{"hookEventName":"PostToolUse","toolCall":{"name":"run_command","args":{"CommandLine":"gh pr checks 12"}},"error":""}'
+  mkdir -p "$state"
+  for i in 1 2 3 4; do hook "$state" a1 "$ok"; done
+  assert_contains "$(head -1 "$state/a1.tool-ring.jsonl")" '"out":""' "a successful agy call records an unknown observation"
+  out=$("$RING" detect "$state" a1)
+  assert_contains "$out" "verdict=none" "four identical agy calls with unknown outputs are not a proven repeat"
+  for i in 1 2 3; do
+    hook "$state" a2 '{"hookEventName":"PostToolUse","toolCall":{"name":"run_command","args":{"CommandLine":"a"}},"error":""}'
+    hook "$state" a2 '{"hookEventName":"PostToolUse","toolCall":{"name":"run_command","args":{"CommandLine":"b"}},"error":""}'
+  done
+  assert_contains "$("$RING" detect "$state" a2)" "verdict=none" "an ABAB of unknown agy outputs is not a proven alternation"
+  for i in 1 2 3; do
+    hook "$state" a3 '{"hookEventName":"PostToolUse","toolCall":{"name":"run_command","args":{"CommandLine":"pnpm build"}},"error":"exit status 1"}'
+  done
+  assert_contains "$("$RING" detect "$state" a3)" "pattern=repeat_action_error" "repeated agy errors are still a loop"
+  for i in 1 2 3 4; do
+    hook "$state" c1 '{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"gh pr checks 12"},"tool_response":{"stdout":"pending"}}'
+  done
+  assert_contains "$("$RING" detect "$state" c1)" "pattern=repeat_action_observation" "a known Claude output repeated four times is still a loop"
+  pass "unknown agy outputs never prove a repeat; known outputs and repeated errors still do"
+}
+
 test_detect_from_codex_rollout() {
   local state="$TMP_ROOT/codex" f out i
   mkdir -p "$state"
@@ -135,4 +161,4 @@ test_detect_from_codex_rollout() {
 }
 
 fm_test_run test_append_keeps_hashes_only_and_caps test_detect_five_patterns_within_180s \
-  test_detect_leaves_progress_alone test_detect_from_codex_rollout
+  test_detect_leaves_progress_alone test_unknown_agy_outputs_never_prove_a_repeat test_detect_from_codex_rollout
