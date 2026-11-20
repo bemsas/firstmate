@@ -307,6 +307,9 @@ case "${args[0]:-}" in
     [ -f "$remote_home/state/home-summary.json" ] || exit 1
     if [ -f "$remote_home/state/unbounded-ledger-read" ]; then
       yes x
+    elif [ -f "$remote_home/state/print-then-fail-ledger-read" ]; then
+      cat "$remote_home/state/home-summary.json"
+      exit 1
     else
       cat "$remote_home/state/home-summary.json"
     fi
@@ -3292,6 +3295,22 @@ EOF
   [ "$(wc -l < "$parent/ledger-calls.log" | tr -d ' ')" -eq 5 ] \
     || fail "bounding one faulty primary ledger added remote reads"
   rm -f "$TMP_ROOT/remote-ledger-home-1/state/unbounded-ledger-read"
+
+  # A transport that prints a parseable summary and then fails is not a
+  # successful read: the valid cache serves it, and without a cache it is unknown.
+  : > "$TMP_ROOT/remote-ledger-home-1/state/print-then-fail-ledger-read"
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$json" | jq -e '
+    ([.secondmates[] | select(.id == "ledger-1" and .freshness == "cached"
+      and .provenance == "structured-home-cache")] | length) == 1
+  ' >/dev/null || fail "a failed fetch that printed a valid summary was published as fresh: $json"
+  mv "$cache_file" "$cache_file.aside"
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.id == "ledger-1" and .state == "unknown" and (.reason | contains("no valid cached copy"))))
+  ' >/dev/null || fail "a failed fetch without a cache was not reported unknown: $json"
+  rm -f "$TMP_ROOT/remote-ledger-home-1/state/print-then-fail-ledger-read"
+  mv "$cache_file.aside" "$cache_file"
 
   i=1
   while [ "$i" -le 5 ]; do

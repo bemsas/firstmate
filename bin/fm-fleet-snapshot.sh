@@ -88,7 +88,10 @@
 #     queued, landed, endpoints, counts, and omitted. provenance.summary_source
 #     distinguishes "local-ledger", "remote-ledger", and "remote-ledger-cache";
 #     freshness is "cached" only for the cache source, and observed_at/age_seconds
-#     come from the selected summary's generation. Every successfully sampled home also carries
+#     come from the selected summary's generation. A remote fetch counts as
+#     "remote-ledger" only when its transport exited successfully and its bytes
+#     validated; otherwise the validated cache, else unknown, is selected.
+#     Every successfully sampled home also carries
 #     reconcile_inventory independently of projection trust.
 #     Actionable captain holds appear in decisions_open; every captain hold remains
 #     in the bounded queued inventory with its structured classification metadata.
@@ -1851,7 +1854,11 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
         cache_path=$(snapshot_route_cache_path "$id" "$host" "$home" 2>/dev/null || true)
         collection_slot=$(jq -r --arg id "$id" 'select(.id == $id) | .slot' "$SNAPSHOT_COLLECT_DIR/manifest.jsonl" 2>/dev/null | head -1)
         collection_status=$(cat "$SNAPSHOT_COLLECT_DIR/$collection_slot.status" 2>/dev/null || true)
-        if summary_file_read "$SNAPSHOT_COLLECT_DIR/$collection_slot.fetch" "$home" "$summary_file"; then
+        # Fetched bytes count only when the collector marked them fresh: a
+        # transport that printed a parseable summary and then failed is not a
+        # successful observation, so it falls through to the validated cache.
+        if [ "$collection_status" = fresh ] \
+            && summary_file_read "$SNAPSHOT_COLLECT_DIR/$collection_slot.fetch" "$home" "$summary_file"; then
           summary_source='remote-ledger'
           [ -z "$cache_path" ] || snapshot_cache_store "$summary_file" "$cache_path" || true
         elif [ -n "$cache_path" ] && summary_file_read "$cache_path" "$home" "$summary_file"; then
