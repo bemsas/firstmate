@@ -549,7 +549,9 @@ def grant_problem(g, home, now):
     if problem:
         return problem
     ops = g.get('ops')
-    if not isinstance(ops, list) or not ops or len(set(ops)) != len(ops) or any(o not in OPS for o in ops):
+    if (not isinstance(ops, list) or not ops
+            or any(not isinstance(op, str) or op not in OPS for op in ops)
+            or len(set(ops)) != len(ops)):
         return 'grant ops must be a list from %s' % ','.join(OPS)
     if not isinstance(g.get('reason'), str) or not g['reason'].strip() or len(g['reason']) > 400:
         return 'grant needs the captain words as its reason'

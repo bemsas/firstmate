@@ -153,6 +153,28 @@ test_grants() {
   pass "grants: bounded, op- and path-scoped, expiring, revocable; no env bypass"
 }
 
+test_malformed_grant_ops() {
+  local out
+  python3 - "$H" <<'PY' || fail "could not write malformed grant fixture"
+import json
+from pathlib import Path
+import sys
+import time
+
+home = Path(sys.argv[1])
+now = int(time.time())
+grant = dict(id='g1-aaaaaa', path=str(home / 'projects' / 'app'), ops=['edit', {}],
+             reason='synthetic fixture', granted_epoch=now, expires_epoch=now + 600)
+with (home / 'state' / 'delegation-grants.json').open('w') as handle:
+    json.dump({'schema': 'fm-delegation-grants.v1', 'grants': [grant]}, handle)
+PY
+  out=$(hook "$H" "$(payload Edit file_path "$H/projects/app/README.md")") \
+    || fail "hook failed with a malformed grant operations item"
+  assert_equals "$(decision "$out")" "deny" "a grant with a malformed operations item is ignored"
+  rm -f "$H/state/delegation-grants.json"
+  pass "malformed persisted grant operations preserve the wrapper deny decision"
+}
+
 test_standing_allow() {
   fm_git_init_commit "$H/projects/asks-log"
   expect deny "asks-log clone before listing" Write file_path "$H/projects/asks-log/INDEX.md"
@@ -236,5 +258,5 @@ PY
 }
 
 setup_world
-fm_test_run test_file_tools test_shell test_grants test_standing_allow test_scope_and_transport \
-  test_review_counterexamples
+fm_test_run test_file_tools test_shell test_grants test_malformed_grant_ops test_standing_allow \
+  test_scope_and_transport test_review_counterexamples
