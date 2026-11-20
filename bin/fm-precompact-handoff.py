@@ -23,9 +23,15 @@
 # dispatch and steering commands (bin/fm-send.sh, fm-spawn.sh, fm-control.sh,
 # fm-captain-hold.sh, fm-pr-merge.sh, fm-merge-local.sh, fm-teardown.sh),
 # pull request links, and the last assistant note. Everything outside the
-# block is preserved byte for byte; the file is replaced atomically. Obvious
-# credential shapes are redacted before anything is written. stdout carries a
-# one-line instruction for the compaction summarizer.
+# block is preserved byte for byte; the file is replaced atomically under an
+# exclusive flock on a sibling .<name>.lock file, so concurrent or repeated
+# runs converge on one block. Obvious credential shapes are redacted and the
+# block's own delimiter comments are neutralized in transcript text before
+# anything is written. Transcript text is untrusted evidence only: it never
+# changes the obligations ledger. A transcript_path that is not a regular file
+# (a FIFO, device, or directory) is not opened. When the home keeps an
+# obligations ledger (bin/fm-obligations.py), the block also lists its current
+# findings. stdout carries a one-line instruction for the compaction summarizer.
 #
 # inject (UserPromptSubmit, SessionStart): prints a
 # hookSpecificOutput.additionalContext object built only from local records
@@ -36,7 +42,10 @@
 #   - <home>/state/turn-context.alerts, one alert per line (blank lines and
 #     lines starting with # skipped), written by any home check that already
 #     ran its own probes; a cache older than FM_TURN_CONTEXT_STALE_SECS
-#     (default 7200) adds one fixed stale-cache line instead of trusting it.
+#     (default 7200) adds one fixed stale-cache line instead of trusting it;
+#   - bin/fm-obligations.py digest_lines(), prefixed "obligation ", when the
+#     home keeps data/obligations.json; it reads only the ledger and the
+#     evidence its watcher check last saved.
 # The digest carries no clock time, so an unchanged record set yields a
 # byte-identical context and keeps the prompt cache warm. Nothing to report
 # prints nothing. Output is capped at FM_TURN_CONTEXT_MAX_LINES lines
@@ -56,6 +65,7 @@ SECRET = re.compile(
     r'(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}'
     r'|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})')
 SECRET_ASSIGN = re.compile(r'(?i)\b((?:api[_-]?key|token|secret|password|passwd)\s*[=:]\s*)\S+')
+MARKER = re.compile(r'<!--\s*fm-precompact-handoff', re.IGNORECASE)
 HOLD = re.compile(r'^- \[ \] (\S+) - .*\(hold-kind: captain\).*\(hold-until: (\d{4}-\d{2}-\d{2})\)')
 
 
@@ -93,6 +103,7 @@ def read_payload():
 
 
 def clean(text, limit):
+    text = MARKER.sub('<!- fm-precompact-handoff', text)
     text = SECRET.sub('[redacted]', text)
     text = SECRET_ASSIGN.sub(r'\1[redacted]', text)
     text = ' '.join(text.split())
@@ -109,7 +120,12 @@ def entry_text(content):
 
 
 def tail_entries(path, max_bytes):
-    with open(path, 'rb') as handle:
+    import stat  # deferred: only the precompact path reads a transcript
+    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0))
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise IsADirectoryError('transcript_path is not a regular file')
+    with os.fdopen(fd, 'rb') as handle:
         handle.seek(0, os.SEEK_END)
         size = handle.tell()
         start = max(0, size - max_bytes)
@@ -175,7 +191,22 @@ def newest_unique(items, limit):
     return out
 
 
-def render_block(payload, prompts, commands, prs, note):
+def obligation_lines(home):
+    if not (home / 'data' / 'obligations.json').exists():
+        return []
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            'fm_obligations', str(Path(__file__).resolve().parent / 'fm-obligations.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return [clean(line, 240) for line in module.digest_lines(home)]
+    except Exception as exc:  # never let the ledger break a hook
+        warn('obligations digest unavailable (%s)' % type(exc).__name__)
+        return ['obligations digest unavailable; run bin/fm-obligations.py validate']
+
+
+def render_block(payload, prompts, commands, prs, note, obligations=()):
     stamp = time.strftime('%Y-%m-%dT%H:%MZ', time.gmtime())
     session = str(payload.get('session_id') or '-')[:8]
     trigger = str(payload.get('trigger') or '-')
@@ -185,10 +216,13 @@ def render_block(payload, prompts, commands, prs, note):
         ("Captain's latest prompts (newest first)", ['"%s"' % p for p in newest_unique(prompts, 6)]),
         ('Recent dispatch and steering commands (newest first)', ['`%s`' % c.replace('`', "'") for c in newest_unique(commands, 10)]),
         ('Pull request links seen (newest first)', newest_unique(prs, 8)),
+        ('Obligation ledger findings (derived; the ledger, not this list, is authoritative)',
+         list(obligations)),
     ]
     for title, rows in sections:
         out.append('### ' + title)
-        out.extend('- ' + row for row in rows) if rows else out.append('- none in the read transcript tail')
+        empty = '- none' if title.startswith('Obligation') else '- none in the read transcript tail'
+        out.extend('- ' + row for row in rows) if rows else out.append(empty)
     out.append('### Last assistant note')
     out.append('> ' + (clean(note, 500) if note else 'none in the read transcript tail'))
     out.append(END)
@@ -236,14 +270,24 @@ def cmd_precompact(args):
             warn('transcript unreadable (%s)' % type(exc).__name__)
     else:
         warn('payload has no transcript_path')
+    home = resolve_home(args.home)
+    obligations = obligation_lines(home)
     try:
-        existing = out.read_text(encoding='utf-8') if out.exists() else ''
-        atomic_write(out, splice(existing, render_block(payload, prompts, commands, prs, note)))
+        import fcntl
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out.parent / ('.' + out.name + '.lock'), 'a') as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            existing = out.read_text(encoding='utf-8') if out.exists() else ''
+            atomic_write(out, splice(existing, render_block(payload, prompts, commands, prs, note, obligations)))
     except OSError as exc:
         warn('could not write %s (%s)' % (out, type(exc).__name__))
         return 0
     print('Compaction note: the pre-compaction handoff in %s lists the captain\'s latest prompts, '
           'dispatch commands and PR links; keep open asks, promises and task assignments verbatim.' % out)
+    if obligations:
+        print('Keep every obligation id below and its finding verbatim in the summary:')
+        for line in obligations:
+            print('- ' + line)
     return 0
 
 
@@ -278,6 +322,7 @@ def cmd_inject(args):
     today = time.strftime('%Y-%m-%d', time.gmtime())
     rows = expired_holds(home / 'data' / 'backlog.md', today)
     rows += cached_alerts(home / 'state' / 'turn-context.alerts', env_int('FM_TURN_CONTEXT_STALE_SECS', 7200))
+    rows += ['obligation ' + line for line in obligation_lines(home)]
     rows = sorted(set(rows))
     if not rows:
         return 0
