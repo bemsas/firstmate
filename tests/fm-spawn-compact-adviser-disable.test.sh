@@ -60,11 +60,12 @@ run_case_spawn() {
 # fact under test, so executing the emitted launch answers "what would the agent
 # have seen" rather than "what does the command text look like".
 install_env_probe() {  # <fakebin> <harness> [variable]
-  cat > "$1/$2" <<SH
+  cp "$ROOT/tests/fixtures/codex-worker-fake.py" "$1/$2"
+  cat > "$1/$2.pane" <<SH
 #!/bin/sh
 printf '%s\n' "\${${3:-COMPACT_ADVISER_DISABLE}-unset}"
 SH
-  chmod +x "$1/$2"
+  chmod +x "$1/$2" "$1/$2.pane"
 }
 
 # Run the emitted launch command in a synthetic pane shell. The pane carries the
@@ -437,13 +438,14 @@ test_launch_preserves_literal_home_and_brief_paths() {
     status=$?
     expect_code 0 "$status" "$name path spawn should succeed: $out"
     # Capture the environment and final prompt received by the fake agent.
-    cat > "$FAKEBIN_DIR/codex" <<'SH'
+    cp "$ROOT/tests/fixtures/codex-worker-fake.py" "$FAKEBIN_DIR/codex"
+    cat > "$FAKEBIN_DIR/codex.pane" <<'SH'
 #!/bin/sh
 printf '%s\n' "$FM_TASK_INBOX"
 for arg do :; done
 printf '%s\n' "$arg"
 SH
-    chmod +x "$FAKEBIN_DIR/codex"
+    chmod +x "$FAKEBIN_DIR/codex" "$FAKEBIN_DIR/codex.pane"
     seen=$(emitted_launch_env "$FAKEBIN_DIR" "$LAUNCH_LOG" "$PANE_LOG") \
       || fail "$name path: the emitted launch failed to run"
     brief=$("$ROOT/bin/fm-operational-input.sh" encode launch-brief < "$HOME_DIR/data/$id/launch-brief.md")

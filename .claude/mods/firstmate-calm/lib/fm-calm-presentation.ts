@@ -13,13 +13,13 @@ import {
   classifyFirstmateOperationalText,
   firstmateOperationalDoorbellPath,
   firstmateOperationalRecordKind,
-} from "./fm-operational-input.ts";
+} from "./fm-operational-input";
 import {
   CALM_PRESERVE_MIN_CHARS,
   calmTextIsSubstantive,
-} from "./fm-calm-preservation.ts";
+} from "./fm-calm-preservation";
 
-export { CALM_PRESERVE_MIN_CHARS } from "./fm-calm-preservation.ts";
+export { CALM_PRESERVE_MIN_CHARS } from "./fm-calm-preservation";
 
 /** The environment variables that select the effective Firstmate home, as the mod reads them. */
 export type CalmHomeEnvironment = {

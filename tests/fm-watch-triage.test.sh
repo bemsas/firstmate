@@ -917,7 +917,8 @@ test_turn_ended_churn_resets_wedge_state_before_stale_poll() {
   printf '2\n' > "$state/.wedge-escalations-$key"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$capture_count" FM_FAKE_TMUX_CAPTURE_FAIL_AFTER=1 \
+    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$capture_count" FM_FAKE_TMUX_CAPTURE_COUNT_RANGE=-40 \
+    FM_FAKE_TMUX_CAPTURE_FAIL_AFTER=1 \
     FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
@@ -926,6 +927,15 @@ test_turn_ended_churn_resets_wedge_state_before_stale_poll() {
     || { reap "$pid"; fail "a churning turn-end was not absorbed before the stale-path capture failed: $(cat "$out")"; }
   [ ! -e "$state/.wedge-escalations-$key" ] \
     || { reap "$pid"; fail "churn retained the prior quiet interval's wedge-escalation count"; }
+  # Watcher startup also reads the visible viewport for trust dialogs. Only
+  # the -40 scrollback reads above exercise churn and subsequent staleness.
+  for _ in $(seq 1 100); do
+    [ "$(cat "$capture_count" 2>/dev/null || echo 0)" -ge 2 ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  [ "$(cat "$capture_count" 2>/dev/null || echo 0)" -ge 2 ] \
+    || { reap "$pid"; fail "the fixture never refused the stale-path capture"; }
   [ ! -s "$state/.wake-queue" ] \
     || { reap "$pid"; fail "the absorbed churn fixture queued an unexpected wake"; }
   reap "$pid"

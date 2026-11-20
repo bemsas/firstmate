@@ -2440,13 +2440,23 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  make_hanging_tool "$fakebin" git
+  # Inject the hung grandchild only inside the stage being tested. Git is
+  # also used before bootstrap and must remain available to the earlier stages.
+  make_hanging_tool "$fakebin" bootstrap-grandchild
+  cp -R "$ROOT/bin" "$root/bin"
+  local SESSION_START="$root/bin/fm-session-start.sh"
+  cat > "$root/bin/fm-bootstrap.sh" <<'SH'
+#!/usr/bin/env bash
+output=$(bootstrap-grandchild)
+printf '%s\n' "$output"
+SH
+  chmod +x "$root/bin/fm-bootstrap.sh"
 
   mechanism=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash bash -c '. "$1"; fm_timeout_mechanism' \
     _ "$ROOT/bin/fm-timeout-lib.sh")
   [ "$mechanism" = bash ] || fail "the forced pure-Bash timeout fixture selected '$mechanism'"
 
-  out=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash FM_SESSION_START_TIMEOUT=3 FM_STARTUP_NETWORK_TIMEOUT=2 \
+  out=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash FM_SESSION_START_TIMEOUT=8 FM_STARTUP_NETWORK_TIMEOUT=2 \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
 
   expect_code 0 "$status" "a truncated session start must still exit 0 so the session can open"
@@ -2471,7 +2481,7 @@ EOF
   FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_STARTUP_NETWORK_TIMEOUT=2 \
     "$ROOT/bin/fm-startup-network.sh" wait 30 >/dev/null || true
   sleep 1
-  stray=$(pgrep -f "$fakebin/git" 2>/dev/null | wc -l | tr -d ' ')
+  stray=$(pgrep -f "$fakebin/bootstrap-grandchild" 2>/dev/null | wc -l | tr -d ' ')
   [ "$stray" -eq 0 ] || fail "the runtime bound left $stray hung subprocess(es) behind"
 
   status=0

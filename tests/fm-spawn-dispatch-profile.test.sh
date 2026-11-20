@@ -2653,41 +2653,12 @@ test_worker_launch_delivers_role_scope() {
       printf '%s\n' "$content" > "$brief"
     fi
     cp "$HOME_DIR/data/$id/brief.md" "$CASE_DIR/brief-before"
-    cat > "$FAKEBIN_DIR/codex" <<'PYCODEX'
-#!/usr/bin/env python3
-# Exercise the launch wrapper's protocol as well as the delivered prompt.
-# Vendor enforcement is covered by fm-codex-hook-layer-live-e2e.test.sh.
-import hashlib
-import json
-import os
-from pathlib import Path
-import sys
-import tomllib
-
-if "app-server" in sys.argv:
-    home = Path(os.environ["CODEX_HOME"])
-    path = home / "hooks.json"
-    group = json.loads(path.read_text())["hooks"]["PreToolUse"][0]
-    handler = group["hooks"][0]
-    digest = "sha256:" + hashlib.sha256(handler["command"].encode()).hexdigest()
-    key = str(path) + ":pre_tool_use:0:0"
-    config = tomllib.loads((home / "config.toml").read_text())
-    trusted = config.get("hooks", {}).get("state", {}).get(key, {}).get("trusted_hash") == digest
-    for line in sys.stdin:
-        message = json.loads(line)
-        if message.get("method") == "initialize":
-            print(json.dumps({"id": message["id"], "result": {}}), flush=True)
-        elif message.get("method") == "hooks/list":
-            hook = {"key": key, "eventName": "preToolUse", "handlerType": "command",
-                    "command": handler["command"], "matcher": group["matcher"], "async": False,
-                    "timeoutSec": handler["timeout"], "enabled": True, "isManaged": False,
-                    "source": "user", "sourcePath": str(path), "pluginId": None,
-                    "currentHash": digest, "trustStatus": "trusted" if trusted else "untrusted"}
-            print(json.dumps({"id": message["id"], "result": {"data": [
-                {"cwd": message["params"]["cwds"][0], "errors": [], "hooks": [hook]}]}}), flush=True)
-else:
-    Path(os.environ["FM_ROLE_PROMPT"]).write_text("\n".join(sys.argv[1:]) + "\n")
-PYCODEX
+    cp "$ROOT/tests/fixtures/codex-worker-fake.py" "$FAKEBIN_DIR/codex"
+    cat > "$FAKEBIN_DIR/codex.pane" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$FM_ROLE_PROMPT"
+SH
+    chmod +x "$FAKEBIN_DIR/codex.pane"
     chmod +x "$FAKEBIN_DIR/codex"
     if [ "$kind" = scout ]; then
       out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)

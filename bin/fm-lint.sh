@@ -406,7 +406,7 @@ fi
 
 # Private per-root payload mode used only by the bounded runner above: apply
 # the per-process address-space limit (a positive KiB count), then exec
-# /usr/bin/time for the per-root peak-RSS record when it is available, else the
+# an external time for the per-root peak-RSS record when it is available, else the
 # tool itself. A limit the host cannot apply exits 97 so the parent reports
 # limit-unavailable instead of running uncapped.
 if [ "${1:-}" = "--internal-root" ]; then
@@ -430,11 +430,11 @@ if [ "${1:-}" = "--internal-root" ]; then
       "$internal_memory_kib" >&2
     exit 97
   }
-  if [ -x /usr/bin/time ]; then
+  if internal_time=$(type -P time); then
     if [ "$(uname)" = Darwin ]; then
-      exec /usr/bin/time -l -o "$internal_rss_file" "$@"
+      exec "$internal_time" -l -o "$internal_rss_file" "$@"
     fi
-    exec /usr/bin/time -f 'max_rss_kib=%M' -o "$internal_rss_file" "$@"
+    exec "$internal_time" -f 'max_rss_kib=%M' -o "$internal_rss_file" "$@"
   fi
   exec "$@"
 fi

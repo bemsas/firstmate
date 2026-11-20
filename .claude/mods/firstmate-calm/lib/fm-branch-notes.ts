@@ -7,7 +7,7 @@
 // (bin/fm-branch-outcome.sh owns every file format read here) and from the supervision
 // host's latch (bin/fm-supervision-host.sh). It only renders: nothing here marks an
 // outcome read or processed. Everything is pure so tests run it under Node.
-import { calmCodeRootFromPluginRoot } from "./fm-calm-presentation.ts";
+import { calmCodeRootFromPluginRoot } from "./fm-calm-presentation";
 
 export const BRANCH_NOTE_BOAT = "⛵";
 export const BRANCH_NOTE_ANCHOR = "⚓";

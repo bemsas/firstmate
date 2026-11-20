@@ -7,7 +7,13 @@ set -eu
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_live_gate default-on FM_CODEX_HOOK_LAYER_LIVE codex python3
-CODEX_VERSION=$(codex --version 2>&1)
+CODEX_BIN=$(command -v codex)
+# mise's command wrapper resolves tools using the operator's environment.
+# Resolve it here so the isolated Stop fixture can discard that environment.
+if [ "$CODEX_BIN" -ef "$(command -v mise 2>/dev/null)" ]; then
+  CODEX_BIN=$(mise which codex) || fail "mise could not resolve the installed Codex"
+fi
+CODEX_VERSION=$("$CODEX_BIN" --version 2>&1)
 TMP_ROOT=$(fm_test_tmproot fm-codex-hook-layer-live)
 trap fm_test_cleanup EXIT
 python3 - "$ROOT" "$TMP_ROOT" "$CODEX_VERSION" <<'PY'
@@ -145,7 +151,7 @@ print(f"ok - {version}: private home removed without touching auth or rule targe
 PY
 
 test_installed_codex_accepts_the_stop_wrapper_and_rejects_invalid_output() {
-  python3 - "$ROOT" "$TMP_ROOT/stop-parser" "$CODEX_VERSION" <<'PY'
+  python3 - "$ROOT" "$TMP_ROOT/stop-parser" "$CODEX_VERSION" "$CODEX_BIN" <<'PY'
 import http.server
 import json
 import os
@@ -160,6 +166,7 @@ import time
 
 root, lab, version = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
 lab.mkdir()
+codex = sys.argv[4]
 wrapper = json.loads((root / '.codex/hooks.json').read_text())['hooks']['Stop'][0]['hooks'][0]['command']
 emitter = lab / 'emit.py'
 emitter.write_text('''import json,sys
@@ -261,7 +268,7 @@ enabled=false
     deadline = time.monotonic() + 40
     before = Responses.requests
     with (case / 'stderr').open('w') as stderr:
-        process = subprocess.Popen(['codex', 'app-server', '--stdio'], cwd=case, env=env,
+        process = subprocess.Popen([codex, 'app-server', '--stdio'], cwd=case, env=env,
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr, text=True)
         def read_lines():
             for line in process.stdout:
@@ -274,7 +281,10 @@ enabled=false
             process.stdin.flush()
         def receive():
             message = messages.get(timeout=max(0.1, deadline - time.monotonic()))
-            assert message is not None, 'app-server exited before its hook verdict'
+            assert message is not None, (
+                f'{mode}: app-server exited before its hook verdict: '
+                + (case / 'stderr').read_text(errors='replace')[-4000:]
+            )
             notifications.append(message)
             return message
         def rpc(number, method, params):

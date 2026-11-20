@@ -1569,6 +1569,30 @@ exit 0
 SH
   chmod +x "$fakebin/shellcheck"
 
+  # Supply a time-compatible executable independent of the host's optional
+  # utility. Distinct peaks prove the retry retains the higher measurement.
+  cat > "$fakebin/time" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  -l) shift; format=bsd ;;
+  -f) shift 2; format=gnu ;;
+  *) exit 2 ;;
+esac
+[ "$1" = -o ] || exit 2
+file=$2
+shift 2
+rc=0
+"$@" || rc=$?
+peak=1024
+[ "$rc" -eq 0 ] || peak=4096
+case "$format" in
+  bsd) printf '%s maximum resident set size\n' "$((peak * 1024))" > "$file" ;;
+  gnu) printf 'max_rss_kib=%s\n' "$peak" > "$file" ;;
+esac
+exit "$rc"
+SH
+  chmod +x "$fakebin/time"
+
   for mode in "${modes[@]}"; do
     : > "$log"
     rc=0
@@ -1590,7 +1614,7 @@ SH
     if [ "$mode" -eq 1 ]; then
       assert_grep $'meta\tbounds_enforced\t1' "$tmp/pass.$mode.roots.tsv" \
         "the bounded fallback did not enforce bounds"
-      case "$rss_kib" in ''|*[!0-9]*) fail "the fallback attempts lost per-root RSS reporting: $rss_kib" ;; esac
+      assert_equals 4096 "$rss_kib" "the fallback attempts lost the larger per-root RSS sample"
     else
       assert_grep $'meta\tbounds_enforced\t0' "$tmp/pass.$mode.roots.tsv" \
         "the unbounded fallback unexpectedly enforced bounds"

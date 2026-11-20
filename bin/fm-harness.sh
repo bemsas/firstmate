@@ -190,7 +190,7 @@ ancestry_names_omp() {
 #          (any node process holding a harness-shaped path matches it), so it is
 #          used only when no marker is present.
 harness_process_verdict() {  # <pid>
-  local pid=$1 comm args argv0
+  local pid=$1 comm args argv0 executable
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 0
   argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
   if fm_cursor_process_matches "$comm" '' "$argv0"; then
@@ -233,7 +233,15 @@ harness_process_verdict() {  # <pid>
     *codex*) echo "comm codex"; return ;;
     *opencode*) echo "comm opencode"; return ;;
     *grok*) echo "comm grok"; return ;;
-    kimi) echo "comm kimi"; return ;;
+    kimi|kimi-code) echo "comm kimi"; return ;;
+    MainThread)
+      # Kimi's bundled Linux runtime sets this generic thread name during
+      # startup. Prove the executable through the kernel, never through args.
+      executable=$(readlink "/proc/$pid/exe" 2>/dev/null) || executable=
+      case "${executable##*/}" in
+        kimi|kimi-code) echo "comm kimi"; return ;;
+      esac
+      ;;
     rovo) echo "comm rovo"; return ;;
       # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
       # (verified in the published launcher, muse 0.1.0-R708.1), so the live process

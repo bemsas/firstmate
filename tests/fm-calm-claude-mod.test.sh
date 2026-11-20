@@ -29,8 +29,25 @@ TMP_ROOT=$(fm_test_tmproot fm-calm-claude-mod)
 
 command -v node >/dev/null 2>&1 || { echo "skip: node not found for the Claude Code Calm mod checks"; exit 0; }
 
+# Claude's validator and loader use extensionless TypeScript imports. Keep
+# Node's resolution shim local to those imports inside the mod under test.
+cat > "$TMP_ROOT/claude-module-resolution.mjs" <<'JS'
+import { registerHooks } from "node:module";
+import { pathToFileURL } from "node:url";
+
+const mod = pathToFileURL(process.env.FM_TEST_CLAUDE_MOD + "/").href;
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (context.parentURL?.startsWith(mod) && /^\.\.?\/(?:[^/]+\/)*fm-[\w-]+$/.test(specifier)) {
+      return nextResolve(specifier + ".ts", context);
+    }
+    return nextResolve(specifier, context);
+  },
+});
+JS
+
 run_node() {  # <script-file>
-  node --input-type=module <"$1"
+  FM_TEST_CLAUDE_MOD="$MOD" node --import "$TMP_ROOT/claude-module-resolution.mjs" --input-type=module <"$1"
 }
 
 # js_string <value>: a JavaScript string literal for a shell value, for the

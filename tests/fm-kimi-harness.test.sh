@@ -1132,6 +1132,46 @@ SH
   pass "fm-harness: markerless kimi keeps its ancestry identity under an inherited marker"
 }
 
+test_kimi_kernel_executable_outlasts_generic_thread_name() {
+  [ "$(uname -s)" = Linux ] || return 0
+  "$PYTHON_BIN" - "$ROOT/bin/fm-harness.sh" "$TMP_ROOT" <<'PYFIX' || fail "Kimi kernel executable identity disagreed with ancestry"
+import os
+import ctypes
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+harness, temporary = sys.argv[1:]
+# Give the test parent a known independent identity so the negative verdict
+# stays meaningful even when the suite was started from inside Kimi.
+libc = ctypes.CDLL(None)
+assert libc.prctl(15, b"opencode", 0, 0, 0) == 0
+code = """
+import ctypes
+libc = ctypes.CDLL(None)
+assert libc.prctl(15, b"MainThread", 0, 0, 0) == 0
+print("ready", flush=True)
+input()
+"""
+for name, expected in (("kimi", "comm kimi"), ("generic-worker", "comm opencode")):
+    executable = Path(temporary) / name
+    shutil.copyfile(sys.executable, executable)
+    executable.chmod(0o700)
+    with subprocess.Popen([str(executable), "-c", code, "/unrelated/path/kimi"],
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) as fixture:
+        try:
+            assert fixture.stdout.readline().strip() == "ready"
+            assert Path(f"/proc/{fixture.pid}/comm").read_text().strip() == "MainThread"
+            assert Path(os.readlink(f"/proc/{fixture.pid}/exe")).name == name
+            answer = subprocess.check_output([harness, "ancestry", str(fixture.pid)], text=True)
+            assert answer.strip() == expected, (name, answer)
+        finally:
+            fixture.terminate()
+PYFIX
+  pass "fm-harness: kernel executable identifies Kimi despite a generic comm; an argument naming Kimi proves nothing"
+}
+
 test_kimi_session_lock_identity() {
   local home fakebin out
   home="$TMP_ROOT/session-lock-home"
@@ -1371,6 +1411,7 @@ test_kimi_stuck_trust_dialog_fails_before_delivery
 test_kimi_spawn_refuses_when_trust_cannot_be_registered
 test_kimi_trust_detection_requires_the_complete_dialog
 test_kimi_detection_uses_ancestry_after_markers
+test_kimi_kernel_executable_outlasts_generic_thread_name
 test_kimi_session_lock_identity
 test_kimi_busy_signature_is_scoped_to_spinner_lines
 test_watcher_never_classifies_kimi_from_its_spinner

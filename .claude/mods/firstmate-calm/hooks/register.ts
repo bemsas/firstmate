@@ -44,7 +44,7 @@ import type { EngineInterface, Register, RenderElement, RenderInput } from "clau
 import {
   CALM_WORKING_SHIP_TICK_MS,
   createCalmWorkingShipSprite,
-} from "../lib/fm-calm-working-ship-sprite.ts";
+} from "../lib/fm-calm-working-ship-sprite";
 import {
   CALM_SHIP_RASTER_KEY,
   CALM_SHIP_RASTER_PALETTES,
@@ -52,7 +52,7 @@ import {
   calmShipRasterColumns,
   packCalmShipRasterCells,
   type CalmShipRasterPalette,
-} from "../lib/fm-calm-ship-raster.ts";
+} from "../lib/fm-calm-ship-raster";
 import {
   calmPreferencePath,
   parseCalmPreference,
@@ -63,7 +63,7 @@ import {
   userTextIsOperational,
   userTextOperationalRecord,
   workingNoteKey,
-} from "../lib/fm-calm-presentation.ts";
+} from "../lib/fm-calm-presentation";
 import {
   firstmateStateDirectory,
   hostHealthNote,
@@ -75,7 +75,7 @@ import {
   replayOutcomeNotes,
   sessionShownThrough,
   type HostHealth,
-} from "../lib/fm-branch-notes.ts";
+} from "../lib/fm-branch-notes";
 
 /** The slash command the mod serves, the same name as Pi's `/calm`. */
 const CALM_COMMAND = "calm";

@@ -302,9 +302,17 @@ PYFIX
   assert_equals 44 "$(rex_env "$dir" "fm_backend_rex_screen_read '$t' && printf %s \"\$FM_BACKEND_REX_CURSOR_Y\"")" \
     "the cursor row must be 0-based within the derived viewport"
   rm -f "$dir/fake/cursor/$u"
+  assert_equals empty "$(rex_env "$dir" "fm_backend_composer_state rex '$t'")" \
+    "the idle OpenCode viewport has a recognizable composer even without its cursor"
+  # A shell at the bottom invalidates stale scrollback without a cursor.
+  # With a cursor on the recorded OpenCode composer, its row still decides.
+  printf 'process exited\n$' >> "$dir/fake/capture/$u.vt"
+  printf '45;6' >"$dir/fake/cursor/$u"
+  assert_equals empty "$(rex_env "$dir" "fm_backend_composer_state rex '$t'")" \
+    "a supported cursor on the composer takes precedence over a lower shell"
+  rm -f "$dir/fake/cursor/$u"
   out=$(rex_env "$dir" "fm_backend_composer_state rex '$t'")
-  [ "$out" != empty ] && [ "$out" != pending ] \
-    || fail "the same screen read cursorless must not claim a definite verdict, got $out"
+  assert_equals unknown "$out" "a cursorless composer above a dead shell must be indeterminate"
   printf '99;1' >"$dir/fake/cursor/$u"
   assert_equals "$out" "$(rex_env "$dir" "fm_backend_composer_state rex '$t'")" \
     "a cursor outside the viewport must be ignored, falling back to the cursorless read"

@@ -86,6 +86,22 @@ All entries retain their existing serial placement, and the 15-percent unhinted 
 
 The new `tests/fm-remote-herdr-identity.test.sh` serial hint is provisionally 6158 ms, from a successful local macOS arm64 `bin/fm-test-run.sh` sample on 2026-11-08. Replace it with an Ubuntu timing-artifact maximum at the next CI refresh; this is not whole-shard CI timing evidence.
 
+Nine provisional local Linux x86_64 serial hints use successful, non-skipped runner timing records from the 2026-11-20 offline integration audit (`fm/merge-upstream-1120`, merged tree plus its lint fix).
+The runner was invoked with `--jobs 1 --json offline-remainder.json` and explicit test paths.
+Replace these local packing inputs with Ubuntu timing-artifact maxima on the next refresh.
+
+| Subject | Observed duration_ms |
+|---|---|
+| `tests/fm-hermes-harness.test.sh` | 10449 |
+| `tests/fm-hermes-inbox.test.sh` | 10571 |
+| `tests/fm-judge-first.test.sh` | 12640 |
+| `tests/fm-kimi-trust.test.sh` | 2479 |
+| `tests/fm-kiro-harness.test.sh` | 26486 |
+| `tests/fm-model-router.test.sh` | 4478 |
+| `tests/fm-nudge-gate.test.sh` | 394 |
+| `tests/fm-pick-element.test.sh` | 1842 |
+| `tests/fm-tool-ring.test.sh` | 1776 |
+
 ## Parallel lanes
 
 The two parallel lanes use longest-processing-time assignment over those hints.

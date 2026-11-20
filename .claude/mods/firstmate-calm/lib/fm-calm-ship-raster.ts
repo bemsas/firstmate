@@ -17,7 +17,7 @@
 import type {
   CalmWorkingShipColor,
   CalmWorkingShipFrame,
-} from "./fm-calm-working-ship-sprite.ts";
+} from "./fm-calm-working-ship-sprite";
 
 /** The Raster's `key` inside the Spinner drawing, what `$.ui.blit` names to repaint it. */
 export const CALM_SHIP_RASTER_KEY = "firstmate-calm-working-ship";

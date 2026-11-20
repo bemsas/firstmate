@@ -597,7 +597,7 @@ test_archive_retry_removes_stale_files_from_a_partial_generation() {
 }
 
 test_archive_revalidates_sources_immediately_before_publication() {
-  local home export_root archive archive_pid rc=0 wait_count=0 index
+  local home export_root archive rc=0
   home=$(make_home archive-final-revalidate)
   export_root="$TMP_ROOT/export-archive-final-revalidate"
   printf '%s\n' "$export_root" > "$home/config/record-export-root"
@@ -606,24 +606,28 @@ test_archive_revalidates_sources_immediately_before_publication() {
     || fail "final revalidation setup could not initialize its root: $(cat "$home/sync.err")"
   archive="$export_root/archive/task-a/final-revalidate-generation"
   mkdir -p "$archive/inbox"
-  index=0
-  while [ "$index" -lt 10000 ]; do
-    printf 'stale %s\n' "$index" > "$archive/inbox/$(printf '%05d' "$index").msg"
-    index=$((index + 1))
-  done
+  printf 'stale\n' > "$archive/inbox/00000.msg"
+  mkdir "$home/python"
+  # Inject the write at the filesystem operation that removes the stale
+  # generation, after its children have been removed. This avoids polling
+  # for the race while keeping the real CLI and its publication path.
+  cat > "$home/python/sitecustomize.py" <<'PYFIX'
+import os
+from pathlib import Path
+import sys
 
-  run_export "$home" archive-task task-a > "$home/archive.out" 2> "$home/archive.err" &
-  archive_pid=$!
-  while [ -e "$archive/inbox/00000.msg" ]; do
-    kill -0 "$archive_pid" 2>/dev/null || break
-    wait_count=$((wait_count + 1))
-    [ "$wait_count" -le 1000 ] || break
-    sleep 0.01
-  done
-  [ ! -e "$archive/inbox/00000.msg" ] \
-    || { wait "$archive_pid" || true; fail "archive did not begin replacing its stale partial generation"; }
-  printf 'changed after final comparison\n' >> "$home/state/task-a.status"
-  wait "$archive_pid" || rc=$?
+home = Path(os.environ["FM_HOME"])
+def change_source(event, args):
+    if event == "os.rmdir" and os.path.basename(os.fsdecode(args[0])) == "final-revalidate-generation":
+        with (home / "state/task-a.status").open("a") as source:
+            source.write("changed during stale generation removal\n")
+        (home / "race-injected").touch()
+
+sys.addaudithook(change_source)
+PYFIX
+  PYTHONPATH="$home/python" run_export "$home" archive-task task-a \
+    > "$home/archive.out" 2> "$home/archive.err" || rc=$?
+  assert_present "$home/race-injected" "archive never reached stale generation removal"
   [ "$rc" -ne 0 ] || fail "archive committed after a source changed during stale-generation replacement"
   assert_absent "$archive/manifest.v1.json" "archive committed a manifest after its final source comparison"
   assert_present "$home/state/task-a.meta" "final comparison race removed live metadata"

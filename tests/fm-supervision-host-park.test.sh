@@ -594,15 +594,24 @@ test_host_outside_the_lock_owner_stands_down() {
 }
 
 test_tagged_lock_holder_reaches_the_engine_whole() {
-  local home first
+  local home first real_ps
   home=$(make_home tagged-holder away)
+  real_ps=$(command -v ps) || fail "tagged: the fixture needs ps"
   echo hold-lease > "$home/stub-mode"
-  # A Windows/Git Bash home: uname reports MINGW and ps -W lists the session
-  # harness the lock names as win:7204; every other ps question is the real one.
+  # Emulate a Windows/Git Bash home: ps -W lists the native session harness
+  # the lock names as win:7204, while the local ancestry is plain Bash.
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" MINGW64_NT-10.0-26200\n' > "$home/fakebin/uname"
   cat > "$home/fakebin/ps" <<'SH'
 #!/usr/bin/env bash
-[ "$*" = -W ] || exec /bin/ps "$@"
+# The native session cannot appear in the local Git Bash ancestry. Model
+# that boundary explicitly even when this test runs under a real harness.
+case "$*" in
+  -W) ;;
+  '-o comm= -p '*) printf '%s\n' bash; exit 0 ;;
+  '-o args= -p '*) printf '%s\n' bash; exit 0 ;;
+  '-o ppid= -p '*) printf '%s\n' 0; exit 0 ;;
+  *) exec "$FM_TEST_REAL_PS" "$@" ;;
+esac
 printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
 printf '%s\n' '  4201508       0       0       7204  ?              0 22:24:48 C:\Users\u\.local\bin\claude.exe'
 SH
@@ -610,7 +619,7 @@ SH
   printf 'win:7204\n' > "$home/state/.lock"
   env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID \
     FM_HOME="$home" FM_CREW_STATE_BIN="$home/fakebin/fm-crew-state.sh" PATH="$home/fakebin:$PATH" \
-    CLAUDE_PID=7204 CLAUDE_CODE_SESSION_ID=tagged-session \
+    FM_TEST_REAL_PS="$real_ps" CLAUDE_PID=7204 CLAUDE_CODE_SESSION_ID=tagged-session \
     bash -c '"$0" park > "$FM_HOME/host.out" 2>&1; printf "%s\n" "$?" > "$FM_HOME/host.rc"' "$HOST" 2>> "$home/claude.err" &
   wait_until 150 watcher_live "$home" || fail "tagged: the host never started a watcher cycle: $(cat "$home/host.out")"
   append_status "$home" 'step one'

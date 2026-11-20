@@ -17,7 +17,7 @@ import {
   toolUse,
   userMessage,
   world,
-} from "./support.ts";
+} from "./support";
 
 const sessionStart = { cwd: "/work", surface: "terminal" as const, isInteractive: true };
 

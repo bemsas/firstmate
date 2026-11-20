@@ -26,8 +26,16 @@ DELTA_LOG_REL=state/replies.status
 mkdir -p "$DELTA_HOME/state"
 READER="$ROOT/bin/fm-remote-delta-read.sh"
 
-EMPTY_SHA=$(: | shasum -a 256 | awk '{print $1}')
-sha() { printf '%b' "$1" | shasum -a 256 | awk '{print $1}'; }
+# Use one deterministic hasher in the observation shims, even when the host
+# only provides sha256sum or installs shasum outside /usr/bin and /bin.
+if REAL_HASH=$(command -v shasum); then
+  HASH_ARGS=(-a 256)
+else
+  REAL_HASH=$(command -v sha256sum) || fail 'no SHA-256 tool is available'
+  HASH_ARGS=()
+fi
+sha() { printf '%b' "$1" | "$REAL_HASH" ${HASH_ARGS[@]+"${HASH_ARGS[@]}"} | awk '{print $1}'; }
+EMPTY_SHA=$(sha '')
 
 run_reader() { # <offset> <prefix> <wait> [rel]
   FM_HOME="$DELTA_HOME" FM_REMOTE_DELTA_POLL_SECONDS=0.05 \
@@ -56,7 +64,7 @@ pass 'an appended line produces a delta with exact offsets, hashes, and payload'
 DELTA_SHIM="$TMP_ROOT/delta-shim"
 EXEC_LOG="$TMP_ROOT/delta-execs"
 mkdir -p "$DELTA_SHIM"
-for TOOL in perl shasum sha256sum od tail head wc tr date stat dirname basename; do
+for TOOL in perl od tail head wc tr date stat dirname basename; do
   REAL=$(PATH=/usr/bin:/bin command -v "$TOOL" 2>/dev/null || true)
   [ -n "$REAL" ] || continue
   cat > "$DELTA_SHIM/$TOOL" <<SH
@@ -66,6 +74,17 @@ exec $REAL "\$@"
 SH
   chmod +x "$DELTA_SHIM/$TOOL"
 done
+cat > "$DELTA_SHIM/shasum" <<'SH'
+#!/bin/sh
+printf '%s\n' shasum >> "$FM_TEST_EXEC_LOG"
+exec "$FM_TEST_HASH" "$@"
+SH
+cat > "$TMP_ROOT/hash" <<SH
+#!/usr/bin/env bash
+exec $(printf '%q ' "$REAL_HASH" ${HASH_ARGS[@]+"${HASH_ARGS[@]}"}) "\${@:3}"
+SH
+chmod +x "$DELTA_SHIM/shasum" "$TMP_ROOT/hash"
+export FM_TEST_HASH="$TMP_ROOT/hash"
 : > "$EXEC_LOG"
 : > "$DELTA_HOME/$DELTA_LOG_REL"
 FM_TEST_EXEC_LOG="$EXEC_LOG" PATH="$DELTA_SHIM:/usr/bin:/bin" run_reader 0 "$EMPTY_SHA" 2 > /dev/null && \
@@ -124,19 +143,18 @@ if [ -e "$FM_TEST_REWRITE_DONE" ]; then
 fi
 printf '11:%s.%s:%s.%s:123:456\n' "$epoch" "$fraction" "$epoch" "$fraction"
 SH
-REAL_SHASUM=$(PATH=/usr/bin:/bin command -v shasum)
-cat > "$SUBSECOND_SHIM/shasum" <<SH
+cat > "$SUBSECOND_SHIM/shasum" <<'SH'
 #!/bin/sh
-"$REAL_SHASUM" "\$@" || exit \$?
-case "\$3" in
+"$FM_TEST_HASH" "$@" || exit $?
+case "$3" in
 */prefix)
-  if [ ! -e "\$FM_TEST_REWRITE_DONE" ]; then
-    if [ "\${FM_TEST_REMOVE_LOG:-0}" = 1 ]; then
-      rm -- "\$FM_TEST_REWRITE_LOG"
+  if [ ! -e "$FM_TEST_REWRITE_DONE" ]; then
+    if [ "${FM_TEST_REMOVE_LOG:-0}" = 1 ]; then
+      rm -- "$FM_TEST_REWRITE_LOG"
     else
-      printf 'OMEGA\\nbeta\\n' > "\$FM_TEST_REWRITE_LOG"
+      printf 'OMEGA\nbeta\n' > "$FM_TEST_REWRITE_LOG"
     fi
-    : > "\$FM_TEST_REWRITE_DONE"
+    : > "$FM_TEST_REWRITE_DONE"
   fi
   ;;
 esac

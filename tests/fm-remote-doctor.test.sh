@@ -37,7 +37,8 @@ TOOLS="$TMP_ROOT/tools"
 mkdir -p "$TOOLS"
 ln -sf "$(command -v git)" "$TOOLS/git"
 ln -sf "$(command -v jq)" "$TOOLS/jq"
-BASE_PATH="$TOOLS:/usr/bin:/bin:/usr/sbin:/sbin"
+BASE_PATH="$TOOLS:$(fm_test_base_path_sans "${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
+  herdr rex tasks-axi treehouse claude codex pi opencode omp grok kimi cursor agy muse gemini rovo devin commandcode polytoken cortex kiro hermes)"
 
 # Real socket-owner holders for the Darwin birth check: a non-platform jq
 # blocked on a fifo this test keeps open, with exactly the marker environment
@@ -380,7 +381,13 @@ doctor() {
     SHELL="${CASE_ENV_SHELL-${SHELL-}}" \
     FM_REMOTE_JOB_PLATFORM_OVERRIDE="${CASE_PLATFORM_OVERRIDE-}" \
     FM_REMOTE_JOB_ACTIVE="${CASE_REMOTE_JOB_ACTIVE-1}" \
-    "$ROOT/bin/fm-remote-doctor.sh" "$@" 2>&1
+    python3 -c '
+import os, signal, sys
+# Test runners may inherit SIGINT ignored. Give the doctor the signal
+# disposition it would get when run interactively.
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+os.execv(sys.argv[1], sys.argv[1:])
+' "$ROOT/bin/fm-remote-doctor.sh" "$@" 2>&1
   )
   DOCTOR_RC=$?
   set -e

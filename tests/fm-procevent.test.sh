@@ -4130,7 +4130,10 @@ HKEEP="$TMP_ROOT/orphan-live-owner"; new_home "$HKEEP"
 fm_test_track_procevent_home "$HKEEP"
 orphan_pe "$HORPHAN" register lavish orphan-src -- "$ORPHAN_STUB" "$TMP_ROOT/orphan-dead" >/dev/null
 orphan_pe "$HKEEP" register lavish keep-src -- "$QUIET_STUB" "$TMP_ROOT/orphan-live" >/dev/null
-orphan_pe "$HORPHAN" reconcile >/dev/null
+FM_PROCEVENT_OWNER_LEASE_SECONDS="$PROOF_LEASE_SECONDS" \
+  FM_PROCEVENT_OWNER_CHECK_SECONDS="$PROOF_CHECK_SECONDS" FM_HOME="$HORPHAN" \
+  sh -c 'printf "%s\n" "$$" > "$1"; shift; exec "$@"' _ \
+  "$TMP_ROOT/orphan-launcher.pid" "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null
 orphan_pe "$HKEEP" reconcile >/dev/null
 
 wait_for "$HORPHAN/state/procevent/orphan-src.runner" \
@@ -4146,7 +4149,7 @@ ORPHAN_DESCENDANT=$(cat "$TMP_ROOT/orphan-dead.descendant")
 # The reproduction condition itself: the listener is already an orphan in the
 # kernel's sense before anything is asserted about reaping it.
 orphan_ppid=$(ps -o ppid= -p "$ORPHAN_PID" 2>/dev/null | tr -d '[:space:]')
-[ "$orphan_ppid" = 1 ] \
+[ -n "$orphan_ppid" ] && [ "$orphan_ppid" != "$(cat "$TMP_ROOT/orphan-launcher.pid")" ] \
   || fail "the listener under test was not reparented away from its session (ppid $orphan_ppid)"
 kill -0 -"$ORPHAN_PID" 2>/dev/null \
   || fail "the listener's process group was not running"

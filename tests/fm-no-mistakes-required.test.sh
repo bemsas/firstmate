@@ -5,6 +5,8 @@ set -u
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+fm_live_gate opt-in FM_NO_MISTAKES_REQUIRED_LIVE curl python3
+
 ACTION_REF=32d396ac0f29135daf7fcb9964aba9d5f4e796d6
 TMP_ROOT=$(fm_test_tmproot fm-no-mistakes-required)
 VERIFY="$TMP_ROOT/verify.py"
@@ -14,8 +16,6 @@ SIGNATURE='Updates from [git push no-mistakes](https://github.com/kunchenguid/no
 COMPLETED_STEPS='[{"step":"review","status":"completed"},{"step":"test","status":"completed"},{"step":"document","status":"completed"}]'
 
 fetch_shared_verifier() {
-  command -v curl >/dev/null 2>&1 || fail "curl is required to exercise the pinned shared action"
-  command -v python3 >/dev/null 2>&1 || fail "python3 is required to exercise the pinned shared action"
   curl --fail --silent --show-error --location \
     "https://raw.githubusercontent.com/kunchenguid/no-mistakes/${ACTION_REF}/.github/actions/require-no-mistakes/verify.py" \
     > "$VERIFY" || fail "could not fetch the pinned shared action verifier"

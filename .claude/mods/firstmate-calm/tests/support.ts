@@ -5,7 +5,7 @@
 // engine's own draw for every component the mod passes through, and a journal of every
 // call the mod makes on `$` (blits, toasts, redraws, transcript lines, the command it
 // registers).
-import type { On, SessionMessage } from "claude-code";
+import type { EngineInterface, On, SessionMessage } from "claude-code";
 import { mock, type MockClock } from "claude-code/testing";
 
 export const HOME = "/fm/home";
@@ -105,7 +105,13 @@ export function world(on: On, options: WorldOptions = {}): World {
     let mtimeMs = 0;
     for (const char of text) mtimeMs = (mtimeMs * 31 + char.codePointAt(0)!) % 2147483647;
     mtimeMs = mtimes.get(e.path) ?? mtimeMs;
-    return { value: { kind: "file" as const, size: text.length, mtimeMs } };
+    const stat: Awaited<ReturnType<EngineInterface["fs"]["stat"]>> = {
+      kind: "file",
+      size: text.length,
+      mtimeMs,
+      isLink: false,
+    };
+    return { value: stat };
   });
   on("ui.log", async (_$, e) => {
     journal.logs.push(e.text);
@@ -129,6 +135,7 @@ export function world(on: On, options: WorldOptions = {}): World {
     return { value: undefined };
   });
   on("ui.blit", async (_$, e) => {
+    if (!("cells" in e)) throw new Error("expected a text raster");
     journal.blits.push({ requestId: e.requestId, key: e.key, columns: e.columns, rows: e.rows, cells: e.cells });
     return { value: blitDenial === undefined ? {} : { deny: blitDenial } };
   });
@@ -189,7 +196,7 @@ export function spinner(requestId = "agent-main", viewport: { columns: number; r
     component: "Spinner" as const,
     requestId,
     viewport,
-    props: { word: "Sauteing", message: null, mode: "requesting" as const },
+    props: { word: "Sauteing", message: null, suffix: "", mode: "requesting" as const },
   };
 }
 
@@ -199,7 +206,7 @@ export function unmeasuredSpinner(requestId = "agent-main") {
     surface: "terminal" as const,
     component: "Spinner" as const,
     requestId,
-    props: { word: "Sauteing", message: null, mode: "requesting" as const },
+    props: { word: "Sauteing", message: null, suffix: "", mode: "requesting" as const },
   };
 }
 
@@ -239,7 +246,7 @@ export function userMessage(text: string, requestId = "user-1") {
     component: "UserMessage" as const,
     requestId,
     viewport: VIEWPORT,
-    props: { text, origin: { kind: "composer" as const } },
+    props: { text, isExpanded: false, origin: { kind: "composer" as const } },
   };
 }
 

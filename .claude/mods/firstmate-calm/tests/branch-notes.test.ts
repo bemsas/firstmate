@@ -2,7 +2,7 @@
 // line per outcome the store's tail copy gains and per latch change, replayed at session
 // start, shown whether Calm is on or off, and never marking anything read.
 import { describe, expect, test } from "claude-code/testing";
-import { HOME, world } from "./support.ts";
+import { HOME, world } from "./support";
 
 const sessionStart = { cwd: "/work", surface: "terminal" as const, isInteractive: true };
 const STATE = `${HOME}/state`;

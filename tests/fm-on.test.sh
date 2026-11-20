@@ -67,6 +67,13 @@ case "\${1:-}:\${2:-}" in
   mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
 esac
 SH
+# The entrypoint appends system directories to PATH. Shadow any host Herdr
+# even in the transport-only cases that probe the remote backend.
+cat > "$REMOTE_ROOT/bin/herdr" <<'SH'
+#!/bin/sh
+printf '%s\n' '{"server":{"running":false}}'
+SH
+chmod +x "$REMOTE_ROOT/bin/herdr"
 cp "$ROOT/bin/fm-remote-doctor.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
   "$ROOT/bin/fm-remote-herdr-owner-lib.sh" "$ROOT/bin/fm-remote-herdr-identity-lib.sh" \
   "$ROOT/bin/fm-backend.sh" "$REMOTE_ROOT/bin/"
@@ -367,8 +374,10 @@ SH
 chmod +x "$DOCTOR_BIN/uname"
 # These tool-resolution assertions require Herdr specifically; the unqualified
 # doctor accepts either remote backend, covered by fm-remote-doctor.test.sh.
+DOCTOR_BASE=$(fm_test_base_path_sans "${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
+  herdr tasks-axi treehouse claude codex pi opencode omp grok kimi cursor agy muse gemini rovo devin commandcode polytoken cortex kiro hermes)
 set +e
-out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" "$ROOT/bin/fm-remote-doctor.sh" --backend herdr 2>&1)
+out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:$DOCTOR_BASE" "$ROOT/bin/fm-remote-doctor.sh" --backend herdr 2>&1)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "the remote doctor passed with a missing required tool"
@@ -394,11 +403,11 @@ printf '#!/usr/bin/env bash\nexit 0\n' > "$DOCTOR_BIN/treehouse"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$DOCTOR_BIN/claude"
 chmod +x "$DOCTOR_BIN/jq" "$DOCTOR_BIN/herdr" "$DOCTOR_BIN/tasks-axi" "$DOCTOR_BIN/treehouse" "$DOCTOR_BIN/claude"
 set +e
-out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" "$ROOT/bin/fm-remote-doctor.sh" --backend herdr 2>&1)
+out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:$DOCTOR_BASE" "$ROOT/bin/fm-remote-doctor.sh" --backend herdr 2>&1)
 rc=$?
 set -e
 assert_contains "$out" "required git=$DOCTOR_BIN/git" "the remote doctor did not report where the required tool resolved"
-doctor_tmux=$(PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" command -v tmux 2>/dev/null || true)
+doctor_tmux=$(PATH="$DOCTOR_BIN:$DOCTOR_BASE" command -v tmux 2>/dev/null || true)
 if [ -n "$doctor_tmux" ]; then
   assert_contains "$out" "optional tmux=$doctor_tmux" "the remote doctor did not report the resolved optional tool"
 else
