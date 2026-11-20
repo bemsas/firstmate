@@ -21,6 +21,9 @@
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
+# With the opt-in config/pr-squash-summary presence flag, a GitHub squash merge
+# whose caller passed no subject or body takes the PR title and the body's
+# "## What Changed" section as its commit text; github_add_squash_summary owns it.
 # On Forgejo the merge style defaults to the repository's own
 # default_merge_style, read live, and a merge is refused when it cannot be read.
 # A GitHub merge is refused unless every pre-merge condition holds, each read
@@ -35,7 +38,7 @@
 # once that bound is spent it reports mergeability still pending rather than
 # unmergeable, with the same nonzero exit as any other refusal.
 # A required check that never reported is absent from the checks
-# list rather than red, so github_read_required_contexts below reads the
+# list rather than red, so github_read_required_contexts (bin/fm-pr-lib.sh) reads the
 # required set from classic branch protection and active rulesets. Check-run
 # requirements retain their producer app binding: a same-named check run from another app cannot
 # satisfy them, and a duplicate name-only entry cannot weaken that binding.
@@ -468,6 +471,93 @@ caller_requested_auto_merge() {
     esac
   done
   return "$requested"
+}
+
+# Whether the caller's own extra arguments set the commit subject or body,
+# including gh's -t, -b, and -F short options inside a short-option cluster.
+caller_has_commit_text() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --subject|--subject=*|--body|--body=*|--body-file|--body-file=*) return 0 ;;
+      --*) ;;
+      -*[tbF]*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# The "## What Changed" section of the PR body on stdin, without its heading
+# or surrounding blank lines. It ends at the next level-two heading or the
+# no-mistakes attestation comment; nothing is printed when it is absent.
+# Lines inside a fenced code block (``` or ~~~, closed by a run of the same
+# character at least as long) are never read as a heading or that comment;
+# a ``` line whose info string holds a backtick is inline code, not a fence.
+what_changed_section() {
+  tr -d '\r' | awk '
+    # The fence run a line opens or closes with: up to three spaces of
+    # indent, then three or more backticks or tildes; empty when none. A
+    # backtick run followed by another backtick is inline code, not a fence.
+    function fence_run(line,   s, c, n) {
+      s = line
+      sub(/^ ? ? ?/, "", s)
+      c = substr(s, 1, 1)
+      if (c != "`" && c != "~") return ""
+      n = 0
+      while (substr(s, n + 1, 1) == c) n++
+      if (n < 3) return ""
+      if (c == "`" && index(substr(s, n + 1), "`")) return ""
+      return substr(s, 1, n)
+    }
+    {
+      run = fence_run($0)
+      if (fence != "") {
+        rest = $0
+        sub(/^ ? ? ?/, "", rest)
+        rest = substr(rest, length(run) + 1)
+        if (run != "" && substr(run, 1, 1) == substr(fence, 1, 1) \
+          && length(run) >= length(fence) && rest ~ /^[[:space:]]*$/) fence = ""
+        if (inside) lines[++n] = $0
+        next
+      }
+      if (run != "") {
+        fence = run
+        if (inside) lines[++n] = $0
+        next
+      }
+    }
+    /^## / { if (inside) exit; if ($0 ~ /^## What Changed[[:space:]]*$/) { inside = 1; next } }
+    inside && /^<!-- no-mistakes-/ { exit }
+    inside { lines[++n] = $0 }
+    END {
+      first = 1; last = n
+      while (first <= last && lines[first] ~ /^[[:space:]]*$/) first++
+      while (last >= first && lines[last] ~ /^[[:space:]]*$/) last--
+      for (i = first; i <= last; i++) print lines[i]
+    }'
+}
+
+# Opt-in config/pr-squash-summary: a GitHub squash merge whose caller passed no
+# commit text of its own gets the PR title plus " (#N)" as its subject and the
+# body's What Changed section as its body. Without that section, or when the PR
+# text cannot be read, the repository's own squash text stands.
+github_add_squash_summary() {
+  local json title body
+  case "$(caller_merge_method "$@")" in
+    ''|[sS][qQ][uU][aA][sS][hH]) ;;
+    *) return 0 ;;
+  esac
+  [ -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/pr-squash-summary" ] || return 0
+  caller_has_commit_text "$@" && return 0
+  if ! json=$(gh pr view "$URL" --json title,body 2>/dev/null) \
+    || ! title=$(printf '%s' "$json" | jq -er '.title | strings | select(length > 0)' 2>/dev/null) \
+    || ! body=$(printf '%s' "$json" | jq -r '.body // "" | strings' 2>/dev/null); then
+    printf 'note: could not read the title and body of %s; the squash commit keeps the repository default text\n' "$URL" >&2
+    return 0
+  fi
+  body=$(printf '%s\n' "$body" | what_changed_section)
+  [ -n "$body" ] || return 0
+  merge_args+=(--subject "$title (#$PR_NUMBER)" --body "$body")
 }
 
 reject_repo_overrides() {
@@ -964,6 +1054,88 @@ forgejo_default_merge_style() {
   esac
 }
 
+# Every GitHub check that is not green in the given live pull-request JSON, one
+# name per line. An entry is green when it is a status context whose state is
+# SUCCESS, or a check run that completed with SUCCESS, NEUTRAL, or SKIPPED (so
+# a pending check is not green either). Exits nonzero when the rollup cannot be
+# read, so a malformed answer is a failed read and never an empty red set.
+#
+# The rollup can hold several runs of one check name at the same head, because
+# GitHub cancels a pull request's in-flight run when the base branch advances
+# and re-triggers it; the cancelled run stays in the rollup beside the passing
+# re-run. A check is therefore judged by its current run rather than by any run
+# that a later one superseded, which is what makes this agree with GitHub's own
+# CLEAN mergeStateStatus instead of refusing a pull request GitHub considers
+# mergeable.
+#
+# Supersession applies only among check runs with the same reported name. A
+# name is dropped from the red set only when every non-green run is COMPLETED,
+# has a whole-second UTC startedAt, and started strictly before a green run.
+# Status contexts are never grouped or superseded, and every non-green one is
+# reported independently. A still-running, queued, undated, or tied check run
+# stays red. A name whose runs are all green needs no timestamp, while a name
+# with no green run stays red.
+#
+# The reported name is also what --allow-red matches. An unnamed check run is
+# grouped alone and can neither supersede nor be superseded, because unrelated
+# unnamed checks must not be treated as one.
+github_checks_not_green() {
+  local json=$1
+  printf '%s' "$json" | jq -r --argjson settled_only "${2:-false}" '
+    def settled_at:
+      if type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+      then . else null end;
+    if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
+    | [ .statusCheckRollup
+        | to_entries[]
+        | .key as $i
+        | .value
+        | select($settled_only == false or
+            (if .__typename == "CheckRun" then .status == "COMPLETED"
+             else .state != "PENDING" and .state != "EXPECTED" end))
+        | if .__typename == "CheckRun" then
+            {
+              kind: "check_run",
+              name: (.name // ""),
+              completed: (.status == "COMPLETED"),
+              ok: (.status == "COMPLETED" and (.conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED")),
+              at: (.startedAt | settled_at)
+            }
+            | . + {group: (if .name == "" then ["", $i] else [.name, -1] end)}
+          else
+            {kind: "status_context", name: (.context // ""), ok: (.state == "SUCCESS")}
+          end
+      ]
+    | . as $entries
+    | (
+        ($entries[]
+          | select(.kind == "status_context" and (.ok | not))
+          | .name
+        ),
+        ($entries
+          | [.[] | select(.kind == "check_run")]
+          | group_by(.group)[]
+          | {
+              name: .[0].name,
+              reds: [.[] | select(.ok | not)],
+              newest_green: ([.[] | select(.ok) | .at | select(. != null)] | max)
+            }
+          | select(
+              (.reds | length) > 0
+              and (
+                .newest_green == null
+                or any(.reds[]; (.completed | not) or .at == null)
+                or ([.reds[] | .at] | max) >= .newest_green
+              )
+            )
+          | .name
+        )
+      )
+    | if . == "" then "(unnamed check)" else . end
+  ' 2>/dev/null || return 1
+}
+
+
 FM_PR_GITHUB_REQUIRED=
 FM_PR_GITHUB_REQUIRED_ERROR=
 github_read_required_contexts() {
@@ -1053,7 +1225,7 @@ github_required_checks_missing() {
 # the usual 1, when mergeable=UNKNOWN is the only failing condition, so the
 # caller can retry a still-computing mergeability read instead of refusing.
 github_verify_mergeable() {
-  local json fields line red failed name covered missing unreported producers runs pending
+  local json fields line red failed name covered missing unreported producers pending
   local total=0 named=0 refusals='' mergeable_refusal=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
   FM_PR_GITHUB_BEHIND=false
@@ -1181,20 +1353,12 @@ EOF
 $FM_PR_GITHUB_REQUIRED_ERROR
 EOF
   fi
-  producers='[]'
-  if printf '%s' "$FM_PR_GITHUB_REQUIRED" | jq -e 'any(.[]; .app_id != null)' >/dev/null; then
-    if ! runs=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$live_head/check-runs" 2>/dev/null) \
-      || [ -z "$runs" ] \
-      || ! producers=$(printf '%s' "$runs" | jq -sc --arg head "$live_head" '
-        [ .[] | if (.check_runs | type) == "array" then .check_runs[] else error("invalid check runs") end
-          | if (.name | type) == "string" and (.app.id | type) == "number" and .head_sha == $head
-            then . else error("invalid check producer") end ]' 2>/dev/null); then
-      producers='[]'
-      FM_PR_GITHUB_OTHER_REFUSAL=true
-      refusals="$refusals  - required check producers at head $live_head could not be read
+  if ! github_read_required_producers "$live_head"; then
+    FM_PR_GITHUB_OTHER_REFUSAL=true
+    refusals="$refusals  - required check producers at head $live_head could not be read
 "
-    fi
   fi
+  producers=$FM_PR_GITHUB_PRODUCERS
   if ! missing=$(github_required_checks_missing "$json" "$FM_PR_GITHUB_REQUIRED" "$producers"); then
     FM_PR_GITHUB_OTHER_REFUSAL=true
     refusals="$refusals  - the GitHub pull request check rollup could not be read
@@ -1396,38 +1560,6 @@ github_read_outcome() {
     return 0
   fi
   echo "error: could not read the GitHub pull request outcome after the merge attempt: the gh read failed and the gh-axi view could not prove the outcome either; PR metadata and merge poll remain recorded" >&2
-  return 1
-}
-
-github_urlencode_path_segment() {
-  local LC_ALL=C input=$1 encoded='' char octet hex
-  while [ -n "$input" ]; do
-    char=${input%"${input#?}"}
-    input=${input#?}
-    case "$char" in
-      [-._~a-zA-Z0-9]) encoded=$encoded$char ;;
-      *)
-        printf -v octet '%d' "'$char"
-        [ "$octet" -ge 0 ] || octet=$((octet + 256))
-        printf -v hex '%02X' "$octet"
-        encoded=$encoded%$hex
-        ;;
-    esac
-  done
-  printf '%s' "$encoded"
-}
-
-# Whether a failed branch-rules read (the gh stderr given) is GitHub's
-# plan-gated 403 ("Upgrade to GitHub Pro or make this repository public"),
-# which means the repository's plan cannot expose branch rules at all, on
-# GitHub or GitHub Enterprise Server - not that this script failed to read
-# them, and not that the token lacks a permission. Such a repository has no
-# active ruleset rule of any kind. Any other failure (auth, rate limit,
-# network, a 404, an unrelated 403) is not this and stays unreadable.
-github_branch_rules_unavailable_on_plan() {
-  case "$1" in
-    *"Upgrade to GitHub Pro or make this repository public"*) return 0 ;;
-  esac
   return 1
 }
 
@@ -1811,6 +1943,7 @@ case "$PROVIDER" in
     if ! caller_has_merge_method "$@"; then
       merge_args=(--squash)
     fi
+    github_add_squash_summary "$@"
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
     # mergeable reads UNKNOWN for a short while after a push or base-branch
     # change while GitHub recomputes it; retry a bounded number of times,
