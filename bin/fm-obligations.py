@@ -23,8 +23,11 @@
 #   kind    project | side_quest | ask | promise.
 #   title   one line, at most 200 characters.
 #   owner   "main" (this home) or a secondmate id registered in this home.
-#   match   optional case-insensitive regex tested against the id and title of
-#           the owner's live and queued work; refs are exact work ids. With
+#   match   optional case-insensitive matcher tested against the id and title
+#           of the owner's live and queued work: up to 20 |-separated literal
+#           fragments (letters, digits, space, ._/:#+-), each optionally anchored
+#           with a leading ^ or trailing $; no regular expressions, so matching
+#           stays linear on the hook path. refs are exact work ids. With
 #           neither, the obligation id itself is the only exact ref.
 #   status  active | waiting_captain | deferred | done | dropped.
 #   hold    backlog id held through bin/fm-captain-hold.sh (waiting_captain).
@@ -41,21 +44,30 @@
 # once, and the digest reports it.
 #
 # Evidence: `reconcile` and `check` run bin/fm-fleet-snapshot.sh --json (or
-# read --snapshot FILE) and atomically save the subset they need to
-# <home>/state/obligations/evidence.json. The snapshot remains the single owner
-# of backlog parsing, captain-hold classification (hold_bucket), task records,
-# and secondmate summaries with their remote-cache freshness. Per owner:
-#   main          live = task records with metadata (not secondmates) plus In
-#                 flight backlog rows; queued = unheld Queued rows; holds =
-#                 captain-held rows.
+# read --snapshot FILE) and save the subset they need to
+# <home>/state/obligations/evidence.json, keeping the snapshot's own generation
+# time and each secondmate summary's observed_at. The snapshot remains the single
+# owner of backlog parsing, captain-hold classification (hold_bucket), task
+# records, inventory validity, and secondmate summaries. Per owner:
+#   main          live = non-terminal task records with metadata (not
+#                 secondmates) plus In flight rows whose role needs no child
+#                 (program, held); an In flight worker row is proven only by its
+#                 task record, and a done or failed task proves nothing; queued =
+#                 unheld Queued rows; holds = captain-held rows. An unreadable
+#                 backlog or unstructured current rows leave absence unknown.
 #   secondmate    live = the summary's active_children; queued and holds from
-#                 its bounded queued inventory. An unknown summary, a cached
-#                 copy older than FM_OBLIGATIONS_REMOTE_MAX_AGE seconds (default
-#                 3600), an unregistered owner, or a truncated summary without a
-#                 match makes the owner's evidence unknown - never empty.
-# A failed snapshot saves an unavailable evidence record, so coverage turns
-# unknown instead of reusing older facts. Evidence older than
-# FM_OBLIGATIONS_EVIDENCE_MAX_AGE seconds (default 7200) is reported stale.
+#                 its bounded queued inventory. A registered, structured summary
+#                 is required; one observed more than FM_OBLIGATIONS_REMOTE_MAX_AGE
+#                 seconds (default 3600) before the moment a finding is computed,
+#                 whatever its source, is unknown. A partial projection, an omitted
+#                 surface, or a shortened field keeps visible matches but cannot
+#                 prove absence, of work or of a hold, so it yields unknown.
+# Each refresh takes an attempt ticket under the ledger lock before observing
+# and publishes only if no later attempt has published, so a slow older check
+# never replaces newer evidence; check keys its wake to the published record.
+# A failed snapshot publishes an unavailable evidence record, so coverage turns
+# unknown instead of reusing older facts. Evidence whose snapshot generation is
+# older than FM_OBLIGATIONS_EVIDENCE_MAX_AGE seconds (default 7200) is stale.
 #
 # Findings (code: meaning), in digest order:
 #   ledger-malformed     the ledger cannot be read or fails the schema.
@@ -70,9 +82,11 @@
 #   unknown              the owner's evidence is unknown (reason given).
 #   hold-unlinked        waiting_captain without a hold id.
 #   hold-aged            undated captain hold the snapshot classifies as aged.
-#   match-invalid        the stored match regex does not compile.
+#   match-invalid        the stored matcher is outside the supported form.
 #
-# digest prints the findings as stable, sorted, timestamp-free lines, capped at
+# Displayed finding text (digest, reconcile, check) passes through
+# bin/fm-precompact-handoff.py's credential redaction; the ledger keeps the
+# original text. digest prints the findings as stable, sorted, timestamp-free lines, capped at
 # FM_OBLIGATIONS_DIGEST_LINES (default 12) lines, built from the ledger and the
 # saved evidence only; bin/fm-precompact-handoff.py imports digest_lines() for
 # its UserPromptSubmit/SessionStart digest and PreCompact handoff.
@@ -98,6 +112,9 @@ ORDER = ('ledger-malformed', 'evidence-missing', 'evidence-unavailable', 'eviden
          'overdue', 'uncovered', 'hold-released', 'hold-expired', 'defer-expired', 'due-soon',
          'queued-only', 'unknown', 'hold-unlinked', 'hold-aged', 'match-invalid')
 RANK = {code: n for n, code in enumerate(ORDER)}
+MATCH_ALT_RE = re.compile(r'^\^?[A-Za-z0-9 ._/:#+-]+\$?$')
+MAX_LEDGER_BYTES = 1024 * 1024
+MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024
 
 
 class LedgerError(Exception):
@@ -134,6 +151,7 @@ def paths(home):
         'lock': home / 'state' / '.obligations.lock',
         'evidence': home / 'state' / 'obligations' / 'evidence.json',
         'emitted': home / 'state' / 'obligations' / 'emitted.json',
+        'attempt': home / 'state' / 'obligations' / 'attempt-seq',
     }
 
 
@@ -208,14 +226,21 @@ def validate_record(rec):
 def load_ledger(home):
     path = paths(home)['ledger']
     try:
-        raw = path.read_text(encoding='utf-8')
+        with open(path, 'rb') as handle:
+            raw = handle.read(MAX_LEDGER_BYTES + 1)
     except FileNotFoundError:
         return {'schema': SCHEMA, 'obligations': []}
     except OSError as exc:
         raise LedgerError('ledger unreadable (%s)' % type(exc).__name__)
+    if len(raw) > MAX_LEDGER_BYTES:
+        raise LedgerError('ledger exceeds %d bytes' % MAX_LEDGER_BYTES)
+    try:
+        raw = raw.decode('utf-8')
+    except UnicodeDecodeError:
+        raise LedgerError('ledger is not valid UTF-8')
     try:
         data = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise LedgerError('ledger is not valid JSON')
     if not isinstance(data, dict) or data.get('schema') != SCHEMA:
         raise LedgerError('ledger schema is not %s' % SCHEMA)
@@ -275,74 +300,138 @@ def find(data, oid):
     raise LedgerError('no obligation %s' % oid)
 
 
-def check_regex(pattern):
-    try:
-        re.compile(pattern, re.IGNORECASE)
-    except re.error as exc:
-        raise LedgerError('match regex does not compile (%s)' % exc)
+def check_match(pattern):
+    problem = match_problem(pattern)
+    if problem:
+        raise LedgerError(problem)
 
 
 # -------------------------------------------------------------- evidence
 
 
-def extract_evidence(snap, now, remote_max_age):
-    """Reduce a fm-fleet-snapshot.v1 document to per-owner coverage facts."""
-    if not isinstance(snap, dict) or snap.get('schema') != 'fm-fleet-snapshot.v1':
-        return {'schema': EVIDENCE_SCHEMA, 'observed_epoch': now, 'available': False,
-                'reason': 'fleet snapshot is not fm-fleet-snapshot.v1', 'owners': {}}
-    backlog = snap.get('backlog') if isinstance(snap.get('backlog'), dict) else {}
-    records = [r for r in backlog.get('records') or [] if isinstance(r, dict) and r.get('id')]
-    tasks = [t for t in snap.get('tasks') or [] if isinstance(t, dict) and t.get('id')]
+TERMINAL_STATES = ('done', 'failed')
+ELLIPSIS = '\u2026'  # the snapshot's trunc() marker for a shortened field
+
+
+def utc_epoch(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        import calendar
+        return calendar.timegm(time.strptime(value, '%Y-%m-%dT%H:%M:%SZ'))
+    except ValueError:
+        return None
+
+
+def item(ident, title, proof='live'):
+    """One piece of owner work; *_cut marks a field the snapshot shortened."""
+    ident, title = str(ident), str(title or '')
+    return {'id': ident, 'title': title, 'proof': proof,
+            'id_cut': ident.endswith(ELLIPSIS), 'title_cut': title.endswith(ELLIPSIS)}
+
+
+def main_evidence(snap, backlog, records):
+    """Main-home owner facts from task records, In flight roles and inventory validity."""
     titles = {r['id']: r.get('title') or '' for r in records}
-    live, queued, holds, closed = [], [], {}, []
-    for t in tasks:
-        if t.get('kind') == 'secondmate':
+    work, holds, closed = [], {}, []
+    for t in snap.get('tasks') or []:
+        if not isinstance(t, dict) or not isinstance(t.get('id'), str) or t.get('kind') == 'secondmate':
             continue
-        if ((t.get('paths') or {}).get('meta') or {}).get('present') is False:
+        if ((t.get('paths') or {}).get('meta') or {}).get('present') is not True:
             continue
-        live.append({'id': t['id'], 'title': titles.get(t['id'], '')})
+        state = (t.get('current_state') or {}).get('state') if isinstance(t.get('current_state'), dict) else None
+        if state in TERMINAL_STATES:
+            continue  # terminal metadata is no proof of live work
+        # Present, non-terminal task metadata is the worker's assignment record.
+        work.append(item(t['id'], titles.get(t['id'], '')))
+    task_ids = {w['id'] for w in work}
     for r in records:
         state = r.get('state')
-        entry = {'id': r['id'], 'title': r.get('title') or ''}
         if r.get('hold_kind') == 'captain' and state != 'done':
             holds[r['id']] = {'bucket': r.get('hold_bucket'), 'until': r.get('hold_until')}
         elif state == 'in_flight':
-            live.append(entry)
+            role = r.get('current_role')
+            if role == 'worker' or r.get('requires_child_metadata'):
+                # A worker row is proven only by its task record above.
+                if r['id'] not in task_ids:
+                    work.append(item(r['id'], r.get('title'), 'indeterminate'))
+            elif role in ('program', 'held'):
+                work.append(item(r['id'], r.get('title')))  # coordinated or held work owns no child
+            else:
+                work.append(item(r['id'], r.get('title'), 'indeterminate'))
         elif state == 'queued' and not r.get('hold_kind'):
-            queued.append(entry)
+            work.append(item(r['id'], r.get('title'), 'queued'))
         elif state == 'done':
             closed.append(r['id'])
-    owners = {'main': {'known': True, 'reason': None, 'backlog_known': bool(backlog.get('present')),
-                       'live': live, 'queued': queued, 'holds': holds, 'closed': closed,
-                       'truncated': False}}
-    current = snap.get('secondmate_current') if isinstance(snap.get('secondmate_current'), dict) else {}
-    for rec in current.get('records') or []:
-        if not isinstance(rec, dict) or not rec.get('id'):
-            continue
-        cur = rec.get('current') if isinstance(rec.get('current'), dict) else {}
-        prov = rec.get('provenance') if isinstance(rec.get('provenance'), dict) else {}
-        fresh = rec.get('freshness') if isinstance(rec.get('freshness'), dict) else {}
-        reason = None
-        if cur.get('state') == 'unknown' or prov.get('selected') != 'structured-home':
-            reason = one_line(cur.get('reason') or 'secondmate summary unavailable', 160)
-        elif fresh.get('status') == 'cached':
-            age = fresh.get('age_seconds')
-            if not isinstance(age, int) or age > remote_max_age:
-                reason = 'cached remote summary is stale'
-        counts = rec.get('counts') if isinstance(rec.get('counts'), dict) else {}
-        active = [a for a in rec.get('active_children') or [] if isinstance(a, dict) and a.get('id')]
-        rq = [q for q in rec.get('queued') or [] if isinstance(q, dict) and q.get('id')]
-        owners[rec['id']] = {
-            'known': reason is None, 'reason': reason, 'backlog_known': reason is None,
-            'live': [{'id': a['id'], 'title': a.get('name') or ''} for a in active],
-            'queued': [{'id': q['id'], 'title': q.get('title') or ''} for q in rq if not q.get('hold_kind')],
+    inventory = snap.get('main_inventory')
+    reason = None
+    if not backlog.get('present'):
+        reason = 'main backlog unreadable'
+    elif not isinstance(inventory, dict) or not isinstance(inventory.get('valid'), bool):
+        reason = 'main inventory validity missing from the snapshot'
+    elif not inventory['valid'] and (inventory.get('unstructured_current_count') or 0) > 0:
+        reason = 'main backlog has unstructured current rows'
+    return {'known': True, 'reason': None, 'observed_epoch': None, 'work': work,
+            'holds': holds, 'closed': closed, 'live_gap': reason, 'holds_gap': reason}
+
+
+def mate_evidence(rec):
+    """Secondmate owner facts with per-surface completeness."""
+    cur = rec.get('current') if isinstance(rec.get('current'), dict) else {}
+    prov = rec.get('provenance') if isinstance(rec.get('provenance'), dict) else {}
+    fresh = rec.get('freshness') if isinstance(rec.get('freshness'), dict) else {}
+    counts = rec.get('counts') if isinstance(rec.get('counts'), dict) else {}
+    omitted = {o.get('surface') for o in rec.get('omitted') or [] if isinstance(o, dict)}
+    reason = None
+    if rec.get('registered') is not True:
+        reason = 'owner %s is not a registered secondmate of this home' % rec['id']
+    elif cur.get('state') == 'unknown' or prov.get('selected') != 'structured-home':
+        reason = one_line(cur.get('reason') or 'secondmate summary unavailable', 160)
+    observed = utc_epoch(fresh.get('observed_at'))
+    if reason is None and observed is None:
+        reason = 'secondmate summary observation time unknown'
+    active = [a for a in rec.get('active_children') or [] if isinstance(a, dict) and a.get('id')]
+    rq = [q for q in rec.get('queued') or [] if isinstance(q, dict) and q.get('id')]
+    partial = None
+    if prov.get('summary_valid') is not True or prov.get('trust') != 'complete':
+        partial = 'owner summary is partial (%s)' % one_line(cur.get('reason') or prov.get('trust') or 'invalid', 120)
+    live_gap = partial
+    if live_gap is None and ('active_children' in omitted or counts.get('active_children') != len(active)):
+        live_gap = 'owner summary omits active rows'
+    holds_gap = partial
+    if holds_gap is None and ('queued' in omitted or counts.get('queued') != len(rq)):
+        holds_gap = 'owner summary omits queued rows'
+    work = [item(a['id'], a.get('name')) for a in active]
+    work += [item(q['id'], q.get('title'), 'queued') for q in rq if not q.get('hold_kind')]
+    return {'known': reason is None, 'reason': reason, 'observed_epoch': observed, 'work': work,
             'holds': {q['id']: {'bucket': q.get('hold_bucket'), 'until': q.get('hold_until')}
                       for q in rq if q.get('hold_kind') == 'captain'},
-            'closed': [],
-            'truncated': bool(rec.get('omitted')) or counts.get('active_children', 0) > len(active),
-        }
-    return {'schema': EVIDENCE_SCHEMA, 'observed_epoch': now, 'available': True,
-            'reason': None, 'owners': owners}
+            'cut_hold_ids': [q['id'][:-1] for q in rq if str(q['id']).endswith(ELLIPSIS)],
+            'closed': [], 'live_gap': live_gap, 'holds_gap': holds_gap}
+
+
+def extract_evidence(snap, now):
+    """Reduce a fm-fleet-snapshot.v1 document to per-owner coverage facts."""
+    def unavailable(reason):
+        return {'schema': EVIDENCE_SCHEMA, 'recorded_epoch': now, 'snapshot_epoch': None,
+                'available': False, 'reason': reason, 'owners': {}}
+    if not isinstance(snap, dict) or snap.get('schema') != 'fm-fleet-snapshot.v1':
+        return unavailable('fleet snapshot is not fm-fleet-snapshot.v1')
+    generated = utc_epoch(snap.get('generated'))
+    if generated is None:
+        return unavailable('fleet snapshot has no generation time')
+    if generated > now + 300:
+        return unavailable('fleet snapshot generation time is in the future')
+    backlog = snap.get('backlog') if isinstance(snap.get('backlog'), dict) else {}
+    records = [r for r in backlog.get('records') or [] if isinstance(r, dict) and isinstance(r.get('id'), str)]
+    owners = {'main': main_evidence(snap, backlog, records)}
+    current = snap.get('secondmate_current') if isinstance(snap.get('secondmate_current'), dict) else {}
+    for rec in current.get('records') or []:
+        if isinstance(rec, dict) and isinstance(rec.get('id'), str) and rec['id'] != 'main':
+            owners[rec['id']] = mate_evidence(rec)
+    return {'schema': EVIDENCE_SCHEMA, 'recorded_epoch': now, 'snapshot_epoch': generated,
+            'available': True, 'reason': None, 'owners': owners,
+            'mates_truncated': current.get('truncated') is not False}
 
 
 def run_snapshot(home):
@@ -362,28 +451,56 @@ def run_snapshot(home):
         return None, 'fleet snapshot printed invalid JSON'
 
 
-def refresh_evidence(home, snapshot_file=None):
+def next_attempt(home):
+    """Take a strictly increasing attempt ticket; call under the ledger lock."""
+    path = paths(home)['attempt']
+    try:
+        last = int(path.read_text(encoding='ascii').strip() or 0)
+    except (OSError, ValueError):
+        last = 0
+    atomic_write(path, '%d\n' % (last + 1))
+    return last + 1
+
+
+def refresh_evidence(home, snapshot_file=None, on_published=None):
+    """Observe the fleet, then publish under the ledger lock only if no attempt
+    that started later has already published; on_published(evidence) runs under
+    that same lock against whichever observation is actually published."""
+    p = paths(home)
+    with Locked(p['lock']):
+        attempt = next_attempt(home)
     now = now_epoch()
     if snapshot_file:
         try:
-            snap, err = json.loads(Path(snapshot_file).read_text(encoding='utf-8')), None
-        except (OSError, ValueError) as exc:
+            with open(snapshot_file, 'rb') as handle:
+                raw = handle.read(MAX_SNAPSHOT_BYTES + 1)
+            if len(raw) > MAX_SNAPSHOT_BYTES:
+                raise ValueError('oversized')
+            snap, err = json.loads(raw.decode('utf-8')), None
+        except (OSError, ValueError, RecursionError) as exc:
             snap, err = None, 'snapshot file unreadable (%s)' % type(exc).__name__
     else:
         snap, err = run_snapshot(home)
     if err:
-        evidence = {'schema': EVIDENCE_SCHEMA, 'observed_epoch': now, 'available': False,
-                    'reason': err, 'owners': {}}
+        evidence = {'schema': EVIDENCE_SCHEMA, 'recorded_epoch': now, 'snapshot_epoch': None,
+                    'available': False, 'reason': err, 'owners': {}}
     else:
-        evidence = extract_evidence(snap, now, env_int('FM_OBLIGATIONS_REMOTE_MAX_AGE', 3600))
-    atomic_write(paths(home)['evidence'], json.dumps(evidence, sort_keys=True) + '\n')
-    return evidence
+        evidence = extract_evidence(snap, now)
+    evidence['attempt'] = attempt
+    with Locked(p['lock']):
+        current = load_evidence(home)
+        if current is None or not isinstance(current.get('attempt'), int) or current['attempt'] < attempt:
+            atomic_write(p['evidence'], json.dumps(evidence, sort_keys=True) + '\n')
+            current = evidence
+        return on_published(current) if on_published else current
 
 
 def load_evidence(home):
     try:
-        data = json.loads(paths(home)['evidence'].read_text(encoding='utf-8'))
-    except (OSError, ValueError):
+        with open(paths(home)['evidence'], 'rb') as handle:
+            raw = handle.read(MAX_SNAPSHOT_BYTES + 1)
+        data = json.loads(raw.decode('utf-8')) if len(raw) <= MAX_SNAPSHOT_BYTES else None
+    except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(data, dict) or data.get('schema') != EVIDENCE_SCHEMA:
         return None
@@ -393,15 +510,63 @@ def load_evidence(home):
 # ------------------------------------------------------------- reconcile
 
 
-def matches(rec, item):
+def match_problem(pattern):
+    """None when pattern is a supported matcher, else why not."""
+    if not isinstance(pattern, str) or not pattern or len(pattern) > 200:
+        return 'match must be 1-200 characters'
+    alts = pattern.split('|')
+    if len(alts) > 20 or not all(MATCH_ALT_RE.match(a) for a in alts):
+        return ('match takes up to 20 |-separated literal fragments of letters, digits, '
+                'space and ._/:#+- with optional ^ and $ anchors')
+    return None
+
+
+def fragment_hit(alt, text):
+    head, tail = alt.startswith('^'), alt.endswith('$')
+    body = alt[1 if head else 0:len(alt) - 1 if tail else len(alt)].lower()
+    text = text.lower()
+    if head and tail:
+        return text == body
+    if head:
+        return text.startswith(body)
+    if tail:
+        return text.endswith(body)
+    return body in text
+
+
+def match_result(rec, it):
+    """True, False, or None when a shortened field leaves the answer open."""
     refs = rec.get('refs') or ([] if rec.get('match') else [rec['id']])
-    if item['id'] in refs:
+    if not it['id_cut'] and it['id'] in refs:
         return True
     pattern = rec.get('match')
-    if pattern:
-        rx = re.compile(pattern, re.IGNORECASE)
-        return bool(rx.search(item['id']) or rx.search(item.get('title') or ''))
+    if pattern and any(fragment_hit(a, it['id']) or fragment_hit(a, it['title'])
+                       for a in pattern.split('|')):
+        return True
+    if it['id_cut'] and any(r.startswith(it['id'][:-1]) for r in refs):
+        return None
+    if pattern and (it['id_cut'] or it['title_cut']):
+        return None
     return False
+
+
+def owner_unknown(owner, ev, evidence, now):
+    if ev is None:
+        if owner == 'main':
+            return 'no main-home evidence'
+        if evidence.get('mates_truncated', True):
+            return 'owner %s is not in the shown secondmate records' % owner
+        return 'owner %s is not a registered secondmate of this home' % owner
+    if not ev.get('known'):
+        return ev.get('reason') or 'owner evidence unknown'
+    observed = ev.get('observed_epoch')
+    if owner != 'main':
+        if not isinstance(observed, int):
+            return 'owner summary observation time unknown'
+        age = now - observed
+        if age > env_int('FM_OBLIGATIONS_REMOTE_MAX_AGE', 3600) or age < -300:
+            return 'owner summary observed %ds ago is stale' % age
+    return None
 
 
 def evaluate(ledger, evidence, now):
@@ -415,7 +580,8 @@ def evaluate(ledger, evidence, now):
     elif not evidence.get('available'):
         global_unknown = 'fleet evidence unavailable: ' + one_line(evidence.get('reason') or '?', 120)
         out.append(('evidence-unavailable', '-', '-', one_line(evidence.get('reason') or '?', 120), ''))
-    elif now - int(evidence.get('observed_epoch') or 0) > env_int('FM_OBLIGATIONS_EVIDENCE_MAX_AGE', 7200):
+    elif (not isinstance(evidence.get('snapshot_epoch'), int)
+          or now - evidence['snapshot_epoch'] > env_int('FM_OBLIGATIONS_EVIDENCE_MAX_AGE', 7200)):
         global_unknown = 'fleet evidence is stale'
         out.append(('evidence-stale', '-', '-', 'fleet evidence is stale; the reconcile check has not refreshed it', ''))
     owners = (evidence or {}).get('owners') or {}
@@ -426,12 +592,9 @@ def evaluate(ledger, evidence, now):
             out.append((code, oid, owner, title, detail))
         if status in ('done', 'dropped'):
             continue
-        if rec.get('match'):
-            try:
-                re.compile(rec['match'], re.IGNORECASE)
-            except re.error:
-                add('match-invalid')
-                continue
+        if rec.get('match') and match_problem(rec['match']):
+            add('match-invalid', match_problem(rec['match']))
+            continue
         if status == 'deferred':
             if rec['until'] <= today:
                 add('defer-expired', 'until ' + rec['until'])
@@ -442,13 +605,7 @@ def evaluate(ledger, evidence, now):
             elif rec['due'] <= soon:
                 add('due-soon', 'due ' + rec['due'])
         ev = owners.get(owner)
-        if global_unknown:
-            unknown = global_unknown
-        elif ev is None:
-            unknown = 'owner %s is not a registered secondmate of this home' % owner if owner != 'main' \
-                else 'no main-home evidence'
-        else:
-            unknown = None if ev.get('known') else (ev.get('reason') or 'owner evidence unknown')
+        unknown = global_unknown or owner_unknown(owner, ev, evidence, now)
         if status == 'waiting_captain':
             hold = rec.get('hold')
             if not hold:
@@ -459,8 +616,10 @@ def evaluate(ledger, evidence, now):
                 continue
             info = (ev.get('holds') or {}).get(hold)
             if info is None:
-                if not ev.get('backlog_known'):
-                    add('unknown', 'backlog unreadable')
+                if ev.get('holds_gap'):
+                    add('unknown', '%s; hold %s is not in the shown rows' % (ev['holds_gap'], hold))
+                elif any(hold.startswith(c) for c in ev.get('cut_hold_ids') or []):
+                    add('unknown', 'a shortened row id may be hold %s' % hold)
                 elif hold in (ev.get('closed') or []):
                     add('hold-released', 'held item %s is closed' % hold)
                 else:
@@ -474,26 +633,49 @@ def evaluate(ledger, evidence, now):
         if unknown:
             add('unknown', unknown)
             continue
-        if any(matches(rec, item) for item in ev.get('live') or []):
+        hits = [(w, match_result(rec, w)) for w in ev.get('work') or []]
+        if any(r is True and w['proof'] == 'live' for w, r in hits):
             continue
-        if any(matches(rec, item) for item in ev.get('queued') or []):
+        open_rows = [w['id'] for w, r in hits
+                     if (r is None and w['proof'] != 'queued') or (r is True and w['proof'] == 'indeterminate')]
+        if open_rows:
+            add('unknown', 'matching work %s has no proven live state' % one_line(', '.join(open_rows[:3]), 120))
+        elif ev.get('live_gap'):
+            add('unknown', '%s; no match in the shown rows' % ev['live_gap'])
+        elif any(r is True and w['proof'] == 'queued' for w, r in hits):
             add('queued-only', 'matching work is queued, not live')
-        elif ev.get('truncated'):
-            add('unknown', 'owner summary truncated; no match in the shown rows')
-        elif owner == 'main' and not ev.get('backlog_known'):
-            add('unknown', 'backlog unreadable and no live task matches')
         else:
             add('uncovered', 'no live work by %s matches' % owner)
     out.sort(key=lambda f: (RANK.get(f[0], 99), f[1], f[2]))
     return out
 
 
-def render(finding):
+_REDACT = []
+
+
+def redact(text, limit):
+    """Display redaction shared with bin/fm-precompact-handoff.py, its owner."""
+    if not _REDACT:
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                'fm_precompact_handoff', str(Path(__file__).resolve().parent / 'fm-precompact-handoff.py'))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _REDACT.append(module.clean)
+        except Exception:
+            _REDACT.append(None)
+    if _REDACT[0] is None:
+        return one_line('[finding text withheld: display redaction unavailable]', limit)
+    return _REDACT[0](str(text), limit)
+
+
+def render(finding, limit=240):
     code, oid, owner, title, detail = finding
     if oid == '-':
-        return '%s: %s' % (code, title)
+        return redact('%s: %s' % (code, title), limit)
     line = '%s: %s (%s) - %s' % (code, oid, owner, title)
-    return line + ('; ' + detail if detail else '')
+    return redact(line + ('; ' + detail if detail else ''), limit)
 
 
 def findings_for(home, evidence=None, now=None):
@@ -566,7 +748,7 @@ def cmd_add(home, argv, now):
         if rec[key] is not None:
             rec[key] = one_line(rec[key], 200 if key == 'title' else 400)
     if rec.get('match'):
-        check_regex(rec['match'])
+        check_match(rec['match'])
     history(rec, now, 'add', rec['source'] or '')
 
     def change(data):
@@ -592,7 +774,7 @@ def cmd_update(home, argv, now):
     if not evidence or not evidence.strip():
         raise LedgerError('update needs --evidence')
     if match not in (None, 'none'):
-        check_regex(match)
+        check_match(match)
 
     def change(data):
         rec = find(data, oid)
@@ -664,20 +846,24 @@ def cmd_check(home, argv, now):
     snapshot = opt(argv, '--snapshot')
     if argv:
         raise LedgerError('unexpected arguments: %s' % ' '.join(argv))
-    evidence = refresh_evidence(home, snapshot)
-    findings = findings_for(home, evidence, now)
-    keys = sorted({'%s:%s' % (f[0], f[1]) for f in findings})
     p = paths(home)
-    with Locked(p['lock']):
+
+    def emit(evidence):
+        # Runs under the ledger lock against the published observation, so a
+        # slower, older check can neither republish nor re-key stale findings.
+        findings = findings_for(home, evidence, now)
+        keys = sorted({'%s:%s' % (f[0], f[1]) for f in findings})
         try:
-            before = set(json.loads(p['emitted'].read_text(encoding='utf-8')))
+            saved = json.loads(p['emitted'].read_text(encoding='utf-8'))
+            before = set(saved.get('keys') if isinstance(saved, dict) else saved)
         except (OSError, ValueError, TypeError):
             before = set()
-        atomic_write(p['emitted'], json.dumps(keys) + '\n')
-    new = [f for f in findings if '%s:%s' % (f[0], f[1]) not in before]
+        atomic_write(p['emitted'], json.dumps({'attempt': evidence.get('attempt'), 'keys': keys}) + '\n')
+        return [f for f in findings if '%s:%s' % (f[0], f[1]) not in before]
+    new = refresh_evidence(home, snapshot, on_published=emit)
     if not new:
         return ''
-    shown = '; '.join(render(f) for f in new[:4])
+    shown = '; '.join(render(f, 300) for f in new[:4])
     more = ' (+%d more)' % (len(new) - 4) if len(new) > 4 else ''
     return one_line('obligations: %d new finding(s) - %s%s' % (len(new), shown, more), 900)
 
@@ -716,8 +902,8 @@ def main(argv):
             snapshot = opt(rest, '--snapshot')
             if rest:
                 raise LedgerError('unexpected arguments: %s' % ' '.join(rest))
-            refresh_evidence(home, snapshot)
-            out = '\n'.join(render(f) for f in findings_for(home, now=now))
+            evidence = refresh_evidence(home, snapshot)
+            out = '\n'.join(render(f) for f in findings_for(home, evidence, now))
         elif command == 'check':
             out = cmd_check(home, rest, now)
         elif command == 'digest':
@@ -734,6 +920,11 @@ def main(argv):
             return 0
         print('fm-obligations: error: %s' % exc, file=sys.stderr)
         return 1
+    except Exception as exc:
+        if command == 'check':
+            print('obligations: check failed - internal error (%s)' % type(exc).__name__)
+            return 0
+        raise
     if out:
         print(out)
     return 0

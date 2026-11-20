@@ -18,6 +18,10 @@
 #      ledger, and a non-regular transcript path is not opened; inject carries
 #      the obligation findings.
 #   7. a real bin/fm-fleet-snapshot.sh run on a synthetic home reconciles.
+#   8. the independent review's counterexamples, with real owner fields: summary
+#      age at read time, snapshot generation, partial and bounded surfaces,
+#      omitted holds, terminal and orphan main evidence, latest-attempt
+#      publication, display redaction, a corrupt ledger, unsupported matchers.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -41,31 +45,63 @@ new_home() {  # <name> -> path
   printf '%s' "$home"
 }
 
-# snapshot <file> <spec-json>: write a minimal fm-fleet-snapshot.v1 document.
-# spec: {"tasks":[ids], "backlog":[[id,state,title,hold_kind,hold_bucket,hold_until]],
-#        "mates":[{id,state,cached_age,active:[[id,name]],queued:[...],omitted:bool}]}
+# snapshot <file> <spec-json>: write an fm-fleet-snapshot.v1 document carrying
+# the owner fields bin/fm-fleet-snapshot.sh emits (generation time, task
+# current_state, main_inventory, secondmate registration, provenance trust,
+# freshness observed_at, counts, and omitted surfaces).
+# spec: {"generated_age":S, "tasks":[id or [id,state]],
+#        "backlog":[[id,state,title,hold_kind,hold_bucket,hold_until,current_role]],
+#        "mates":[{id,state,age,cached,partial,registered,active:[[id,name]],
+#                  queued:[[id,title,hold_kind,hold_bucket,hold_until]],
+#                  active_count,queued_count,omitted:[surfaces]}]}
 snapshot() {
   python3 - "$1" "$2" <<'PY'
-import json, sys
+import json, os, sys, time
+now = int(os.environ['FM_OBLIGATIONS_NOW_EPOCH'])
+utc = lambda e: time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(e))
 spec = json.loads(sys.argv[2])
-recs = [dict(zip(('id', 'state', 'title', 'hold_kind', 'hold_bucket', 'hold_until'), r)) for r in spec.get('backlog', [])]
-tasks = [{'id': t, 'kind': 'ship', 'paths': {'meta': {'present': True}}} for t in spec.get('tasks', [])]
+recs = []
+for r in spec.get('backlog', []):
+    rec = dict(zip(('id', 'state', 'title', 'hold_kind', 'hold_bucket', 'hold_until', 'current_role'), r))
+    rec['structured'] = True
+    if rec['state'] == 'in_flight' and not rec.get('current_role'):
+        rec['current_role'] = 'held' if rec.get('hold_kind') else 'program'
+    rec['requires_child_metadata'] = rec.get('current_role') == 'worker'
+    recs.append(rec)
+tasks = []
+for t in spec.get('tasks', []):
+    tid, state = (t, 'working') if isinstance(t, str) else t
+    tasks.append({'id': tid, 'kind': 'ship', 'paths': {'meta': {'present': True}},
+                  'current_state': {'state': state, 'source': 'status'}})
 mates = []
 for m in spec.get('mates', []):
     unknown = m.get('state') == 'unknown'
+    partial = m.get('partial', False)
+    active = [{'id': a, 'name': n} for a, n in m.get('active', [])]
     q = [dict(zip(('id', 'title', 'hold_kind', 'hold_bucket', 'hold_until'), r)) for r in m.get('queued', [])]
+    age = m.get('age', 0)
     mates.append({
-        'id': m['id'], 'current': {'state': m.get('state', 'active_child_work'),
-                                    'reason': 'structured home ledger is missing' if unknown else None},
+        'id': m['id'], 'registered': m.get('registered', True), 'remote': True,
+        'current': {'state': m.get('state', 'active_child_work'),
+                    'reason': 'structured home ledger is missing' if unknown else
+                              ('structured home state invalid: orphan' if partial else None)},
         'provenance': {'selected': 'unknown' if unknown else 'structured-home',
-                       'summary_source': 'remote-ledger-cache' if 'cached_age' in m else 'local-ledger'},
-        'freshness': {'status': 'cached' if 'cached_age' in m else 'fresh', 'age_seconds': m.get('cached_age', 0)},
-        'active_children': [{'id': a, 'name': n} for a, n in m.get('active', [])],
-        'queued': q, 'counts': {'active_children': m.get('active_count', len(m.get('active', [])))},
-        'omitted': [{'surface': 'active_children', 'count': 3}] if m.get('omitted') else []})
-    tasks.append({'id': m['id'], 'kind': 'secondmate', 'paths': {'meta': {'present': True}}})
-doc = {'schema': 'fm-fleet-snapshot.v1', 'backlog': {'present': spec.get('backlog_present', True), 'records': recs},
-       'tasks': tasks, 'secondmate_current': {'records': mates}}
+                       'summary_source': 'remote-ledger-cache' if m.get('cached') else 'remote-ledger',
+                       'summary_valid': not partial, 'trust': 'partial-structured' if partial else 'complete'},
+        'freshness': {'status': 'cached' if m.get('cached') else 'fresh',
+                      'observed_at': utc(now - age), 'age_seconds': age},
+        'active_children': active, 'queued': q,
+        'counts': {'active_children': m.get('active_count', len(active)),
+                   'queued': m.get('queued_count', len(q))},
+        'omitted': [{'surface': o, 'count': 1} for o in m.get('omitted', [])]})
+    tasks.append({'id': m['id'], 'kind': 'secondmate', 'paths': {'meta': {'present': True}},
+                  'current_state': {'state': 'unknown', 'source': 'remote'}})
+doc = {'schema': 'fm-fleet-snapshot.v1', 'generated': utc(now - spec.get('generated_age', 0)),
+       'backlog': {'present': spec.get('backlog_present', True), 'records': recs},
+       'tasks': tasks,
+       'main_inventory': spec.get('main_inventory', {'valid': True, 'reason': None,
+                                                     'orphan_in_flight': [], 'unstructured_current_count': 0}),
+       'secondmate_current': {'records': mates, 'total': len(mates), 'shown': len(mates), 'truncated': False}}
 json.dump(doc, open(sys.argv[1], 'w'))
 PY
 }
@@ -151,14 +187,14 @@ test_unknown_is_never_uncovered() {
   ob "$h" add --id nobody --kind project --title Nobody --owner ghost --source s >/dev/null
   ob "$h" add --id heldunk --kind ask --title HeldUnk --owner vm-c --source s >/dev/null
   ob "$h" set heldunk waiting_captain --hold h1 --evidence held >/dev/null
-  snapshot "$snap" '{"mates":[{"id":"vm-a","cached_age":99999},{"id":"vm-b","cached_age":60},
-    {"id":"vm-c","state":"unknown"},{"id":"vm-d","active":[["c1","other"]],"active_count":9,"omitted":true}]}'
+  snapshot "$snap" '{"mates":[{"id":"vm-a","cached":true,"age":99999},{"id":"vm-b","cached":true,"age":60},
+    {"id":"vm-c","state":"unknown"},{"id":"vm-d","active":[["c1","other"]],"active_count":9,"omitted":["active_children"]}]}'
   out=$(ob "$h" reconcile --snapshot "$snap")
-  assert_contains "$out" "unknown: stale (vm-a) - Stale; cached remote summary is stale" "stale remote cache is unknown"
+  assert_contains "$out" "unknown: stale (vm-a) - Stale; owner summary observed 99999s ago is stale" "stale remote cache is unknown"
   assert_contains "$out" "uncovered: fresh (vm-b)" "a fresh cached summary still judges coverage"
   assert_contains "$out" "unknown: unread (vm-c) - Unread; structured home ledger is missing" "unreadable remote is unknown"
   assert_contains "$out" "unknown: heldunk (vm-c)" "a hold behind an unreadable owner is unknown, not released"
-  assert_contains "$out" "unknown: trunc (vm-d) - Trunc; owner summary truncated" "truncated summary is unknown"
+  assert_contains "$out" "unknown: trunc (vm-d) - Trunc; owner summary omits active rows" "truncated summary is unknown"
   assert_contains "$out" "unknown: nobody (ghost) - Nobody; owner ghost is not a registered secondmate" "unregistered owner is unknown"
   assert_not_contains "$out" "uncovered: stale" "stale is never uncovered"
   out=$(ob "$h" reconcile --snapshot "$TMP_ROOT/does-not-exist.json")
@@ -294,5 +330,95 @@ test_real_snapshot() {
   pass "a real fleet snapshot on a synthetic home reconciles"
 }
 
+test_review_counterexamples() {
+  local h snap out rc=0 fifo old_pid i
+  h=$(new_home review)
+  snap="$TMP_ROOT/review.json"
+  ob "$h" add --id item --kind ask --title "Synthetic ask" --owner mate --source s >/dev/null
+  snapshot "$snap" '{"mates":[{"id":"mate","state":"no_active_work","age":4000}]}'
+  assert_contains "$(ob "$h" reconcile --snapshot "$snap")" "unknown: item (mate) - Synthetic ask; owner summary observed 4000s ago is stale" \
+    "a freshly fetched but old summary is unknown"
+  snapshot "$snap" '{"mates":[{"id":"mate","state":"no_active_work","cached":true,"age":3599}]}'
+  assert_contains "$(ob "$h" reconcile --snapshot "$snap")" "uncovered: item (mate)" "a cached summary inside the age limit judges coverage"
+  assert_contains "$(FM_OBLIGATIONS_NOW_EPOCH=$((NOW + 2)) ob "$h" digest)" "unknown: item (mate) - Synthetic ask; owner summary observed 3601s ago is stale" \
+    "summary age is judged when the digest is read"
+  snapshot "$snap" '{"generated_age":99999,"mates":[{"id":"mate","state":"no_active_work"}]}'
+  out=$(ob "$h" reconcile --snapshot "$snap")
+  assert_contains "$out" "evidence-stale: fleet evidence is stale" "an old saved snapshot keeps its own generation time"
+  assert_not_contains "$out" "uncovered" "an old snapshot never proves absence"
+  snapshot "$snap" '{"mates":[{"id":"mate","state":"no_active_work","partial":true}]}'
+  assert_contains "$(ob "$h" reconcile --snapshot "$snap")" "unknown: item (mate) - Synthetic ask; owner summary is partial" \
+    "a partial projection cannot prove absence"
+  ob "$h" update item --match "specific project" --evidence fixture >/dev/null
+  snapshot "$snap" '{"mates":[{"id":"mate","partial":true,"active":[["c1","Specific project rollout"]]}]}'
+  assert_not_contains "$(ob "$h" reconcile --snapshot "$snap")" "item" "a visible positive match in a partial projection still covers"
+  snapshot "$snap" '{"mates":[{"id":"mate","active":[["child","XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX…"]]}]}'
+  assert_contains "$(ob "$h" reconcile --snapshot "$snap")" "unknown: item (mate) - Synthetic ask; matching work child has no proven live state" \
+    "a shortened title cannot prove absence"
+  ob "$h" update item --match none --evidence fixture >/dev/null
+  ob "$h" set item waiting_captain --hold decision --evidence fixture >/dev/null
+  snapshot "$snap" '{"mates":[{"id":"mate","queued":[["other","Other item","captain","live",null]],"queued_count":40,"omitted":["queued"]}]}'
+  out=$(ob "$h" reconcile --snapshot "$snap")
+  assert_contains "$out" "unknown: item (mate) - Synthetic ask; owner summary omits queued rows; hold decision is not in the shown rows" \
+    "a hold outside the queue bound is unknown"
+  assert_not_contains "$out" "hold-released" "an omitted hold is never reported released"
+  ob "$h" set item active --evidence fixture >/dev/null
+  snapshot "$snap" '{"mates":[{"id":"mate","queued":[["item","Queued item"]],"active_count":16,"omitted":["active_children"]}]}'
+  assert_contains "$(ob "$h" reconcile --snapshot "$snap")" "unknown: item (mate) - Synthetic ask; owner summary omits active rows" \
+    "a queued match with omitted active rows is unknown, not queued-only"
+
+  h=$(new_home review-main)
+  ob "$h" add --id finished --kind ask --title "Finished worker" --owner main --source s >/dev/null
+  ob "$h" add --id orphan --kind ask --title "Orphan row" --owner main --source s >/dev/null
+  snapshot "$snap" '{"tasks":[["finished","failed"]],"backlog":[["orphan","in_flight","orphan work",null,null,null,"worker"]],
+    "main_inventory":{"valid":false,"reason":"in-flight backlog item has no child metadata","orphan_in_flight":["orphan"],"unstructured_current_count":0}}'
+  out=$(ob "$h" reconcile --snapshot "$snap")
+  assert_contains "$out" "uncovered: finished (main)" "terminal task metadata is no live proof"
+  assert_contains "$out" "unknown: orphan (main) - Orphan row; matching work orphan has no proven live state" "an orphan worker row is no live proof"
+  snapshot "$snap" '{"main_inventory":{"valid":false,"reason":"unstructured current backlog row","orphan_in_flight":[],"unstructured_current_count":1}}'
+  assert_contains "$(ob "$h" reconcile --snapshot "$snap")" "unknown: finished (main) - Finished worker; main backlog has unstructured current rows" \
+    "an unstructured current backlog cannot prove absence"
+
+  h=$(new_home review-race)
+  ob "$h" add --id item --kind ask --title "Race" --owner main --source s >/dev/null
+  snapshot "$TMP_ROOT/race.json" '{}'
+  fifo="$h/delayed.json"
+  mkfifo "$fifo"
+  FM_HOME="$h" "$OB" check --snapshot "$fifo" > "$h/old.out" &
+  old_pid=$!
+  for i in $(seq 1 100); do
+    [ -s "$h/state/obligations/attempt-seq" ] && break
+    sleep 0.05
+  done
+  out=$(ob "$h" check --snapshot "$h/missing.json")
+  assert_contains "$out" "evidence-unavailable" "the newer failed observation wakes"
+  cat "$TMP_ROOT/race.json" > "$fifo"
+  wait "$old_pid"
+  assert_equals "$(cat "$h/old.out")" "" "an older check finishing later neither republishes nor wakes"
+  assert_contains "$(ob "$h" digest)" "evidence-unavailable" "the newer observation stays published"
+
+  h=$(new_home review-display)
+  ob "$h" add --id leak --kind ask --title "token=sk-XXXXXXXXXXXXXXXXXXXXXXXX" --owner main --source s >/dev/null
+  snapshot "$snap" '{}'
+  out=$(ob "$h" check --snapshot "$snap")
+  assert_not_contains "$out" "sk-XXXX" "watcher wake text is redacted"
+  assert_not_contains "$(ob "$h" digest)" "sk-XXXX" "digest text is redacted"
+  printf '\377' > "$h/data/obligations.json"
+  out=$(ob "$h" check --snapshot "$snap") || rc=$?
+  expect_code 0 "$rc" "a corrupt ledger check still exits 0"
+  assert_contains "$out" "ledger-malformed: obligations ledger unusable: ledger is not valid UTF-8" "a corrupt ledger wakes visibly"
+
+  h=$(new_home review-match)
+  rc=0
+  ob "$h" add --id slow --kind ask --title Slow --owner main --source s --match '^(a+)+$' >/dev/null 2>&1 || rc=$?
+  expect_code 1 "$rc" "a regex matcher is refused at write time"
+  printf '{"schema":"fm-obligations.v1","obligations":[{"id":"slow","kind":"ask","title":"Slow","owner":"main","source":"s","status":"active","match":"^(a+)+$"}]}\n' \
+    > "$h/data/obligations.json"
+  snapshot "$snap" '{"tasks":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaax"]}'
+  out=$(timeout 5 env FM_HOME="$h" "$OB" reconcile --snapshot "$snap") || fail "a hand-edited matcher stalled reconcile"
+  assert_contains "$out" "match-invalid: slow (main)" "a hand-edited unsupported matcher is reported, never evaluated"
+  pass "review counterexamples: ages, partial and bounded surfaces, terminal evidence, publication order, redaction"
+}
+
 fm_test_run test_coverage test_lifecycle test_unknown_is_never_uncovered test_digest_and_check \
-  test_malformed_and_concurrency test_precompact_and_inject test_real_snapshot
+  test_malformed_and_concurrency test_precompact_and_inject test_real_snapshot test_review_counterexamples
