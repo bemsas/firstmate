@@ -516,7 +516,7 @@ Register both commands by absolute path; the script header owns the exact payloa
 A home opts in by creating its first record with `add`; a home without `data/obligations.json` sees no change.
 The ledger tracks obligations only: work items stay in the backlog, captain decisions stay with `bin/fm-captain-hold.sh`, and an obligation links to them by id rather than copying their state.
 Coverage is derived, never stored: `reconcile` reads `bin/fm-fleet-snapshot.sh --json`, so the snapshot remains the owner of backlog rows, captain-hold buckets, task records, and secondmate summaries.
-An owner whose evidence is stale, unreadable, unregistered, or truncated is reported as unknown, never as uncovered.
+An owner whose evidence is stale, unreadable, unregistered, partial, or truncated is reported as unknown, never as uncovered, and a hold missing from an incomplete summary is unknown rather than released.
 Status changes need operator-supplied evidence and are kept in each record's history; nothing is inferred from transcripts or worker text.
 The ledger covers only obligations someone registered, so recording a new captain ask or promise remains a supervisor step.
 
@@ -526,12 +526,12 @@ The script header owns the schema, finding codes, tunables, and output.
 ### Delegation guard (Claude primary)
 
 `bin/fm-delegation-pretool-check.sh` is a `PreToolUse` guard that denies a supervising home's hands-on project work: edits, git mutations, and test or build runs aimed at a project clone or another git work tree, and edits to shared tracked firstmate material while any task record exists.
-Private operational state under `data/`, `state/`, and `config/`, paths outside any git work tree, and firstmate's own `bin/fm-*` scripts stay allowed.
+Private operational state under `data/`, `state/`, and `config/`, paths outside any git work tree, and the guard's own `bin/fm-*` owner scripts stay allowed.
 A home lists any other private record path that sits in a guarded place, such as an asks log kept as a clone under `projects/`, one per line in `config/delegation-guard-allow`.
 It runs only in a genuine primary home, so crewmate and scout task worktrees are unaffected, and it has no environment bypass.
-A concrete operation the captain approves in the moment is recorded as a bounded, expiring grant with `bin/fm-delegation-guard.py grant`, scoped to named operations inside one named path.
+A concrete operation the captain approves in the moment is recorded as a bounded, expiring grant with `bin/fm-delegation-guard.py grant`, scoped to named operations inside one named path that reaches at most one project clone.
 It is opt-in per home: register the wrapper by absolute path in that home's private `.claude/settings.local.json` with the matcher `Edit|Write|MultiEdit|NotebookEdit|Bash`.
-It is a seatbelt against supervisor drift, not a sandbox: nested shells such as `bash -c` are not parsed.
+It is a seatbelt against supervisor drift, not a sandbox: nested shells such as `bash -c`, variable expansion, and aliases are not evaluated.
 `bin/fm-delegation-guard.py --help` owns the classification, grant limits, and deny payload.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
