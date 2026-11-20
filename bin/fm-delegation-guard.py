@@ -15,7 +15,8 @@
 # and prints nothing to allow, or one Claude deny object
 #   {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",
 #    "permissionDecisionReason":"[delegate-guard] ..."}}
-# on stdout; it always exits 0. Malformed payloads and unparseable shell allow.
+# on stdout; it always exits 0. Malformed payloads (including a non-string
+# tool_name) and unparseable shell allow.
 #
 # A target path (realpath, nearest existing ancestor) is classed as:
 #   private  under <home>/data, <home>/state, or <home>/config, under a standing
@@ -36,24 +37,38 @@
 #   test  test and build runners (npm/pnpm/yarn/bun test|build|run, npx,
 #         pytest, playwright, vitest, jest, cargo, go test|build, make,
 #         gradle, mvn, tox), judged by the shell cwd or their directory flag.
-# The shell cwd starts at the payload cwd and follows literal cd/pushd words.
-# Commands whose first word is a bin/fm-*.sh or bin/fm-*.py script are always
-# allowed: those owners carry their own guarded project paths. Nested shells
-# (bash -c, eval, python -c) are not parsed; the guard is a mistake seatbelt
-# for an orchestrating supervisor, not a sandbox.
+# Option values are read in their -x V, -xV, --long V and --long=V forms (for
+# example npm --prefix, cp/mv --target-directory, bundled sed -ni, patch's
+# original-file argument), mv judges its sources as well as its target, and
+# removing or moving a directory that contains the home or its projects/ is
+# denied. Running a program file whose path lies in a guarded place is a test
+# operation. The shell cwd starts at the payload cwd and follows literal
+# cd, cd -, pushd, and popd words, scoped by subshell parentheses.
+# A command whose first word is a path to an existing fm-*.sh or fm-*.py in this
+# guard's own bin/ directory is allowed: those owners carry their own guarded
+# project paths; a same-named script elsewhere gets no exemption. Nested shells
+# (bash -c, eval, python -c), variable or command expansion, and aliases are not
+# evaluated; the guard is a mistake seatbelt for an orchestrating supervisor,
+# not a sandbox.
 #
 # config/delegation-guard-allow is the operator's standing list of private
 # record paths that happen to sit in a guarded place, such as an asks log kept
 # as a clone under projects/: one path per line, relative to the home or
 # absolute; blank lines and # comments are skipped. An entry that is /, $HOME,
-# the home, <home>/projects, or an ancestor of any of them is ignored.
+# the home, <home>/projects, or an ancestor of any of them is ignored, and an
+# unreadable or undecodable list allows nothing extra.
 # There is no environment bypass. A concrete captain-approved operation is
 # recorded as a grant in <home>/state/delegation-grants.json (flock on
 # <home>/state/.delegation-grants.lock, atomic replace): an absolute existing
-# PATH that is not /, $HOME, the home itself, or an ancestor of any of them; an
-# operation subset of edit,git,test; the captain's words as --reason; and a
-# lifetime of --minutes (default 30, at most 240). A grant allows exactly the
-# named operations on targets inside PATH until it expires. `list` prints the
+# PATH that is not /, $HOME, the home itself, <home>/projects, or an ancestor of
+# any of them, so a grant reaches at most one project clone; an operation subset
+# of edit,git,test; the captain's words as --reason; and a lifetime of --minutes
+# (default 30, at most 240). The same validator runs when a grant is written and
+# every time the file is read: a file without schema fm-delegation-grants.v1 is
+# ignored, and a record with a bad id, a non-canonical or too-broad path, unknown
+# ops, no reason, or a lifetime outside 1..240 minutes is skipped with a
+# one-line stderr diagnostic. A grant allows exactly the named operations on
+# targets inside PATH until it expires. `list` prints the
 # live grants; `revoke` removes one early. FM_DELEGATION_NOW_EPOCH pins the
 # clock for tests.
 import json
@@ -80,6 +95,9 @@ DIRECT_RUNNERS = {'pytest', 'playwright', 'vitest', 'jest', 'make', 'gradle', 'g
 LANG_RUNNERS = {'cargo': {'test', 'build', 'run', 'bench'}, 'go': {'test', 'build', 'run', 'generate'}}
 DIR_FLAGS = {'--prefix', '--dir', '-C', '--cwd', '--manifest-path', '--rootdir', '--project'}
 MAX_MINUTES = 240
+GRANTS_SCHEMA = 'fm-delegation-grants.v1'
+GRANT_ID_RE = re.compile(r'^g[0-9]{1,12}-[0-9a-f]{6}$')
+FM_SCRIPT_RE = re.compile(r'^fm-[A-Za-z0-9._-]+\.(sh|py)$')
 
 
 def now_epoch():
@@ -117,9 +135,10 @@ class Policy:
 
     def standing_allow(self):
         try:
-            lines = Path(self.home, 'config', 'delegation-guard-allow').read_text(encoding='utf-8').splitlines()
-        except OSError:
-            return []
+            with open(os.path.join(self.home, 'config', 'delegation-guard-allow'), 'rb') as handle:
+                lines = handle.read(64 * 1024).decode('utf-8').splitlines()
+        except (OSError, ValueError):
+            return []  # a missing or malformed optional list allows nothing extra
         broad = ('/', self.user_home, self.home, os.path.join(self.home, 'projects'))
         out = []
         for line in lines:
@@ -168,6 +187,24 @@ class Policy:
             return ('tracked' if self.live() else 'private'), path
         return ('repo' if self.repo_root(path) else 'private'), path
 
+    def trusted_script(self, word, cwd):
+        """True only for an existing fm-* script in this guard's own bin directory."""
+        if '/' not in word or not FM_SCRIPT_RE.match(os.path.basename(word)):
+            return False
+        path = os.path.realpath(os.path.join(cwd, os.path.expanduser(word)))
+        return os.path.dirname(path) == os.path.join(self.root, 'bin') and os.path.isfile(path)
+
+    def destructive(self, raw_path, cwd):
+        """Removing or moving a directory that holds the home or its project clones."""
+        if not isinstance(raw_path, str) or not raw_path:
+            return None
+        path = os.path.expanduser(raw_path)
+        path = real(path if os.path.isabs(path) else os.path.join(cwd, path))
+        for protected in (os.path.join(self.home, 'projects'), self.home, self.root):
+            if inside(protected, path) and os.path.isdir(path):
+                return 'edit on %s (a directory containing %s)' % (path, protected)
+        return None
+
     def granted(self, op, path):
         if self.grants is None:
             self.grants = live_grants(load_grants(Path(self.home)), self.now)
@@ -194,33 +231,78 @@ def tokens_of(command):
     return list(lexer)
 
 
-def is_fm_script(word):
-    return bool(re.match(r'^fm-[A-Za-z0-9._-]+\.(sh|py)$', os.path.basename(word)))
-
-
 def positionals(args, value_opts=()):
-    out, skip = [], False
+    out, skip, ended = [], False, False
     for a in args:
-        if skip:
+        if ended:
+            out.append(a)
+        elif skip:
             skip = False
+        elif a == '--':
+            ended = True
         elif a in value_opts:
             skip = True
-        elif a == '--' or not a.startswith('-'):
+        elif not a.startswith('-') or a == '-':
             out.append(a)
     return out
+
+
+def option_values(args, short, long):
+    """Values of one option in its -x V, -xV, --long V and --long=V forms."""
+    out = []
+    for n, a in enumerate(args):
+        if a in (short, long):
+            if n + 1 < len(args):
+                out.append(args[n + 1])
+        elif a.startswith(long + '='):
+            out.append(a.split('=', 1)[1])
+        elif short and a.startswith(short) and not a.startswith('--') and len(a) > len(short):
+            out.append(a[len(short):])
+    return out
+
+
+def sed_targets(args):
+    """Files GNU/BSD sed edits in place: none unless -i/--in-place is given,
+    including inside a bundled short cluster such as -ni."""
+    inplace, scripted, pos, i = False, False, [], 0
+    while i < len(args):
+        a = args[i]
+        if a == '--':
+            pos.extend(args[i + 1:])
+            break
+        if a.startswith('--'):
+            name = a.split('=', 1)[0]
+            if name == '--in-place':
+                inplace = True
+            elif name in ('--expression', '--file', '--line-length'):
+                scripted = scripted or name != '--line-length'
+                i += 0 if '=' in a else 1
+        elif a.startswith('-') and len(a) > 1:
+            for j, c in enumerate(a[1:], 1):
+                if c == 'i':
+                    inplace = True
+                    break  # the rest of the cluster is a backup suffix
+                if c in 'efl':
+                    scripted = scripted or c != 'l'
+                    i += 1 if j == len(a) - 1 else 0
+                    break
+        else:
+            pos.append(a)
+        i += 1
+    if not inplace:
+        return []
+    return pos if scripted else pos[1:]
 
 
 def mutated_paths(cmd, args):
     """The path arguments a file-mutating command writes, never its sources."""
     if cmd == 'sed':
-        if not any(a.startswith('-i') or a.startswith('--in-place') for a in args):
-            return []
-        scripted = any(a in ('-e', '-f', '--expression', '--file') for a in args)
-        pos = positionals(args, ('-e', '-f', '--expression', '--file', '-l'))
-        return pos if scripted else pos[1:]
-    if cmd in ('cp', 'install', 'ln', 'rsync'):
-        pos = positionals(args, ('-t', '-m', '-o', '-g', '-S', '--target-directory', '-e'))
-        target = [args[n + 1] for n, a in enumerate(args[:-1]) if a in ('-t', '--target-directory')]
+        return sed_targets(args)
+    if cmd in ('cp', 'install', 'ln', 'rsync', 'mv'):
+        pos = positionals(args, ('-t', '-m', '-o', '-g', '-S', '--target-directory', '-e', '--suffix'))
+        target = option_values(args, '-t', '--target-directory')
+        if cmd == 'mv':
+            return pos + target  # mv also removes its sources
         return target or pos[-1:]
     if cmd in ('chmod', 'chown'):
         return positionals(args)[1:]
@@ -229,7 +311,11 @@ def mutated_paths(cmd, args):
     if cmd == 'dd':
         return [a[3:] for a in args if a.startswith('of=')]
     if cmd == 'patch':
-        return [args[n + 1] for n, a in enumerate(args[:-1]) if a in ('-d', '--directory')] or ['.']
+        where = option_values(args, '-d', '--directory') or ['.']
+        named = positionals(args, ('-p', '-i', '--input', '-o', '--output', '-d', '--directory', '-D',
+                                   '--ifdef', '-F', '--fuzz', '-V', '-z', '--suffix', '-B', '-Y',
+                                   '-r', '--reject-file', '-g', '--get'))
+        return where + named[:1] + option_values(args, '-o', '--output')
     return positionals(args)
 
 
@@ -238,20 +324,21 @@ def shell_problems(policy, command, cwd):
         tokens = tokens_of(command)
     except ValueError:
         return []  # unparseable shell allows: transport, not policy
-    problems, stack, words, i = [], [], [], 0
+    problems, saved, words, i = [], [], [], 0
+    shell = {'cwd': cwd, 'dirs': [], 'old': cwd}
 
-    def flush(words, cwd):
-        return run_segment(policy, words, cwd, problems)
+    def flush(words):
+        run_segment(policy, words, shell, problems)
     while i < len(tokens):
         tok = tokens[i]
         if tok and all(c in ';&|()\n' for c in tok):
-            cwd = flush(words, cwd)
+            flush(words)
             words = []
             for c in tok:
                 if c == '(':
-                    stack.append(cwd)
-                elif c == ')' and stack:
-                    cwd = stack.pop()
+                    saved.append(dict(shell, dirs=list(shell['dirs'])))
+                elif c == ')' and saved:
+                    shell = saved.pop()
             i += 1
             continue
         if tok and all(c in '<>&|0123456789' for c in tok) and ('<' in tok or '>' in tok):
@@ -260,17 +347,18 @@ def shell_problems(policy, command, cwd):
             target = tokens[i + 1] if i + 1 < len(tokens) else ''
             # '>&' duplicates a descriptor; every other '>' form writes a file.
             if '>' in tok and '&' not in tok.replace('&>', '') and target and target != '/dev/null':
-                problems.append(policy.verdict('edit', target, cwd))
+                problems.append(policy.verdict('edit', target, shell['cwd']))
             i += 2
             continue
         words.append(tok)
         i += 1
-    flush(words, cwd)
+    flush(words)
     return [p for p in problems if p]
 
 
-def run_segment(policy, words, cwd, problems):
-    """Judge one simple command; return the cwd that follows it."""
+def run_segment(policy, words, shell, problems):
+    """Judge one simple command and apply its literal cd/pushd/popd to shell."""
+    cwd = shell['cwd']
     words = list(words)
     while words and re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', words[0]):
         words.pop(0)
@@ -279,21 +367,41 @@ def run_segment(policy, words, cwd, problems):
         while words and (words[0].startswith('-') or re.match(r'^\d+[smh]?$', words[0])
                          or re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', words[0])):
             words.pop(0)
-    if not words or is_fm_script(words[0]):
-        return cwd
+    if not words or policy.trusted_script(words[0], cwd):
+        return
     cmd, args = os.path.basename(words[0]), words[1:]
-    if cmd in ('cd', 'pushd'):
-        target = next((a for a in args if not a.startswith('-')), '~')
-        return real(os.path.join(cwd, os.path.expanduser(target)))
+    if cmd in ('cd', 'pushd', 'popd'):
+        target = next((a for a in args if not a.startswith('-') or a == '-'), None)
+        if cmd == 'popd':
+            if shell['dirs']:
+                shell['old'], shell['cwd'] = cwd, shell['dirs'].pop()
+            return
+        if cmd == 'pushd' and target is None:
+            if shell['dirs']:
+                shell['dirs'][-1], shell['cwd'] = cwd, shell['dirs'][-1]
+            return
+        if target == '-':
+            new = shell['old']
+        else:
+            new = real(os.path.join(cwd, os.path.expanduser(target or '~')))
+        if cmd == 'pushd':
+            shell['dirs'].append(cwd)
+        shell['old'], shell['cwd'] = cwd, new
+        return
+    if '/' in words[0]:
+        # Executing a program file that lives in a guarded place runs project code.
+        problems.append(policy.verdict('test', words[0], cwd))
     if cmd == 'git':
         problems.append(git_problem(policy, args, cwd))
     elif cmd == 'sed' or cmd in FILE_MUTATORS:
-        problems.extend(policy.verdict('edit', a, cwd) for a in mutated_paths(cmd, args))
+        targets = mutated_paths(cmd, args)
+        problems.extend(policy.verdict('edit', a, cwd) for a in targets)
+        if cmd in ('rm', 'rmdir', 'mv'):
+            problems.extend(policy.destructive(a, cwd) for a in targets)
     else:
         where = runner_dir(cmd, args, cwd)
         if where:
             problems.append(policy.verdict('test', where, cwd))
-    return cwd
 
 
 def git_problem(policy, args, cwd):
@@ -336,15 +444,28 @@ def git_problem(policy, args, cwd):
     return policy.verdict('git', os.path.join(where, '.'), cwd)
 
 
+def first_word(args):
+    """The subcommand: the first argument that is neither an option nor a value."""
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
+        elif a in DIR_FLAGS:
+            skip = True
+        elif not a.startswith('-'):
+            return a
+    return ''
+
+
 def runner_dir(cmd, args, cwd):
     heavy = False
     if cmd in PKG_RUNNERS:
-        first = next((a for a in args if not a.startswith('-')), '')
+        first = first_word(args)
         heavy = first in PKG_HEAVY or (cmd == 'yarn' and first not in ('', 'info', 'why', 'list', 'config'))
     elif cmd in DIRECT_RUNNERS:
         heavy = True
     elif cmd in LANG_RUNNERS:
-        first = next((a for a in args if not a.startswith('-')), '')
+        first = first_word(args)
         heavy = first in LANG_RUNNERS[cmd]
     elif cmd in ('python', 'python3') and args[:2] == ['-m', 'pytest']:
         heavy = True
@@ -381,6 +502,8 @@ def cmd_check(home):
     if not isinstance(payload, dict):
         return 0
     tool = payload.get('tool_name')
+    if not isinstance(tool, str):
+        return 0  # malformed payload: not a tool this guard judges
     tool_input = payload.get('tool_input') if isinstance(payload.get('tool_input'), dict) else {}
     cwd = payload.get('cwd') if isinstance(payload.get('cwd'), str) and os.path.isabs(payload.get('cwd', '')) else str(home)
     policy = Policy(home, now_epoch())
@@ -402,18 +525,55 @@ def grants_path(home):
     return Path(home) / 'state' / 'delegation-grants.json'
 
 
+def scope_problem(target, home):
+    """Why a grant path is too broad: it holds /, $HOME, the home, or every project."""
+    home_real = os.path.realpath(str(home))
+    for broad in ('/', os.path.realpath(os.path.expanduser('~')), home_real,
+                  os.path.join(home_real, 'projects')):
+        if inside(broad, target):
+            return '--path %s is too broad: it contains %s' % (target, broad)
+    return None
+
+
+def grant_problem(g, home, now):
+    """The single grant validator, applied when a grant is written and read."""
+    if not isinstance(g, dict):
+        return 'grant is not an object'
+    if not isinstance(g.get('id'), str) or not GRANT_ID_RE.match(g['id']):
+        return 'grant id is invalid'
+    path = g.get('path')
+    if not isinstance(path, str) or not os.path.isabs(path) or os.path.realpath(path) != path \
+            or not os.path.exists(path):
+        return 'grant path must be an existing canonical absolute path'
+    problem = scope_problem(path, home)
+    if problem:
+        return problem
+    ops = g.get('ops')
+    if not isinstance(ops, list) or not ops or len(set(ops)) != len(ops) or any(o not in OPS for o in ops):
+        return 'grant ops must be a list from %s' % ','.join(OPS)
+    if not isinstance(g.get('reason'), str) or not g['reason'].strip() or len(g['reason']) > 400:
+        return 'grant needs the captain words as its reason'
+    start, end = g.get('granted_epoch'), g.get('expires_epoch')
+    if not isinstance(start, int) or not isinstance(end, int) or isinstance(start, bool) \
+            or isinstance(end, bool) or start > now + 300 or not 0 < end - start <= MAX_MINUTES * 60:
+        return 'grant lifetime is outside 1..%d minutes from its start' % MAX_MINUTES
+    return None
+
+
 def load_grants(home):
     try:
-        data = json.loads(grants_path(home).read_text(encoding='utf-8'))
-    except (OSError, ValueError):
+        with open(grants_path(home), 'rb') as handle:
+            data = json.loads(handle.read(1024 * 1024).decode('utf-8'))
+    except (OSError, ValueError, RecursionError):
         return []
-    rows = data.get('grants') if isinstance(data, dict) else None
-    out = []
-    for g in rows if isinstance(rows, list) else []:
-        if (isinstance(g, dict) and isinstance(g.get('path'), str) and os.path.isabs(g['path'])
-                and isinstance(g.get('ops'), list) and isinstance(g.get('expires_epoch'), int)
-                and isinstance(g.get('id'), str)):
-            out.append(g)
+    if not isinstance(data, dict) or data.get('schema') != GRANTS_SCHEMA or not isinstance(data.get('grants'), list):
+        print('fm-delegation-guard: ignored a grants file without schema %s' % GRANTS_SCHEMA, file=sys.stderr)
+        return []
+    now = now_epoch()
+    out = [g for g in data['grants'] if grant_problem(g, home, now) is None]
+    if len(out) != len(data['grants']):
+        print('fm-delegation-guard: ignored %d invalid grant record(s)' % (len(data['grants']) - len(out)),
+              file=sys.stderr)
     return out
 
 
@@ -430,7 +590,7 @@ def save_grants(home, mutate):
         grants = mutate(live_grants(load_grants(home), now_epoch()))
         fd, tmp = tempfile.mkstemp(prefix='.delegation-grants.', dir=str(state))
         with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-            json.dump({'schema': 'fm-delegation-grants.v1', 'grants': grants}, handle, indent=2, sort_keys=True)
+            json.dump({'schema': GRANTS_SCHEMA, 'grants': grants}, handle, indent=2, sort_keys=True)
             handle.write('\n')
         os.replace(tmp, grants_path(home))
 
@@ -443,10 +603,9 @@ def cmd_grant(home, opts):
     if not os.path.isabs(path) or not os.path.exists(path):
         raise ValueError('--path must be an existing absolute path')
     target = os.path.realpath(path)
-    home_real = os.path.realpath(str(home))
-    for broad in ('/', os.path.realpath(os.path.expanduser('~')), home_real):
-        if inside(broad, target):
-            raise ValueError('--path %s is too broad: it contains %s' % (target, broad))
+    problem = scope_problem(target, home)
+    if problem:
+        raise ValueError(problem)
     op_list = sorted(set(o.strip() for o in ops.split(',') if o.strip()))
     if not op_list or any(o not in OPS for o in op_list):
         raise ValueError('--ops must be a comma list from %s' % ','.join(OPS))
@@ -456,6 +615,9 @@ def cmd_grant(home, opts):
     grant = {'id': 'g%d-%s' % (now, os.urandom(3).hex()), 'path': target, 'ops': op_list,
              'reason': ' '.join(reason.split())[:400], 'granted_epoch': now,
              'expires_epoch': now + int(minutes) * 60}
+    problem = grant_problem(grant, home, now)
+    if problem:
+        raise ValueError(problem)
     save_grants(home, lambda grants: grants + [grant])
     return 'granted: %s %s on %s for %s minute(s)' % (grant['id'], ','.join(op_list), target, minutes)
 

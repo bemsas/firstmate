@@ -14,6 +14,9 @@
 #      are refused; no environment variable bypasses the guard.
 #   4. scope: a linked worker worktree and a non-firstmate directory are inert,
 #      and malformed or unparseable input allows.
+#   5. the independent review's counterexamples: ordinary option and
+#      directory-stack spellings, destructive ancestors, owner-script identity,
+#      replayed grant validation, and worker binding under an inherited hook.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -23,11 +26,14 @@ TMP_ROOT=$(fm_test_tmproot fm-delegation-guard)
 H="$TMP_ROOT/home"
 EXT="$TMP_ROOT/ext"
 WT="$TMP_ROOT/worker-wt"
-FAKE_HOME="$TMP_ROOT/userhome"
+# The fixture root is the fake $HOME and carries a .git marker, so the guard's
+# documented $HOME-rooted work tree exemption ends every ancestor walk here no
+# matter which Git checkout the temporary directory sits inside.
+FAKE_HOME="$TMP_ROOT"
 
 setup_world() {
   fm_git_init_commit "$H"
-  mkdir -p "$H/bin" "$H/data" "$H/state" "$H/config" "$FAKE_HOME" "$TMP_ROOT/scratch"
+  mkdir -p "$H/bin" "$H/data" "$H/state" "$H/config" "$FAKE_HOME/.git" "$TMP_ROOT/scratch"
   printf '# agents\n' > "$H/AGENTS.md"
   cp "$ROOT/bin/fm-delegation-pretool-check.sh" "$ROOT/bin/fm-delegation-guard.py" \
     "$ROOT/bin/fm-primary-scope-lib.sh" "$H/bin/"
@@ -42,7 +48,8 @@ setup_world() {
 # hook <home-root> <json>: run the entrypoint as Claude would; prints its stdout.
 hook() {
   local rc=0 out
-  out=$(printf '%s' "$2" | env -u FM_HOME HOME="$FAKE_HOME" "$1/bin/fm-delegation-pretool-check.sh") || rc=$?
+  out=$(printf '%s' "$2" | env -u FM_HOME -u FM_TASK_ID -u CLAUDE_PROJECT_DIR HOME="$FAKE_HOME" \
+    "$1/bin/fm-delegation-pretool-check.sh") || rc=$?
   expect_code 0 "$rc" "hook exits 0"
   printf '%s' "$out"
 }
@@ -175,5 +182,59 @@ test_scope_and_transport() {
   pass "scope: worker worktrees and broken input are inert"
 }
 
+test_review_counterexamples() {
+  local out
+  expect deny "npm with a --prefix value" Bash command "npm --prefix projects/app test"
+  expect deny "cp --target-directory= form" Bash command "cp --target-directory=projects/app data/file"
+  expect deny "mv into a --target-directory" Bash command "mv --target-directory=projects/app data/file"
+  expect deny "bundled GNU sed -ni" Bash command "sed -ni 's/a/b/p' projects/app/README.md"
+  expect deny "patch names its original file" Bash command "patch ../projects/app/README.md < tiny.diff" "$H/data"
+  expect deny "popd restores a project cwd" Bash command "cd projects/app; pushd ../../data; popd; touch file"
+  expect allow "pushd into private data" Bash command "cd projects/app; pushd ../../data; touch file"
+  expect deny "removing the home holds its clones" Bash command "rm -r ."
+  printf '#!/bin/sh\nexit 0\n' > "$H/projects/app/fm-build.sh"
+  chmod +x "$H/projects/app/fm-build.sh"
+  expect deny "a project script named like an owner" Bash command "projects/app/fm-build.sh"
+  expect allow "the real owner script" Bash command "bin/fm-delegation-guard.py list"
+  rm -f "$H/projects/app/fm-build.sh"
+  fm_git_init_commit "$H/projects/other"
+  out=$(env -u FM_HOME HOME="$FAKE_HOME" "$H/bin/fm-delegation-guard.py" grant --path "$H/projects" \
+    --ops edit --minutes 10 --reason "captain: everything" 2>&1) && fail "a grant over every project was recorded: $out"
+  python3 - "$H" <<'PY'
+import json, sys, time
+home = sys.argv[1]
+now = int(time.time())
+grant = lambda gid, path, **kw: dict(dict(id=gid, path=path, ops=['edit'], reason='replayed',
+                                          granted_epoch=now, expires_epoch=now + 600), **kw)
+json.dump({'schema': 'fm-delegation-grants.v1', 'grants': [
+    grant('g1-aaaaaa', home + '/projects'),
+    grant('g2-bbbbbb', home + '/projects/app', expires_epoch=now + 999999),
+    grant('g3-cccccc', home + '/projects/app', reason=''),
+    grant('g4-dddddd', '/')]}, open(home + '/state/delegation-grants.json', 'w'))
+PY
+  expect deny "replayed broad, overlong, and reasonless grants are ignored" Edit file_path "$H/projects/other/README"
+  expect deny "replayed overlong grant on one project is ignored" Edit file_path "$H/projects/app/README.md"
+  printf '{"schema":"wrong","grants":[{"id":"g1-aaaaaa","path":"/","ops":["edit"],"expires_epoch":9999999999}]}' \
+    > "$H/state/delegation-grants.json"
+  expect deny "a grants file with the wrong schema is ignored" Edit file_path "$H/projects/app/README.md"
+  rm -f "$H/state/delegation-grants.json"
+  printf '\377\n' > "$H/config/delegation-guard-allow"
+  expect deny "an undecodable allowlist allows nothing and keeps the policy" Edit file_path "$H/projects/app/README.md"
+  rm -f "$H/config/delegation-guard-allow"
+  out=$(hook "$H" '{"tool_name":["Edit"],"tool_input":{"file_path":"projects/app/README.md"}}')
+  assert_equals "$out" "" "a non-string tool name is not judged"
+  out=$(printf "%s" "$(payload Edit file_path "$WT/AGENTS.md" "$WT")" | env -u FM_HOME HOME="$FAKE_HOME" FM_HOME="$H" FM_TASK_ID=worker \
+    "$H/bin/fm-delegation-pretool-check.sh")
+  assert_equals "$out" "" "a marked worker running the primary's absolute hook is inert"
+  out=$(printf "%s" "$(payload Edit file_path "$WT/AGENTS.md" "$WT")" | env -u FM_HOME -u FM_TASK_ID HOME="$FAKE_HOME" FM_HOME="$H" \
+    CLAUDE_PROJECT_DIR="$WT" "$H/bin/fm-delegation-pretool-check.sh")
+  assert_equals "$out" "" "a session whose Claude project is a task worktree is inert"
+  out=$(payload Edit file_path "$H/projects/app/README.md" | env -u FM_HOME -u FM_TASK_ID HOME="$FAKE_HOME" \
+    CLAUDE_PROJECT_DIR="$H" "$H/bin/fm-delegation-pretool-check.sh")
+  assert_equals "$(decision "$out")" "deny" "the primary's own Claude project stays guarded"
+  pass "review counterexamples: ordinary mutation spellings, owner scripts, grant replay, worker binding"
+}
+
 setup_world
-fm_test_run test_file_tools test_shell test_grants test_standing_allow test_scope_and_transport
+fm_test_run test_file_tools test_shell test_grants test_standing_allow test_scope_and_transport \
+  test_review_counterexamples

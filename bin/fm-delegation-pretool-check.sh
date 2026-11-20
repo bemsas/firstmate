@@ -11,17 +11,20 @@
 # primary home (a plain checkout or a marked secondmate home, per
 # bin/fm-primary-scope-lib.sh) whose state directory exists. In a crewmate or
 # scout task worktree, which is a linked worktree, it exits 0 with no output
-# before reading the payload, so ordinary workers are never affected.
+# before reading the payload, so ordinary workers are never affected; a session
+# carrying the worker launch marker FM_TASK_ID, or whose CLAUDE_PROJECT_DIR is a
+# linked task worktree, is inert too even when it inherited this absolute hook.
 # It is opt-in per home: register it by absolute path in that home's private
 # .claude/settings.local.json under PreToolUse, never in the tracked settings.
-# There is deliberately no environment bypass.
+# There is deliberately no bypass variable: FM_TASK_ID is the launch marker
+# bin/fm-spawn.sh gives only ship and scout workers, never a supervisor.
 #
 # Usage: <Claude PreToolUse JSON on stdin> | bin/fm-delegation-pretool-check.sh
 # Output: nothing (allow) or one Claude deny object on stdout; always exit 0.
 set -u
 
 case "${1:-}" in
-  -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
@@ -31,6 +34,13 @@ HOME_DIR=${FM_HOME:-$FM_ROOT}
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 fm_primary_scope_matches "$FM_ROOT" "$HOME_DIR/state" || exit 0
+# Bind to the session, not only to the registered path: a ship or scout worker
+# (fm-spawn's FM_TASK_ID marker) or a session whose own Claude project is a
+# linked task worktree stays inert even if it inherited this absolute hook.
+[ -z "${FM_TASK_ID:-}" ] || exit 0
+if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && PROJECT_ROOT=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null); then
+  fm_primary_root_matches "$PROJECT_ROOT" || exit 0
+fi
 command -v python3 >/dev/null 2>&1 || exit 0
 
 exec python3 -I -S "$SCRIPT_DIR/fm-delegation-guard.py" check --home "$HOME_DIR"
