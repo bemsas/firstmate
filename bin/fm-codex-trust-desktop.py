@@ -4,6 +4,7 @@
 Use --dry-run (stdout only) before --apply. Both resolve the same pane, process,
 Git and dialog evidence. Apply reports refusals on stdout for the Main watcher
 and keeps a private, fsynced JSONL journal under Main/state/codex-trust-desktop.
+The Herdr adapter owns the idle-shell proof used to skip retired endpoints.
 --task limits an attended check to HOME_ID/TASK (main, ops, or a local registry
 ID). The watcher leaves it unset. See configuration.md for registration.
 """
@@ -58,10 +59,10 @@ class AuditError(Exception):
     """Stop before any further input when the journal cannot persist."""
 
 
-def command(*args, timeout=2, env=None):
+def command(*args, timeout=2, env=None, stdin=None):
     try:
         return subprocess.run(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                              text=True, check=True, timeout=timeout).stdout
+                              text=True, check=True, timeout=timeout, input=stdin).stdout
     except (OSError, UnicodeError, subprocess.SubprocessError):
         raise Refusal("required command failed or timed out") from None
 
@@ -294,7 +295,42 @@ class Desktop:
         env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_")}
         return command(self.herdr, "--session", task.target["session"], *args, env=env)
 
-    def identity(self, task):
+    def pane(self, task):
+        pane = task.target["pane"]
+        view = json.loads(self.call(task, "pane", "get", pane))["result"]["pane"]
+        if (view["pane_id"] != pane or view["workspace_id"] != task.target["workspace"]
+                or view["tab_id"] != task.fields["herdr_tab_id"]
+                or view["foreground_cwd"] != str(task.worktree) or not SLUG.fullmatch(view["terminal_id"])):
+            raise Refusal("Herdr pane identity, foreground directory, or visible viewport changed")
+        return view
+
+    def retired(self, task, raw_info, foreground, shell):
+        if len(foreground) != 1 or foreground[0]["cwd"] != str(task.worktree):
+            return False
+        view = self.pane(task)
+        if view.get("agent") is not None or view["agent_status"] != "unknown":
+            return False
+        proc = Path("/proc") / str(shell)
+        if (not own(proc, stat.S_ISDIR)
+                or (proc / "exe").resolve(strict=True).name != Path(foreground[0]["name"]).name
+                or (proc / "cwd").resolve(strict=True) != task.worktree
+                or os.getpgid(shell) != shell):
+            return False
+        # Feed the adapter the exact process-info sample already read through
+        # the pinned Herdr client. It checks the real process table for children.
+        script = r'''
+source "$1"
+fm_backend_herdr_cli() { cat; }
+fm_backend_herdr_pane_idle_shell_sample "$2" "$3"
+'''
+        try:
+            return command("bash", "--noprofile", "--norc", "-ec", script, "_", BIN / "backends/herdr.sh",
+                           task.target["session"], task.target["pane"], stdin=raw_info,
+                           env={"PATH": os.environ.get("PATH", os.defpath), "LC_ALL": "C"}).strip() == str(shell)
+        except Refusal:
+            return False
+
+    def identity(self, task, *, allow_retired=False):
         homes, excluded = registry(self.main, self.ops)
         git_dir = task.binding(homes.values(), excluded)
         status = json.loads(self.call(task, "status", "--json"))
@@ -303,29 +339,32 @@ class Desktop:
                 or server["version"] != HERDR_VERSION or not server["compatible"]):
             raise Refusal(f"requires a running, compatible Herdr client and server {HERDR_VERSION}")
         pane = task.target["pane"]
-        info = json.loads(self.call(task, "pane", "process-info", "--pane", pane))["result"]["process_info"]
+        raw_info = self.call(task, "pane", "process-info", "--pane", pane)
+        info = json.loads(raw_info)["result"]["process_info"]
         if info["pane_id"] != pane:
             raise Refusal("Herdr returned a different foreground pane")
         pgid, shell = info["foreground_process_group_id"], info["shell_pid"]
         if type(pgid) is not int or pgid <= 1 or type(shell) is not int or shell <= 1:
             raise Refusal("Herdr cannot identify the pane foreground group")
-        candidates = [p for p in info["foreground_processes"] if p["name"] == "codex"]
+        foreground = info["foreground_processes"]
+        candidates = [p for p in foreground if p["name"] == "codex"]
+        if not candidates and allow_retired and pgid == shell and self.retired(task, raw_info, foreground, shell):
+            return None
         if len(candidates) != 1 or type(candidates[0]["pid"]) is not int:
             raise Refusal("pane has no unique native foreground Codex worker")
         pid = candidates[0]["pid"]
         if pid <= 1 or candidates[0]["cwd"] != str(task.worktree):
             raise Refusal("foreground Codex worktree differs from its owner record")
         start = process(pid, pgid, task, self.codex)
-        view = json.loads(self.call(task, "pane", "get", pane))["result"]["pane"]
-        if (view["pane_id"] != pane or view["workspace_id"] != task.target["workspace"]
-                or view["tab_id"] != task.fields["herdr_tab_id"] or view["agent"] != "codex"
-                or view["foreground_cwd"] != str(task.worktree) or view["scroll"]["offset_from_bottom"] != 0
-                or not SLUG.fullmatch(view["terminal_id"])):
+        view = self.pane(task)
+        if view.get("agent") != "codex" or view["scroll"]["offset_from_bottom"] != 0:
             raise Refusal("Herdr pane identity, foreground directory, or visible viewport changed")
         return (git_dir, shell, pgid, pid, start, view["terminal_id"])
 
     def observe(self, task, expected=None):
-        identity = self.identity(task)
+        identity = self.identity(task, allow_retired=expected is None)
+        if identity is None:
+            return None, None
         if expected is not None and identity != expected:
             raise Refusal("pane or foreground process changed")
         screen = self.call(task, "pane", "read", task.target["pane"], "--source", "visible", "--raw")

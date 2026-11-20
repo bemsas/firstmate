@@ -438,7 +438,8 @@ The file is local to each home and is not inherited by secondmate homes.
 
 The desktop trust check is an optional Main custom watcher check for the supported Linux Herdr and native Codex versions.
 It covers ordinary Codex workers in Main, the explicitly bound Ops home, and local secondmate homes in Main's `data/secondmates.md`.
-The recorded pane must run the matching task-private Codex process in a linked worktree of a registered project or a declared Firstmate home.
+The check acts only on a matching task-private Codex process in a linked worktree of a registered project or a declared Firstmate home.
+A recorded pane with no agent registration and a verified lone idle shell in its exact worker worktree is skipped quietly.
 Remote mates, Venipak, primary sessions, and unproven panes are outside its scope.
 
 Run `bin/fm-codex-trust-desktop.py --help` for the dry-run and apply modes.
@@ -449,6 +450,7 @@ Codex persists approval from the native input.
 
 Use the existing watcher and owner registration for `state/codex-trust-desktop.check.sh`.
 Install the reviewed helper and its dependencies in a private directory and bind their hashes in the owner-only shim before registering it with `bin/fm-check-register.sh`.
+The Herdr adapter's idle-shell proof uses `jq` and `ps`.
 Register the shim on Main only and use `bin/fm-check-unregister.sh` to retire it.
 The audit journal records the attempted keys and observed results under Main's `state/codex-trust-desktop/`.
 An uncertain keypress holds automation for that worker launch and reports once through the Main watcher.

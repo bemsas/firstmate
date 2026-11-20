@@ -11,13 +11,16 @@ trap fm_test_cleanup EXIT
 
 python3 - "$ROOT" "$TMP_ROOT" <<'PY'
 import base64
+from contextlib import contextmanager
 import fcntl
 import json
 import os
 from pathlib import Path
 import pty
 import re
+import select
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -120,11 +123,13 @@ intent, *args = rest
 if intent == "process-info":
     assert args == ["--pane", "w1:p1"]
     native = {"name": "codex", "pid": s["pid"], "cwd": s["worktree"]}
-    result({"process_info": {"pane_id": "w1:p1", "shell_pid": s["pid"], "foreground_process_group_id": s["pid"],
-                             "foreground_processes": [] if s.get("human") else [native]}})
+    result({"type": "pane_process_info", "process_info": {
+        "pane_id": "w1:p1", "shell_pid": s["pid"], "foreground_process_group_id": s.get("pgid", s["pid"]),
+        "foreground_processes": s.get("foreground", [] if s.get("human") else [native])}})
 elif intent == "get":
     assert args == ["w1:p1"]
-    result({"pane": {"pane_id": "w1:p1", "workspace_id": "w1", "tab_id": "w1:t1", "agent": "codex",
+    result({"pane": {"pane_id": "w1:p1", "workspace_id": "w1", "tab_id": s.get("tab_id", "w1:t1"),
+                      "agent": s.get("agent", "codex"), "agent_status": s.get("agent_status", "working"),
                       "terminal_id": "other" if s.get("rebind") else "term_test",
                       "foreground_cwd": s["worktree"], "scroll": {"offset_from_bottom": s.get("scroll", 0)}}})
 elif intent == "read":
@@ -214,6 +219,46 @@ def fixture():
 def events():
     return list(map(json.loads, (journal / "events.jsonl").read_text().splitlines()))
 
+@contextmanager
+def foreground_shell(background=False):
+    bash = shutil.which("bash")
+    shell_pid, shell_terminal = pty.fork()
+    if shell_pid == 0:
+        os.close(terminal)
+        os.chdir(wt)
+        script = 'printf "ready\\n"; read -r'
+        if background:
+            script = 'set -m; "$1" & printf "%s\\n" "$!"; read -r'
+        os.execve(bash, [bash, "--noprofile", "--norc", "-c", script, "_", str(codex)], worker_env)
+    child_pid = None
+    try:
+        assert select.select([shell_terminal], [], [], 5)[0], "fixture shell did not start"
+        ready = os.read(shell_terminal, 1024).strip()
+        if background:
+            child_pid = int(ready)
+        proc = Path(f"/proc/{shell_pid}")
+        assert os.tcgetpgrp(shell_terminal) == shell_pid
+        for _ in range(100):
+            if (proc / "stat").read_text().rsplit(") ", 1)[1].startswith("S "):
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("fixture shell did not settle into its terminal read")
+        if background:
+            assert os.getpgid(child_pid) == child_pid != shell_pid
+        else:
+            assert ready == b"ready"
+        yield dict(pid=shell_pid, agent=None, agent_status="unknown",
+                   foreground=[dict(pid=shell_pid, name="bash", argv0=bash, cwd=str(wt))])
+    finally:
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        os.close(shell_terminal)
+        os.waitpid(shell_pid, 0)
+
 try:
     for _ in range(100):
         if Path(f"/proc/{pid}/exe").resolve() == codex:
@@ -290,6 +335,24 @@ try:
     reset("cleared")
     assert run("dry-run") == "" and fixture()["keys"] == []
     print("ok - exact folder and selected option are required; ordinary chat is idle")
+
+    with foreground_shell() as retired:
+        reset(**retired)
+        assert run("dry-run") == "" and not journal.exists()
+        assert run(task=False) == "" and events() == []
+        assert fixture()["keys"] == [] and fixture()["reads"] == 0
+        for overrides in (dict(agent="codex"), dict(agent_status="working"), dict(tab_id="w1:t2"),
+                          dict(pgid=pid), dict(foreground=[]),
+                          dict(foreground=[dict(retired["foreground"][0], cwd=str(project))])):
+            reset(**(retired | overrides))
+            assert run(code=2) and fixture()["keys"] == [] and fixture()["reads"] == 0
+    with foreground_shell(background=True) as backgrounded:
+        reset(**backgrounded)
+        assert run(code=2) and fixture()["keys"] == [] and fixture()["reads"] == 0
+    for overrides in ({}, dict(foreground=[dict(retired["foreground"][0], pid=pid)])):
+        reset(agent=None, agent_status="unknown", **overrides)
+        assert run(code=2) and fixture()["keys"] == [] and fixture()["reads"] == 0
+    print("ok - retired shell is quiet; mismatched, ambiguous and backgrounded workers refuse before capture")
 
     for overrides in (dict(ambiguous=True), dict(selection=2), dict(count="2 hooks are"),
                       dict(source="user", origin="/outside/test-secret-value"), dict(unsafe_key=True)):
