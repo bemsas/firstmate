@@ -146,6 +146,18 @@ test_grants() {
   pass "grants: bounded, op- and path-scoped, expiring, revocable; no env bypass"
 }
 
+test_standing_allow() {
+  fm_git_init_commit "$H/projects/asks-log"
+  expect deny "asks-log clone before listing" Write file_path "$H/projects/asks-log/INDEX.md"
+  printf '# private record paths\nprojects/asks-log\n\n/\nprojects\n%s\n%s\n' "$H" "$FAKE_HOME" > "$H/config/delegation-guard-allow"
+  expect allow "listed private record path" Write file_path "$H/projects/asks-log/INDEX.md"
+  expect allow "listed path covers shell writes" Bash command "git -C projects/asks-log commit -am log"
+  expect deny "broad entries are ignored" Edit file_path "$H/projects/app/README.md"
+  expect deny "other repos stay guarded" Write file_path "$EXT/x"
+  rm -f "$H/config/delegation-guard-allow"
+  pass "standing allowlist: named private records only, broad entries ignored"
+}
+
 test_scope_and_transport() {
   local out
   out=$(hook "$WT" "$(payload Edit file_path "$WT/projects/x/README.md" "$WT")")
@@ -164,4 +176,4 @@ test_scope_and_transport() {
 }
 
 setup_world
-fm_test_run test_file_tools test_shell test_grants test_scope_and_transport
+fm_test_run test_file_tools test_shell test_grants test_standing_allow test_scope_and_transport

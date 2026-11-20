@@ -527,6 +527,7 @@ The script header owns the schema, finding codes, tunables, and output.
 
 `bin/fm-delegation-pretool-check.sh` is a `PreToolUse` guard that denies a supervising home's hands-on project work: edits, git mutations, and test or build runs aimed at a project clone or another git work tree, and edits to shared tracked firstmate material while any task record exists.
 Private operational state under `data/`, `state/`, and `config/`, paths outside any git work tree, and firstmate's own `bin/fm-*` scripts stay allowed.
+A home lists any other private record path that sits in a guarded place, such as an asks log kept as a clone under `projects/`, one per line in `config/delegation-guard-allow`.
 It runs only in a genuine primary home, so crewmate and scout task worktrees are unaffected, and it has no environment bypass.
 A concrete operation the captain approves in the moment is recorded as a bounded, expiring grant with `bin/fm-delegation-guard.py grant`, scoped to named operations inside one named path.
 It is opt-in per home: register the wrapper by absolute path in that home's private `.claude/settings.local.json` with the matcher `Edit|Write|MultiEdit|NotebookEdit|Bash`.

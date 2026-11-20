@@ -18,8 +18,9 @@
 # on stdout; it always exits 0. Malformed payloads and unparseable shell allow.
 #
 # A target path (realpath, nearest existing ancestor) is classed as:
-#   private  under <home>/data, <home>/state, or <home>/config, or outside every
-#            git work tree - always allowed (operational state, memory, scratch);
+#   private  under <home>/data, <home>/state, or <home>/config, under a standing
+#            entry of <home>/config/delegation-guard-allow, or outside every git
+#            work tree - always allowed (operational state, memory, scratch);
 #   project  under <home>/projects - denied (AGENTS.md hard rule 1);
 #   tracked  elsewhere under <home> - denied only while any <home>/state/*.meta
 #            task record exists, because AGENTS.md routes shared tracked changes
@@ -41,6 +42,11 @@
 # (bash -c, eval, python -c) are not parsed; the guard is a mistake seatbelt
 # for an orchestrating supervisor, not a sandbox.
 #
+# config/delegation-guard-allow is the operator's standing list of private
+# record paths that happen to sit in a guarded place, such as an asks log kept
+# as a clone under projects/: one path per line, relative to the home or
+# absolute; blank lines and # comments are skipped. An entry that is /, $HOME,
+# the home, <home>/projects, or an ancestor of any of them is ignored.
 # There is no environment bypass. A concrete captain-approved operation is
 # recorded as a grant in <home>/state/delegation-grants.json (flock on
 # <home>/state/.delegation-grants.lock, atomic replace): an absolute existing
@@ -107,6 +113,23 @@ class Policy:
         self.user_home = real(os.path.expanduser('~'))
         self.fleet_live = None
         self.grants = None
+        self.allow = self.standing_allow()
+
+    def standing_allow(self):
+        try:
+            lines = Path(self.home, 'config', 'delegation-guard-allow').read_text(encoding='utf-8').splitlines()
+        except OSError:
+            return []
+        broad = ('/', self.user_home, self.home, os.path.join(self.home, 'projects'))
+        out = []
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            entry = real(line if os.path.isabs(line) else os.path.join(self.home, line))
+            if not any(inside(b, entry) for b in broad):
+                out.append(entry)
+        return out
 
     def live(self):
         if self.fleet_live is None:
@@ -137,6 +160,8 @@ class Policy:
         for private in ('data', 'state', 'config'):
             if inside(path, os.path.join(home, private)):
                 return 'private', path
+        if any(inside(path, entry) for entry in self.allow):
+            return 'private', path
         if inside(path, os.path.join(home, 'projects')):
             return 'project', path
         if inside(path, home) or inside(path, self.root):
