@@ -84,6 +84,9 @@ if [ "${1:-}" = "list-windows" ]; then
   exit 0
 fi
 if [ "${1:-}" = "capture-pane" ]; then
+  if [ -n "${FM_FAKE_TMUX_CAPTURE_RANGE_LOG:-}" ]; then
+    printf '%s\n' "${!#}" >> "$FM_FAKE_TMUX_CAPTURE_RANGE_LOG"
+  fi
   if [ -n "${FM_FAKE_TMUX_CAPTURE_COUNT_FILE:-}" ] && {
     [ -z "${FM_FAKE_TMUX_CAPTURE_COUNT_RANGE:-}" ] || [ "${!#}" = "$FM_FAKE_TMUX_CAPTURE_COUNT_RANGE" ]
   }; then

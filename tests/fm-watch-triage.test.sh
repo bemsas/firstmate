@@ -5198,16 +5198,15 @@ prime_picker_window() {  # <state> <id> <window> <kind> <capture> <status-line>
 }
 
 test_exit_picker_stale_names_the_dialog() {
-  local dir state fakebin out capture_file window key pid count_file
+  local dir state fakebin out capture_file window key pid capture_log
   dir=$(make_case exit-picker-stale); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture_file="$dir/pane.txt"; count_file="$dir/captures"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; capture_log="$dir/captures"
   window="test:fm-picker"
   write_exit_picker "$capture_file"
   key=$(prime_picker_window "$state" picker "$window" ship "$capture_file" 'working: parked between turns')
-  printf '0\n' > "$count_file"
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$count_file" \
+    FM_FAKE_TMUX_CAPTURE_RANGE_LOG="$capture_log" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -5216,7 +5215,10 @@ test_exit_picker_stale_names_the_dialog() {
   grep -F 'blocked-on-prompt: Claude background-task exit picker' "$out" >/dev/null \
     || fail "the picker wake did not name the dialog: $(cat "$out")"
   grep -F 'possible wedge' "$out" >/dev/null && fail "the first picker stale was labeled a wedge: $(cat "$out")"
-  [ "$(cat "$count_file")" -eq 1 ] || fail "the picker poll captured the pane $(cat "$count_file") times"
+  # The trust check reads the visible viewport. Picker classification must
+  # then reuse the single ordinary scrollback read without an extra capture.
+  assert_equals "$(printf '%s\n' -0 -40)" "$(cat "$capture_log")" \
+    "picker classification must share the poll's capture after the trust check"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$(hash_text "$(cat "$capture_file")")" ] \
     || fail "the picker stale did not record the pane hash"
   unset FM_FAKE_CREW_STATE
