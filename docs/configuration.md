@@ -434,6 +434,26 @@ The supervision protocol is chosen when the session starts, so create or remove 
 The file is local to each home and is not inherited by secondmate homes.
 [The Codex protocol](supervision-protocols/codex.md) owns the parked operating protocol, and `bin/fm-codex-stop-park.sh` owns version selection, registration, and failure fallback.
 
+## Desktop Codex worker trust check
+
+The desktop trust check is an optional Main custom watcher check for the supported Linux Herdr and native Codex versions.
+It covers ordinary Codex workers in Main, the explicitly bound Ops home, and local secondmate homes in Main's `data/secondmates.md`.
+The recorded pane must run the matching task-private Codex process in a linked worktree of a registered project or a declared Firstmate home.
+Remote mates, Venipak, primary sessions, and unproven panes are outside its scope.
+
+Run `bin/fm-codex-trust-desktop.py --help` for the dry-run and apply modes.
+Before enabling the watcher, use a pending native dialog on an approved worker to verify the dry-run and attended apply on the installed versions.
+The check confirms folder trust only for the exact visible worktree.
+For hook trust it requires a matching native pending count and project hook origins, then verifies the selected affirmative option and confirms the trusted hashes through native discovery.
+Codex persists approval from the native input.
+
+Use the existing watcher and owner registration for `state/codex-trust-desktop.check.sh`.
+Install the reviewed helper and its dependencies in a private directory and bind their hashes in the owner-only shim before registering it with `bin/fm-check-register.sh`.
+Register the shim on Main only and use `bin/fm-check-unregister.sh` to retire it.
+The audit journal records the attempted keys and observed results under Main's `state/codex-trust-desktop/`.
+An uncertain keypress holds automation for that worker launch and reports once through the Main watcher.
+[Codex hook trust verification](verification/runtime-backends.md#codex-hook-trust) points to the attended native guard.
+
 ## Warm-cache compaction (config/warm-compact)
 
 Create the home-local `config/warm-compact` file to compact an idle Claude primary and the supervision host's engine conversation before their prompt cache expires.

@@ -142,7 +142,7 @@ def remove(home):
         shutil.rmtree(home)
 
 
-def discover(codex, worktree, home):
+def discover(codex, worktree, home, timeout=30):
     env = dict(os.environ, CODEX_HOME=str(home))
     with subprocess.Popen([codex, "--enable", "hooks", "app-server"], cwd=worktree, env=env,
                           stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -153,7 +153,7 @@ def discover(codex, worktree, home):
             except ProcessLookupError:
                 pass
 
-        timer = threading.Timer(30, stop)
+        timer = threading.Timer(timeout, stop)
         timer.start()
         try:
             def send(message):
