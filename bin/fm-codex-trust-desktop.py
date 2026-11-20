@@ -32,6 +32,9 @@ CODEX_VERSION = "codex-cli 0.171.0"
 HOOK_COUNT = re.compile(r"(?:(1) hook is|([2-9]|[1-9][0-9]+) hooks are) new or changed\.")
 HOOK_WARNING = "Hooks can run outside the sandbox after you trust them."
 HOOK_CHOICES = ("Review hooks", "Trust all and continue", "Continue without trusting (hooks won't run)")
+HOOK_FOOTERS = {"enter confirm · esc skip", "Press enter to confirm or esc to go back"}
+SGR = re.compile(r"\x1b\[[0-9;:]*m")
+OTHER_CONTROLS = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
 FOLDER_COPY = (
     "Trust this folder? Codex can read, edit, and run files here, subject to your permission settings. "
     "Folder settings can run code automatically, even without a model request. Continue only if you trust "
@@ -225,9 +228,12 @@ def selection(rows, labels):
 
 
 def modal(screen, worktree):
-    # Herdr's raw text is the visible grid. Full anchored menu and footer
-    # are required; a mention elsewhere in the viewport is never sufficient.
-    rows = [row.strip() for row in screen.splitlines() if row.strip()]
+    # Raw Herdr output contains the styled visible grid. Only discard color
+    # and rendition changes, which cannot move or erase terminal cells.
+    screen = SGR.sub("", screen)
+    if OTHER_CONTROLS.search(screen):
+        raise Refusal("visible viewport contains unsupported terminal controls")
+    rows = [row.strip(" ") for row in screen.split("\n") if row.strip(" ")]
     if not rows:
         raise Refusal("visible viewport is empty")
     if rows[-1] == "enter continue · esc back" or rows[0] == "Folder access":
@@ -235,13 +241,13 @@ def modal(screen, worktree):
                 or " ".join(rows[2:-3]) != FOLDER_COPY or rows[-1] != "enter continue · esc back"):
             raise Refusal("folder dialog does not match the recorded worktree and native menu")
         return Modal("folder", selection(rows[-3:-1], FOLDER_CHOICES))
-    if rows[-1] == "Press enter to confirm or esc to go back" or rows[-7:-6] == ["Hooks need review"]:
-        if len(rows) < 7 or rows[-7] != "Hooks need review" or rows[-5] != HOOK_WARNING:
+    if rows[0] == "Hooks need review" or rows[-1] in HOOK_FOOTERS:
+        if len(rows) != 7 or rows[0] != "Hooks need review" or rows[2] != HOOK_WARNING:
             raise Refusal("unrecognized native Codex hook dialog")
-        match = HOOK_COUNT.fullmatch(rows[-6])
-        if not match or rows[-1] != "Press enter to confirm or esc to go back":
+        match = HOOK_COUNT.fullmatch(rows[1])
+        if not match or rows[-1] not in HOOK_FOOTERS:
             raise Refusal("unrecognized visible hook count or confirmation footer")
-        return Modal("hooks", selection(rows[-4:-1], HOOK_CHOICES), int(match[1] or match[2]))
+        return Modal("hooks", selection(rows[3:6], HOOK_CHOICES), int(match[1] or match[2]))
     return None
 
 

@@ -10,11 +10,13 @@ TMP_ROOT=$(fm_test_tmproot fm-codex-trust-desktop)
 trap fm_test_cleanup EXIT
 
 python3 - "$ROOT" "$TMP_ROOT" <<'PY'
+import base64
 import fcntl
 import json
 import os
 from pathlib import Path
 import pty
+import re
 import shutil
 import subprocess
 import sys
@@ -94,7 +96,10 @@ for request in map(json.loads, sys.stdin):
         assert os.environ["CODEX_HOME"] == s["private"]
         assert request["params"]["cwds"] == [s["worktree"]]
         print(json.dumps({"id": 2, "result": {"data": [{"cwd": s["worktree"], "errors": [], "warnings": [],
-                          "hooks": [guard, hook]}]}}), flush=True)
+                          "hooks": [guard, hook] + [
+                              dict(hook, key=s["origin"] + f":session_start:0:{index}")
+                              for index in range(1, s.get("hook_total", 1))
+                          ]}]}}), flush=True)
 ''')
 herdr.write_text('''#!/usr/bin/env python3
 import json, os, sys
@@ -126,7 +131,9 @@ elif intent == "read":
     assert args == ["w1:p1", "--source", "visible", "--raw"]
     s["reads"] += 1
     mode = s["mode"]
-    if mode == "hooks":
+    if mode == "hooks" and "screen" in s:
+        sys.stdout.write(s["screen"] if s["selection"] == 1 else s["screen_after_down"])
+    elif mode == "hooks":
         n = s.get("count", "1 hook is")
         print("  Hooks need review\\n  " + n + " new or changed.\\n"
               "  Hooks can run outside the sandbox after you trust them.\\n")
@@ -196,7 +203,8 @@ def reset(mode="hooks", **overrides):
 def run(mode="apply", code=0, *, task=True):
     command = [*args, "--" + mode, *(["--task", "mate/work"] if task else [])]
     result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=25)
-    assert result.returncode == code and not result.stderr, (result.returncode, result.stdout, result.stderr)
+    expected_codes = code if isinstance(code, tuple) else (code,)
+    assert result.returncode in expected_codes and not result.stderr, (result.returncode, result.stdout, result.stderr)
     assert "test-secret-value" not in result.stdout
     if journal.exists() and (journal / "events.jsonl").exists():
         assert "test-secret-value" not in (journal / "events.jsonl").read_text()
@@ -226,6 +234,50 @@ try:
                and r["hook_keys"] == [str(hookfile) + ":session_start:0:0"] for r in log)
     assert log[-1]["result"].endswith("exact hook hashes trusted")
     print("ok - local registry and pooled Git worker resolve; native hooks order and durable audit are idempotent")
+
+    # Preserve Herdr's captured CRLF, SGR, and viewport padding in the replay.
+    native = base64.b64decode(
+        (root / "tests/fixtures/codex-0.171.0-herdr-0.9.5-hooks.ansi.b64").read_bytes()
+    ).decode()
+    plain, sgr_count = re.subn(r"\x1b\[[0-9;:]*m", "", native)
+    assert sgr_count and plain.count("enter confirm · esc skip") == 1
+    legacy = "Press enter to confirm or esc to go back"
+    legacy_styled = re.sub(r"enter\x1b\[0m.*?esc\x1b\[0m\x1b\[2m skip", legacy, native)
+    assert legacy_styled.count(legacy) == 1 and "\x1b[" in legacy_styled
+    variants = {
+        "captured": native,
+        "footer only": plain,
+        "SGR only": legacy_styled,
+        "neither": plain.replace("enter confirm · esc skip", legacy),
+    }
+    recognized = {}
+    for name, screen in variants.items():
+        reset(screen=screen, hook_total=5)
+        out = run("dry-run", code=(0, 2))
+        plan = json.loads(out) if out else {}
+        recognized[name] = plan.get("reason", plan.get("phase", "idle"))
+        if plan.get("phase") == "dry-run":
+            assert plan["dialog"] == "hooks" and plan["planned_keys"] == ["down", "enter"]
+            assert len(plan["hook_keys"]) == 5
+        assert not journal.exists() and fixture()["keys"] == []
+    assert set(recognized.values()) == {"dry-run"}, recognized
+
+    # The fixture simulates the selected row moving after Down.
+    after_down = native.replace("› 1. Review hooks", "  1. Review hooks").replace(
+        "  2. Trust all and continue", "› 2. Trust all and continue"
+    )
+    reset(screen=native, screen_after_down=after_down, hook_total=5)
+    assert run() == "" and fixture()["keys"] == ["down", "enter"]
+    assert len(events()[-1]["hook_keys"]) == 5
+    assert events()[-1]["result"].endswith("exact hook hashes trusted")
+
+    for screen in ("Assistant quoted this menu:\n" + native,
+                   native.replace("› 1. Review hooks", "› Review hooks"),
+                   native[:native.index("  3. Continue")],
+                   "\x1b[2J" + native):
+        reset(screen=screen, hook_total=5)
+        assert run(code=2) and fixture()["keys"] == []
+    print("ok - captured native hook viewport and independent style/footer variants; quoted and clipped menus refuse")
 
     reset("folder")
     assert json.loads(run("dry-run"))["planned_keys"] == ["enter"]

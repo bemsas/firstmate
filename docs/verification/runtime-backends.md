@@ -887,6 +887,7 @@ The [desktop trust check](../configuration.md#desktop-codex-worker-trust-check) 
 Set the guard's `FM_CODEX_TRUST_*` inputs for an already launched eligible worker with a pending native dialog.
 It checks the installed versions and the dry-run plan without sending keys.
 `tests/fm-codex-trust-desktop.test.sh` drives the executable through an isolated linked Git worktree, a real Linux foreground process, and Herdr and app-server fixtures.
+The portable regression replays the styled five-hook viewport captured on 2026-11-20 with Herdr 0.9.5 and codex-cli 0.171.0, including its `enter confirm · esc skip` footer.
 
 ### Stop response parsing
 
