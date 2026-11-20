@@ -4625,7 +4625,7 @@ EOF
           continue
         fi
         pr_poll_control_release || exit 1
-        if [ -z "$check_queue_outputs" ]; then check_queue_key=$c; else check_queue_key=state-checks; fi
+        if [ -z "$check_queue_outputs" ]; then check_queue_key=$c; else check_queue_key="state-checks"; fi
         check_queue_outputs="${check_queue_outputs:+$check_queue_outputs
 }$reason"
         check_outputs="${check_outputs:+$check_outputs
@@ -4635,7 +4635,7 @@ EOF
     done
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
-      if [ -z "$check_queue_outputs" ]; then check_queue_key=unauthenticated-state-checks; else check_queue_key=state-checks; fi
+      if [ -z "$check_queue_outputs" ]; then check_queue_key="unauthenticated-state-checks"; else check_queue_key="state-checks"; fi
       check_queue_outputs="${check_queue_outputs:+$check_queue_outputs
 }$reason"
       check_outputs="${check_outputs:+$check_outputs
