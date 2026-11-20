@@ -157,6 +157,9 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-agy-worker-hooks.sh` | Write an agy ship or scout worker's workspace busy hooks |
 | `fm-nudge-gate-lib.sh`   | Decide whether a pane nudge is held by completion-seq idempotency or human focus |
 | `fm-precompact-handoff.py` | Write a Claude primary's PreCompact handoff and serve its cached turn digest |
+| `fm-obligations.py` | Keep a supervisor's structured obligations ledger and reconcile it against the fleet snapshot |
+| `fm-delegation-pretool-check.sh` | Primary-home PreToolUse guard against a supervisor's hands-on project work |
+| `fm-delegation-guard.py` | Classify delegation-guard tool calls and record bounded captain-operation grants |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for composer capture, verified submit, and the submit-time busy check |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
 | `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes                       |
