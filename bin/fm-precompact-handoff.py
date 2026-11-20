@@ -25,7 +25,10 @@
 # pull request links, and the last assistant note. Everything outside the
 # block is preserved byte for byte; the file is replaced atomically under an
 # exclusive flock on a sibling .<name>.lock file, so concurrent or repeated
-# runs converge on one block. Obvious credential shapes are redacted and the
+# runs converge on one block. The lock wait is bounded
+# (FM_HANDOFF_LOCK_WAIT_MS, default 200): a busy lock skips the refresh and
+# keeps the existing handoff. The payload's trigger and session id are rendered
+# only when they are plain tokens. Obvious credential shapes are redacted and the
 # block's own delimiter comments are neutralized in transcript text before
 # anything is written. Transcript text is untrusted evidence only: it never
 # changes the obligations ledger. A transcript_path that is not a regular file
@@ -130,7 +133,7 @@ def tail_entries(path, max_bytes):
         size = handle.tell()
         start = max(0, size - max_bytes)
         handle.seek(start)
-        blob = handle.read()
+        blob = handle.read(size - start)  # never past the measured tail, even if it grows
     lines = blob.split(b'\n')
     if start > 0:
         lines = lines[1:]
@@ -200,6 +203,7 @@ def obligation_lines(home):
             'fm_obligations', str(Path(__file__).resolve().parent / 'fm-obligations.py'))
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        module._REDACT[:] = [clean]  # this script owns display redaction
         return [clean(line, 240) for line in module.digest_lines(home)]
     except Exception as exc:  # never let the ledger break a hook
         warn('obligations digest unavailable (%s)' % type(exc).__name__)
@@ -208,14 +212,16 @@ def obligation_lines(home):
 
 def render_block(payload, prompts, commands, prs, note, obligations=()):
     stamp = time.strftime('%Y-%m-%dT%H:%MZ', time.gmtime())
-    session = str(payload.get('session_id') or '-')[:8]
-    trigger = str(payload.get('trigger') or '-')
+    session = payload.get('session_id')
+    session = session[:8] if isinstance(session, str) and re.match(r'^[A-Za-z0-9_-]{1,128}$', session) else '-'
+    trigger = payload.get('trigger')
+    trigger = trigger if isinstance(trigger, str) and re.match(r'^[a-z_-]{1,32}$', trigger) else '-'
     out = [BEGIN, '## Pre-compaction handoff',
            '- Saved %s, trigger %s, session %s' % (stamp, trigger, session)]
     sections = [
         ("Captain's latest prompts (newest first)", ['"%s"' % p for p in newest_unique(prompts, 6)]),
         ('Recent dispatch and steering commands (newest first)', ['`%s`' % c.replace('`', "'") for c in newest_unique(commands, 10)]),
-        ('Pull request links seen (newest first)', newest_unique(prs, 8)),
+        ('Pull request links seen (newest first)', [clean(u, 300) for u in newest_unique(prs, 8)]),
         ('Obligation ledger findings (derived; the ledger, not this list, is authoritative)',
          list(obligations)),
     ]
@@ -245,7 +251,7 @@ def atomic_write(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix='.' + path.name + '.', dir=str(path.parent))
     try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+        with os.fdopen(fd, 'w', encoding='utf-8', errors='surrogateescape', newline='') as handle:
             handle.write(text)
         if path.exists():
             os.chmod(tmp, path.stat().st_mode & 0o777)
@@ -276,8 +282,23 @@ def cmd_precompact(args):
         import fcntl
         out.parent.mkdir(parents=True, exist_ok=True)
         with open(out.parent / ('.' + out.name + '.lock'), 'a') as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            existing = out.read_text(encoding='utf-8') if out.exists() else ''
+            # Bounded wait: a held sibling lock skips this refresh and keeps the
+            # existing handoff rather than stalling compaction.
+            deadline = time.monotonic() + env_int('FM_HANDOFF_LOCK_WAIT_MS', 200) / 1000.0
+            while True:
+                try:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        warn('handoff lock busy; kept the existing handoff')
+                        return 0
+                    time.sleep(0.01)
+            existing = ''
+            if out.exists():
+                # newline='' and surrogateescape keep every byte outside the block.
+                with open(out, encoding='utf-8', errors='surrogateescape', newline='') as handle:
+                    existing = handle.read()
             atomic_write(out, splice(existing, render_block(payload, prompts, commands, prs, note, obligations)))
     except OSError as exc:
         warn('could not write %s (%s)' % (out, type(exc).__name__))

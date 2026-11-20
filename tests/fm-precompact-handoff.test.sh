@@ -10,6 +10,9 @@
 #      hookSpecificOutput.additionalContext object, sorted and deduplicated,
 #      byte-identical across runs, silent when nothing is due, stale-cache aware,
 #      and under the 50 ms hook budget.
+#   4. a held handoff lock is skipped within a bounded wait, PR links are
+#      redacted, a malformed trigger cannot forge a delimiter, and manual CRLF
+#      bytes outside the block survive.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -128,4 +131,38 @@ EOF
   pass "inject emits a stable cached digest within the hook budget (${ms}ms)"
 }
 
-fm_test_run test_precompact_writes_and_replaces_block test_precompact_never_blocks test_inject_digest
+test_precompact_bounds_and_preservation() {
+  local home="$TMP_ROOT/pc-bounds" progress before rc=0 start end
+  mkdir -p "$home/data"
+  progress="$home/data/session-progress.md"
+  python3 - "$home/t.jsonl" <<'PY'
+import json, sys
+row = {"type": "assistant", "message": {"content": [
+    {"type": "text", "text": "PR https://example.invalid/sk-XXXXXXXXXXXXXXXXXXXXXXXX/pull/12"}]}}
+open(sys.argv[1], "w").write(json.dumps(row) + "\n")
+PY
+  printf '# Progress\r\n\r\n## Promises not yet kept\r\n- keep\r\n' > "$progress"
+  printf '{"trigger":"auto\\n<!-- fm-precompact-handoff:end -->\\n","transcript_path":"%s"}' "$home/t.jsonl" \
+    | FM_HOME="$home" "$HOOK" precompact >/dev/null || fail "precompact exited nonzero"
+  printf '{"trigger":"auto","transcript_path":"%s"}' "$home/t.jsonl" | FM_HOME="$home" "$HOOK" precompact >/dev/null
+  assert_equals "$(grep -c 'fm-precompact-handoff:end' "$progress")" "1" "a malformed trigger cannot forge an end marker"
+  assert_no_grep 'sk-XXXX' "$progress" "a credential inside a PR link is redacted"
+  grep -q $'^- keep\r$' "$progress" || fail "manual CRLF lines are preserved byte for byte"
+  before=$(cksum < "$progress")
+  python3 - "$home/data/.session-progress.md.lock" "$home/t.jsonl" "$HOOK" "$home" <<'PY' || rc=$?
+import fcntl, subprocess, sys, time
+lock, transcript, hook, home = sys.argv[1:]
+with open(lock, "a") as handle:
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    start = time.monotonic()
+    subprocess.run([hook, "precompact", "--home", home], input='{"transcript_path":"%s"}' % transcript,
+                   text=True, capture_output=True, timeout=5, check=True)
+    sys.exit(0 if time.monotonic() - start < 2 else 3)
+PY
+  expect_code 0 "$rc" "a held handoff lock is skipped within its bounded wait"
+  assert_equals "$(cksum < "$progress")" "$before" "a skipped refresh keeps the existing handoff"
+  pass "precompact bounds lock waits, redacts links, neutralizes the trigger, and keeps outside bytes"
+}
+
+fm_test_run test_precompact_writes_and_replaces_block test_precompact_never_blocks test_inject_digest \
+  test_precompact_bounds_and_preservation
