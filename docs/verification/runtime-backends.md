@@ -883,6 +883,12 @@ The guard runs by default when Codex is installed and reports its version on fai
 `tests/fm-worker-guardrails.test.sh` covers configuration preservation, secret refusal, generated callback behavior, idempotent preparation and symlink-safe cleanup without a vendor runtime.
 `tests/fm-spawn-dispatch-profile.test.sh` covers the worker/secondmate launch split.
 
+The [desktop trust check](../configuration.md#desktop-codex-worker-trust-check) has an attended live guard in `tests/fm-codex-trust-desktop-live-e2e.test.sh`.
+Set the guard's `FM_CODEX_TRUST_*` inputs for an already launched eligible worker with a pending native dialog.
+It checks the installed versions and the dry-run plan without sending keys.
+`tests/fm-codex-trust-desktop.test.sh` drives the executable through an isolated linked Git worktree, a real Linux foreground process, and Herdr and app-server fixtures.
+The portable regression replays the styled five-hook viewport captured on 2026-11-20 with Herdr 0.9.5 and codex-cli 0.171.0, including its `enter confirm · esc skip` footer.
+
 ### Stop response parsing
 
 Verified 2026-11-03 on Linux x86_64 with codex-cli 0.162.1.
