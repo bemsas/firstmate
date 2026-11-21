@@ -5,7 +5,7 @@
 # request wrapper, approval that does not widen the toolset, message text that
 # must not be executed, the private exchange log, parent-channel publication,
 # parent-route inbox sequencing, the time bound, provider status, an empty
-# reply, and a failed parent-channel append.
+# reply, a failed parent-channel append, and overlapping outbound asks.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -28,7 +28,20 @@ cat > "$STUB" << 'EOF'
 set -eu
 dir=${FM_ASK_HERMES_STUB_DIR:?}
 mode=${FM_ASK_HERMES_STUB_MODE:-ok}
+overlap=${FM_ASK_HERMES_STUB_OVERLAP_DIR:-}
 mkdir -p "$dir"
+if [ -n "$overlap" ]; then
+  # Both providers must reach the stub before either captures its request.
+  : > "$overlap/$2"
+  for ((attempt = 0; attempt < 100; attempt++)); do
+    [ -f "$overlap/desktop" ] && [ -f "$overlap/ops" ] && break
+    sleep 0.1
+  done
+  if [ ! -f "$overlap/desktop" ] || [ ! -f "$overlap/ops" ]; then
+    printf '%s\n' 'the peer provider did not reach the overlap barrier' >&2
+    exit 99
+  fi
+fi
 printf '%s\0' "$@" >> "$dir/args"
 prev=
 q=
@@ -358,26 +371,42 @@ channel_failure_is_exit_4() {
 }
 
 concurrent_appends_stay_valid_json() {
-  local home log line count one two p1 p2
-  unset FM_ASK_HERMES_STUB_MODE FM_ASK_HERMES_STUB_REPLY || true
+  local home log first second overlap p1 p2 rc1=0 rc2=0
+  unset FM_ASK_HERMES_STUB_MODE || true
   home=$(seed_home)
-  one=$(write_msg one)
-  two="$TMP_ROOT/message-two"
-  printf '%s\n' two > "$two"
-  invoke "$home" --corr "$CORR" --topic admin --message-file "$one" &
+  first="$TMP_ROOT/first"
+  second="$TMP_ROOT/second"
+  overlap="$TMP_ROOT/overlap"
+  mkdir -p "$first" "$second" "$overlap"
+  printf '%s\n' one > "$first/message"
+  printf '%s\n' two > "$second/message"
+  # Share the bridge home, but give each provider and caller its own capture files.
+  STUB_DIR="$first/stub" STDOUT="$first/stdout" STDERR="$first/stderr" \
+    FM_ASK_HERMES_STUB_OVERLAP_DIR="$overlap" FM_ASK_HERMES_STUB_REPLY=reply-one \
+    invoke "$home" --corr "$CORR" --topic admin --message-file "$first/message" &
   p1=$!
-  invoke "$home" --corr "$CORR2" --topic ops --message-file "$two" &
+  STUB_DIR="$second/stub" STDOUT="$second/stdout" STDERR="$second/stderr" \
+    FM_ASK_HERMES_STUB_OVERLAP_DIR="$overlap" FM_ASK_HERMES_STUB_REPLY=reply-two \
+    invoke "$home" --corr "$CORR2" --topic ops --message-file "$second/message" &
   p2=$!
-  wait "$p1" || fail "first concurrent ask failed"
-  wait "$p2" || fail "second concurrent ask failed"
+  wait "$p1" || rc1=$?
+  wait "$p2" || rc2=$?
+  if [ "$rc1" -ne 0 ] || [ "$rc2" -ne 0 ]; then
+    cat "$first/stderr" "$second/stderr" >&2
+    fail "concurrent asks exited $rc1 and $rc2"
+  fi
+  grep -Fxq one "$first/stub/query" || fail "first provider captured the wrong request"
+  grep -Fxq two "$second/stub/query" || fail "second provider captured the wrong request"
+  grep -Fxq reply-one "$first/stdout" || fail "first caller did not receive its reply"
+  grep -Fxq reply-two "$second/stdout" || fail "second caller did not receive its reply"
   log=$(log_file "$home")
-  count=$(wc -l < "$log" | tr -d ' ')
-  [ "$count" -eq 2 ] || fail "concurrent log lines: $count"
-  while IFS= read -r line; do
-    printf '%s\n' "$line" | jq -e '.exchange_id and .correlation_id and .outcome == "ok"' >/dev/null \
-      || fail "torn log line: $line"
-  done < "$log"
-  pass "concurrent appends stay valid JSON"
+  jq -sRe --arg first "$CORR" --arg second "$CORR2" '
+    split("\n") | map(select(length > 0) | fromjson) | sort_by(.correlation_id)
+    | length == 2 and all(.[]; .exchange_id and .outcome == "ok" and .exit_code == 0)
+      and (.[0] | .correlation_id == $first and .request == "one" and .reply == "reply-one")
+      and (.[1] | .correlation_id == $second and .request == "two" and .reply == "reply-two")
+  ' "$log" >/dev/null || fail "concurrent asks did not append two distinct JSON lines: $(cat "$log")"
+  pass "overlapping asks keep their captures separate and append valid JSON"
 }
 
 rejects_bad_arguments
