@@ -376,7 +376,7 @@ test_codex_rollout_pull_source() {
 test_codex_rollout_fails_safe() {
   local state f g out
   state=$(new_state_dir codex-rollout-safe)
-  f=$(codex_rollout_fixture "$state" cx2 0.171.0 codex-tui)
+  f=$(codex_rollout_fixture "$state" cx2 0.171.1 codex-tui)
   codex_event "$f" task_complete
   out=$(fm_busy_classify tmux w1 codex cx2 "$state")
   [ "$out" = "unknown codex-rollout-unverified" ] || fail "an unverified cli_version must not classify, got '$out'"

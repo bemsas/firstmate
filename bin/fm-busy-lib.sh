@@ -260,10 +260,10 @@ fm_busy_agy_record_contradicted() {  # <backend> <target> [tail40]
   ! printf '%s' "$tail40" | fm_busy_agy_tail_busy
 }
 
-# Codex rollout pull source (see the header). Verified live 2026-11-19 on
-# codex-cli 0.170.0 through the worker launch path; the live guard
+# Codex rollout pull source (see the header). Verified live through the worker
+# launch path on codex-cli 0.170.0 and 0.171.0; the live guard
 # tests/fm-codex-rollout-live-e2e.test.sh refreshes the evidence.
-FM_BUSY_CODEX_ROLLOUT_VERIFIED_VERSIONS="0.170.0"
+FM_BUSY_CODEX_ROLLOUT_VERIFIED_VERSIONS="0.170.0 0.171.0"
 # Only the tail is folded; a turn whose opening event scrolled out of it reads
 # none (unknown), never idle.
 FM_BUSY_CODEX_ROLLOUT_TAIL_BYTES=${FM_BUSY_CODEX_ROLLOUT_TAIL_BYTES:-16777216}
