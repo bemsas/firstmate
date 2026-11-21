@@ -180,30 +180,56 @@ status_path_readable() {
   [ -f "$1" ] && [ -r "$1" ] && [ ! -L "$1" ]
 }
 
-scan_open_blockers() {  # -> tab-separated blocker rows
-  local meta id status key verb summary clean_summary open
+# The wake drain just folded the status histories. Use its result only when
+# the cursor covers this exact inode and every byte. A missing, stale,
+# truncated or differently configured cursor falls back to the original fold.
+status_open_at_return() {
+  local status=$1 kind cursor version offset ident open
+  if [ -z "${FM_CLASSIFY_RESOLVE_VERB:-}${FM_CLASSIFY_CAPTAIN_HELD_VERB:-}${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-}" ]; then
+    kind=$(_fm_status_kind "$status")
+    cursor=$(_fm_open_decisions_cursor_path "$status")
+    if status_path_readable "$cursor" && _fm_status_read_ident_size "$status"; then
+      if open=$({
+        IFS= read -r version && IFS= read -r offset && IFS= read -r ident &&
+          [ "$version" = "version=$FM_OPEN_DECISIONS_FOLD_VERSION:$kind" ] &&
+          [ "$offset" = "offset=$_FM_STAT_SIZE" ] &&
+          [ "$ident" = "ident=$_FM_STAT_IDENTITY" ] &&
+          cat
+      } < "$cursor"); then
+        printf '%s' "$open"
+        return 0
+      fi
+    fi
+  fi
+  status_open_decisions "$status"
+}
+
+scan_return_status() {  # <blockers-file> <decisions-file>
+  local blockers=$1 decisions=$2 meta id status key verb summary open
   STATUS_SCAN_ERROR=
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
-    id=$(basename "$meta")
+    id=${meta##*/}
     id=${id%.meta}
     status="$STATE/$id.status"
-    if ! status_path_readable "$status"; then
-      STATUS_SCAN_ERROR=$status
-      return 1
+    if ! status_path_readable "$status" || ! open=$(status_open_at_return "$status"); then
+      [ -n "$STATUS_SCAN_ERROR" ] || STATUS_SCAN_ERROR=$status
+      continue
     fi
-    if ! open=$(status_open_decisions "$status"); then
-      STATUS_SCAN_ERROR=$status
-      return 1
-    fi
-    while IFS="$(printf '\t')" read -r key verb summary; do
-      [ "$verb" = blocked ] || continue
-      clean_summary=$(printf '%s' "$summary" | clean_field)
-      printf 'blocker\t%s\t%s\t%s\n' "$id" "$key" "$clean_summary"
+    while IFS=$'\t' read -r key verb summary; do
+      case "$verb" in
+        blocked)
+          printf 'blocker\t%s\t%s\t%s\n' "$id" "$key" "$(printf '%s' "$summary" | clean_field)" >> "$blockers"
+          ;;
+        needs-decision)
+          printf '  - %s [key=%s] needs your decision: %s\n' "$id" "$key" "$(printf '%s' "$summary" | clean_field)" >> "$decisions"
+          ;;
+      esac
     done <<EOF
 $open
 EOF
   done
+  [ -z "$STATUS_SCAN_ERROR" ]
 }
 
 write_pending_seed() {  # <window-epoch> <contract-epoch>  Fail-closed marker before any lifecycle mutation.
@@ -532,9 +558,9 @@ scan_landed_awaiting_cleanup() {  # -> <task>\t<url> rows
   done
 }
 
-render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch> <drain-ok>
-  local evidence=$1 blockers=$2 since=$3 drain_ok=$4 now record superseded superseded_at archive_dir stamp
-  local tag task key summary count routine routine_visible captain visible_outcomes live held_err last verb rows status url drained=0 pointer
+render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch> <drain-ok> <decisions-file>
+  local evidence=$1 blockers=$2 since=$3 drain_ok=$4 decisions=$5 now record superseded superseded_at archive_dir stamp
+  local tag task key summary count routine routine_visible captain visible_outcomes live held_err last rows status url drained=0 pointer
   now=$(date +%s)
   # Where main processes outcomes through the drain's BRANCH OUTCOMES section
   # (the supervision host off Pi, docs/supervision-host.md "Captain outcomes"),
@@ -603,19 +629,10 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch> <drain-
     HELD_READ_FAILED=1
     printf '  held listing unavailable: %s: %s; catch-up stays gated\n' "$HELD_READ_PATH" "$held_err"
   fi
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    task=$(basename "$meta"); task=${task%.meta}
-    status="$STATE/$task.status"
-    status_path_readable "$status" || continue
-    while IFS="$(printf '\t')" read -r key verb summary; do
-      [ "$verb" = needs-decision ] || continue
-      count=$((count + 1))
-      printf '  - %s [key=%s] needs your decision: %s\n' "$task" "$key" "$(printf '%s' "$summary" | clean_field)"
-    done <<EOF
-$(status_open_decisions "$status")
-EOF
-  done
+  if [ -s "$decisions" ]; then
+    cat "$decisions"
+    count=$((count + 1))
+  fi
   rows=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "captain" && $6 != "true" { printf "  - %s: %s\n", $2, $5 }')
   if [ -n "$rows" ] && [ "$drained" -eq 1 ]; then
     count=$((count + 1))
@@ -699,11 +716,12 @@ EOF
 }
 
 return_reconcile() {
-  local evidence blockers drain_err drained drain_ok=1 wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1 since contract_since superseded_record retained_record
+  local evidence blockers decisions drain_err drained drain_ok=1 wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1 since contract_since superseded_record retained_record
   local archived_contract tag kind text retained_live restored_epoch
   evidence=$(mktemp "$STATE/.afk-return-evidence.XXXXXX") || return 1
   blockers=$(mktemp "$STATE/.afk-return-blockers.XXXXXX") || { rm -f "$evidence"; return 1; }
   drain_err=$(mktemp "$STATE/.afk-return-drain.XXXXXX") || { rm -f "$evidence" "$blockers"; return 1; }
+  decisions=$(mktemp "$STATE/.afk-return-decisions.XXXXXX") || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
   preserve_evidence "$evidence"
   since=$(gate_window_epoch)
   contract_since=$(gate_contract_epoch)
@@ -843,13 +861,14 @@ EOF
     append_evidence lifecycle 'outcome store unreadable, catch-up stays gated' "$evidence"
     lifecycle_ok=0
   fi
-  if scan_open_blockers > "$blockers"; then
+  if scan_return_status "$blockers" "$decisions"; then
     remove_evidence_prefix lifecycle 'status file unreadable:' "$evidence" || lifecycle_ok=0
   else
     append_evidence lifecycle "status file unreadable: $STATUS_SCAN_ERROR; catch-up stays gated" "$evidence"
     lifecycle_ok=0
   fi
-  render_return_brief "$evidence" "$blockers" "$since" "$drain_ok"
+  render_return_brief "$evidence" "$blockers" "$since" "$drain_ok" "$decisions"
+  rm -f "$decisions"
   if [ "$HELD_READ_FAILED" -eq 1 ]; then
     append_evidence lifecycle "held set unreadable: $HELD_READ_PATH; catch-up stays gated" "$evidence"
     lifecycle_ok=0
