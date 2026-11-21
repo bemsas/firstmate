@@ -55,11 +55,13 @@ claim_pool_slot() {  # <case> <task-id> [home]
   printf 'task=%s\nhome=%s\n' "$id" "$home" > "$dir/pool/1/.fm-slot-owner"
 }
 
-run_case() {  # <case> <id>
+run_case() {  # <case> <id> [teardown options]
   local dir=$1 id=$2
+  shift 2
+  if [ "$#" -eq 0 ]; then set -- --force; fi
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
   FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
-    "$TEARDOWN" "$id" --force
+    "$TEARDOWN" "$id" "$@"
 }
 
 assert_refused_without_mutation() {  # <case> <id> <description>
@@ -991,7 +993,7 @@ test_remote_layout_homes_serialize_on_one_project_lock() {
   [ -e "$dir/lock-held" ] || fail "the local child never took the shared project lock"
 
   set +e
-  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  run_case "$dir" "$id" --batch > "$dir/stdout" 2> "$dir/stderr"
   rc=$?
   set -e
   kill "$holder" 2>/dev/null || true

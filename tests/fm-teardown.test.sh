@@ -764,6 +764,54 @@ test_teardown_closes_the_backlog_item_itself() {
   pass "teardown closes its own backlog item before reporting success"
 }
 
+test_batch_teardown_preserves_proofs_and_defers_summary() {
+  local case_dir old_head task_head rc
+  case_dir=$(make_case batch-teardown)
+  write_meta "$case_dir" direct-PR ship
+  seed_backlog_in_flight "$case_dir"
+  old_head=$(git -C "$case_dir/project" rev-parse HEAD)
+  wt_commit_file "$case_dir" feature.txt fixture
+  task_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  rc=0
+  run_teardown "$case_dir" --batch > "$case_dir/out" 2> "$case_dir/err" || rc=$?
+  expect_code 1 "$rc" "batch teardown discarded an unlanded commit"
+  assert_refusal_retained_task_state "$case_dir" batch-unlanded "$task_head"
+
+  git -C "$case_dir/wt" push -q origin HEAD:main
+  printf 'unsaved\n' > "$case_dir/wt/unsaved.txt"
+  rc=0
+  run_teardown "$case_dir" --batch > "$case_dir/out" 2> "$case_dir/err" || rc=$?
+  expect_code 1 "$rc" "batch teardown discarded untracked work"
+  assert_present "$case_dir/wt/unsaved.txt" "batch teardown lost the untracked file"
+  assert_refusal_retained_task_state "$case_dir" batch-dirty "$task_head"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] || fail "batch refusal closed the backlog item"
+  [ "$(git -C "$case_dir/project" rev-parse HEAD)" = "$old_head" ] \
+    || fail "refused batch teardown synced the project before authorization"
+
+  rm "$case_dir/wt/unsaved.txt"
+  run_teardown "$case_dir" --batch > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "landed batch teardown failed: $(cat "$case_dir/err")"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] || fail "batch did not close its own backlog item"
+  [ "$(git -C "$case_dir/project" rev-parse HEAD)" = "$task_head" ] \
+    || fail "successful batch teardown skipped project sync"
+  assert_absent "$case_dir/state/task-x1.meta" "batch teardown left the task record"
+  assert_absent "$case_dir/state/home-summary.json" "batch teardown ran the full home refresh"
+  FM_HOME="$case_dir" "$ROOT/bin/fm-home-summary-refresh.sh" >/dev/null \
+    || fail "the caller could not refresh the summary after the batch"
+  jq -e 'all(.endpoints[]; .id != "task-x1") and (.landed | any(.id == "task-x1"))' \
+    "$case_dir/state/home-summary.json" >/dev/null \
+    || fail "the caller's summary did not reflect the completed task"
+  pass "batch teardown requires landed, clean work, syncs the project, and defers summary publication"
+
+  write_meta "$case_dir" local-only secondmate
+  rc=0
+  run_teardown "$case_dir" --batch > "$case_dir/out" 2> "$case_dir/err" || rc=$?
+  expect_code 2 "$rc" "secondmate retirement accepted --batch"
+  assert_present "$case_dir/state/task-x1.meta" "batch retirement erased the secondmate record"
+  pass "batch teardown refuses persistent secondmate retirement"
+}
+
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note() {
   local case_dir out real_tasks_axi gerrit_url=https://gerrit.example.com/c/project/+/12345
   case_dir=$(make_case tasks-axi-close-gerrit)
@@ -3354,7 +3402,7 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
   printf 'done: PR https://github.com/example/repo/pull/9 checks green\n' > "$case_dir/state/task-x1.status"
   set +e
-  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  FM_HOME="$case_dir/home" run_teardown "$case_dir" --batch > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "mate-teardown-refuses: teardown proceeded with an undelivered final line"
@@ -3374,7 +3422,7 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   [ -z "$seq" ] || FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
     "$ROOT/bin/fm-wake-drain.sh" --ack-through "$seq" --recovery-generation "$generation" >/dev/null
   set +e
-  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2"
+  FM_HOME="$case_dir/home" run_teardown "$case_dir" --batch > "$case_dir/stdout2" 2> "$case_dir/stderr2"
   rc=$?
   set -e
   expect_code 0 "$rc" "mate-teardown-refuses: rerun after repair should succeed: $(cat "$case_dir/stderr2")"
@@ -6601,6 +6649,7 @@ test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
+test_batch_teardown_preserves_proofs_and_defers_summary
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note

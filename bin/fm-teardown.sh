@@ -209,7 +209,11 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] [--batch]
+#   --batch is for a caller cleaning up multiple ship or scout tasks in one
+#   home. Run fm-guard.sh once before the batch and leave the full home summary
+#   to the watcher or run fm-home-summary-refresh.sh --best-effort after the
+#   batch. The task's cleanup proofs and applicable project sync still run.
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks and closes the scout as discarded with no report recorded, and
 #   discards secondmate child work for kind=secondmate. Only use it when the
@@ -543,11 +547,13 @@ ID=$1
 TEARDOWN_LOST_SLOT_EXIT=4
 FORCE=
 LEGACY_RECORD_GIVEN=0
+TEARDOWN_BATCH=0
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    --batch) TEARDOWN_BATCH=1 ;;
     *)
       echo "error: invalid teardown request" >&2
       exit 2
@@ -677,6 +683,10 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
 }
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
+if [ "$TEARDOWN_BATCH" = 1 ] && [ "$TEARDOWN_META_KIND" = secondmate ]; then
+  echo "error: --batch applies to ship and scout tasks, not secondmate retirement" >&2
+  exit 2
+fi
 # Retiring a persistent secondmate is main's alone in both postures; the kind
 # is read under the metadata lock (role partition: bin/fm-lease-lib.sh).
 [ "$TEARDOWN_META_KIND" != secondmate ] || fm_lease_forbid_branch "secondmate retirement (fm-teardown)"
@@ -1297,7 +1307,7 @@ if [ "$BACKEND" = t3code ]; then
   fm_backend_runtime_check t3code || exit 1
   [ "$TEARDOWN_META_KIND" != secondmate ] || t3code_secondmate_lsof_check "$ID" "$(fm_meta_get "$META" home)" || exit 1
 fi
-if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
+if [ "$TEARDOWN_BATCH" != 1 ] && [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
   "$FM_ROOT/bin/fm-guard.sh" || true
 fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
@@ -4314,11 +4324,11 @@ fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
-  "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
+  FM_FLEET_SYNC_GUARD_DONE="$TEARDOWN_BATCH" "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 # A secondmate retirement may remove the home containing an overridden control
 # state directory. Do not let the side-band refresh recreate that retired home.
-if [ -d "$STATE" ]; then
+if [ "$TEARDOWN_BATCH" != 1 ] && [ -d "$STATE" ]; then
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 fi
 if [ "$TEARDOWN_POOL_SLOT_LOST" = 1 ]; then

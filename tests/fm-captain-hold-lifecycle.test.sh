@@ -67,11 +67,12 @@ run_bearings() {  # <home> [extra args]
     "$BEARINGS" --json "$@"
 }
 
-run_teardown() {  # <home> <id>
+run_teardown() {  # <home> <id> [teardown options]
   local home=$1 id=$2
+  shift 2
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id"
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" "$@"
 }
 
 tasks_in() {  # <home> <tasks-axi args...>
@@ -2758,7 +2759,7 @@ test_teardown_never_closes_a_captain_held_task() {
   complete_through_sibling "$home" "$id" >/dev/null \
     || fail "completion gate failed with the origin as its own captain call"
 
-  run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
+  run_teardown "$home" "$id" --batch > "$home/teardown.out" 2> "$home/teardown.err" \
     || fail "cleanup of a captain-held investigation failed: $(cat "$home/teardown.err")"
   show=$(tasks_in "$home" show "$id" --full) || fail "the captain-held row is gone after cleanup"
   assert_not_contains "$show" "state: done" \
