@@ -69,7 +69,7 @@ A re-emit (`--reemit`) reprints the digest for a process that already has the he
 | Source | Action | Why |
 | --- | --- | --- |
 | `startup`, `new` | Full digest | This is a true session start that has not taken the helm; Pi CLI continuations are refined to `resume` by the adapter before reaching this boundary. |
-| `clear`, `compact` | `--reemit` after a proven complete startup, otherwise full digest | This process normally has the helm and lost only its context, but an earlier hook may have been truncated after acquiring the lock. |
+| `clear`, `compact` | Re-emit after proven startup, otherwise run the full digest | A process can lose context after an earlier hook acquired the lock but before it completed. Native Claude compact has an [opt-in short path](#claude). |
 | `resume`, `reload`, `fork` | Delegate to the nudge wrapper | Prior context is restored, so re-running is redundant when the lock is still ours and an instruction is enough when a new process resumed an old session. |
 | unreadable or unrecognized | Full digest | Taking the helm redundantly is cheap and idempotent; not taking it is the bug this tier exists to fix. |
 
@@ -247,6 +247,11 @@ Native stdout context injection is supported.
 Claude caps one hook output string at 10,000 characters.
 Above the cap the model receives a preview of the first 2,000 characters plus the path of a saved file, and is not asked to read that file.
 A context re-emit therefore prints a short `RE-EMIT CUE` first, which tells the model to read the saved file.
+An opted-in Claude primary with proven startup and current lock ownership receives a bounded read-first page for native compaction.
+The page identifies the last attributed captain turn and shows prioritized task state from the existing local backlog projection.
+Before fleet action, the agent uses the ordinary wake drain, which preserves actionable records and acknowledgement state until their normal presentation.
+The complete recovery digest remains available through `bin/fm-session-start.sh --reemit`.
+See [Claude continuity hooks](configuration.md#supervisor-continuity-hooks-claude-primary) for opt-in and private replay setup.
 
 ### Codex exec
 

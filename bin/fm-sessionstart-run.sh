@@ -34,6 +34,13 @@
 #                           silent) and a plain instruction is enough when a new
 #                           process resumed an old session (the nudge fires).
 #
+# Native Claude compact with a completed startup is the one opt-in exception.
+# A regular config/claude-compact-resume file selects the bounded read-first
+# page in fm-precompact-handoff.py. The current Claude ancestry and hook
+# session must agree. Reverify the lock before taking this path. It leaves
+# wake presentation to the existing drain so a capped hook cannot advance a
+# cursor past evidence the agent never saw. The full re-emit remains on demand.
+#
 # Every ordinary transport path exits 0, exactly like the nudge wrapper: a
 # Claude SessionStart exit 2 blocks session initialization, so a failed session
 # start must reach the agent as digest text it can act on, never as a refusal to
@@ -51,6 +58,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 COMPLETION_FILE="$STATE/.session-start-complete"
 
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -63,6 +71,7 @@ COMPLETION_FILE="$STATE/.session-start-complete"
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
 
 SOURCE=
+PAYLOAD=
 PI_PREREQUISITE=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -137,16 +146,40 @@ if [ -z "$SOURCE" ] && [ ! -t 0 ]; then
   ')
 fi
 
+compact_read_first() {
+  local opt_in="$CONFIG/claude-compact-resume" session page page_bytes
+  [ "$SOURCE" = compact ] && [ -n "$PAYLOAD" ] || return 1
+  [ -f "$opt_in" ] && [ ! -L "$opt_in" ] || return 1
+  session=$(fm_session_lock_trusted_session_id) || return 1
+  "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 && session_start_completed || return 2
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$SCRIPT_DIR/fm-timeout-lib.sh"
+  if page=$(printf '%s' "$PAYLOAD" | fm_run_timed 12 "$SCRIPT_DIR/fm-precompact-handoff.py" \
+      compact --home "$FM_HOME" --session "$session" 2>/dev/null); then
+    page_bytes=$(printf '%s\n' "$page" | wc -c)
+    if [ -n "$page" ] && [ "$page_bytes" -le 1660 ]; then
+      printf '%s\n' "$page"
+      return 0
+    fi
+  fi
+  printf '%s\n' 'FIRSTMATE COMPACT - recovery records unavailable. Run bin/fm-session-start.sh --reemit and reconcile before acting.'
+}
+
 case "$SOURCE" in
   resume|reload|fork)
     exec "$SCRIPT_DIR/fm-sessionstart-nudge.sh"
     ;;
   clear|compact)
     if session_start_completed; then
-      "$SCRIPT_DIR/fm-session-start.sh" --reemit --source "$SOURCE" || true
-    else
-      "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" || true
+      compact_read_first
+      case $? in
+        0) exit 0 ;;
+        1) "$SCRIPT_DIR/fm-session-start.sh" --reemit --source "$SOURCE" || true; exit 0 ;;
+        # Ownership or completion changed during the short-path check.
+        # Let the ordinary startup owner handle lock refusal or recovery.
+      esac
     fi
+    "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" || true
     ;;
   *)
     "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" || true

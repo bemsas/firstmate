@@ -90,6 +90,21 @@ Pi disagrees with Claude and Codex on `resume`: a new Pi process continuing a se
 The current adapter classification and baseline mechanics are owned by [`../sessionstart-nudge.md`](../sessionstart-nudge.md#harness-transports) and the `bin/fm-session-start.sh` header.
 Their continuation classification is covered by portable tests, not claimed as live validation in this record.
 
+### Claude read-first compact delivery
+
+The native interactive path was verified on 2026-11-22 with Claude Code 2.1.330 and tasks-axi 0.2.6.
+The guard uses an isolated Firstmate home and a loopback model fixture, then compares hook output with the first post-compaction model request.
+It shares no session or credentials with the desktop.
+
+```sh
+FM_CLAUDE_COMPACT_RESUME_LIVE_E2E=1 bash tests/fm-precompact-handoff-live-e2e.test.sh
+```
+
+The baseline spilled its recovery digest and left the task row outside the inline preview.
+The opt-in delivered the entire page once, including the linked design answer, exact open review dependency, and wake-drain pointer.
+A repeat replay with that dependency completed showed one sign-off hold whose readiness still needed verification.
+The loopback guard verifies delivered content and routing; it does not evaluate model judgment.
+
 ### Pi `/new` provider prerequisite
 
 The real offline Pi regression ran on 2026-08-26 with Pi 0.84.0, an isolated home and session directory, a barrier-controlled native digest, and a deterministic local `streamSimple` provider.
