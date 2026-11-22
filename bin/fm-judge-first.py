@@ -268,9 +268,7 @@ def read_log():
         with open(JUDGE_LOG, encoding='utf-8') as fh:
             for raw in fh:
                 try:
-                    row = json.loads(raw)
-                    if isinstance(row, dict):
-                        rows.append(row)
+                    rows.append(json.loads(raw))
                 except ValueError:
                     continue
     except OSError:
@@ -557,6 +555,8 @@ def summarize(since, receipt_path=None):
     rows = []
     unlinked = 0
     for row in read_log():
+        if not isinstance(row, dict):
+            continue
         hook = row.get('hook')
         if (not isinstance(hook, dict) or hook.get('name') != 'judge-first'
                 or not isinstance(hook.get('action'), str) or type(row.get('at')) is not int):

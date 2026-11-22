@@ -471,6 +471,12 @@ PY
   assert_equals "$before" "$(cksum < "$LOG")$(cksum < "$receipts")" "summary mutated evidence"
   assert_equals 0 "$(calls)" "summary called the judge"
   assert_equals 0 "$(sends)" "summary sent an answer"
+  printf '17\n' >> "$LOG"
+  out=$(env FM_HOME="$HOME_DIR" FM_JUDGE_LOG="$LOG" "$HOOK" summary --reversals "$receipts")
+  assert_contains "$out" '"confirmed_human_reversals": 1' "reporting must tolerate a malformed legacy row"
+  printf 'on\n' > "$HOME_DIR/config/judge-first"
+  run_hook "$(line_file malformed "$BENIGN")" >/dev/null
+  assert_equals 0 "$(sends)" "summary tolerance accidentally changed ingest's behavior on the same malformed row"
   pass "summary counts exact operator-attested human reversals once and excludes unlinked, shadow and ambiguous events"
 }
 
