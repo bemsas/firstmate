@@ -44,7 +44,7 @@
 #     re-holding with --until.
 #     Renderers keep every non-live bucket out of the default Captain's Call,
 #     project it as a Charted Next gate stating why, and disclose it in
-#     omitted[]; --all-decisions reveals every captain hold available within the
+#     omitted[]; Bearings' --all-decisions expands dated and aged holds within the
 #     bounded snapshot.
 #   tasks[]: one row per task metadata record captured at snapshot start, sorted
 #     by id. A record removed before capture is omitted. If a captured task's
@@ -1090,7 +1090,11 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             source:.current_state.source,
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
-       + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
+       + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[] as $decision
+            | select(all($backlog.records[]?;
+                .hold_bucket != "blocked"
+                or (.id != $decision.key and .id != ($t.id + "-decision-" + $decision.key))))
+            | $decision
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
     | ([ $queued_all[]
          | select((.unresolved_blocker_ids | length) > 0 or (.hold_reason != null and .hold_kind != null))

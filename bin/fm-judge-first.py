@@ -16,13 +16,13 @@
 #
 # Order of decisions for each line (every step may only ESCALATE, never answer):
 #   1. parse the line and synthesize a card (a recommendation, or none);
-#   2. no recommendation -> escalate, no guessing;
+#   2. captain holds or no recommendation -> escalate, no guessing;
 #   3. the guard rules below (the gaps the backtest found) -> escalate;
 #   4. judge.py --opinion-only (its own hard rules plus the second opinion);
 #      in `on` mode a missing or disagreeing second opinion escalates;
 #   5. a cluster of lines that are one decision (same secondmate, same key
 #      family, within DEDUPE_SECONDS) is judged together, auto only when every
-#      member is auto, and gets exactly one answer.
+#      member is auto and a final hold lookup still permits the send.
 # Any error (unparseable line, judge failure or timeout, budget spent, log
 # unwritable, send refused) leaves today's ordinary wake: this script never
 # exits nonzero from `ingest`, and never retries a send (the printed
@@ -37,7 +37,8 @@
 #
 # Environment (tests and relocated homes): FM_HOME, FM_JUDGE_PY, FM_JUDGE_LOG,
 # FM_JUDGE_FIRST_BUDGET (total judge seconds per ingest, default 40),
-# FM_JUDGE_FIRST_TIMEOUT (seconds per judge call, default 20), FM_SEND_BIN.
+# FM_JUDGE_FIRST_TIMEOUT (seconds per judge call, default 20), FM_SEND_BIN,
+# FM_CAPTAIN_HOLD_BIN.
 import fcntl
 import hashlib
 import json
@@ -53,6 +54,7 @@ CONFIG = os.path.join(HOME_DIR, 'config', 'judge-first')
 JUDGE_PY = os.environ.get('FM_JUDGE_PY') or os.path.join(HOME_DIR, 'data', 'fleet-bridge', 'judge.py')
 JUDGE_LOG = os.environ.get('FM_JUDGE_LOG') or os.path.join(os.path.dirname(JUDGE_PY), 'judge-log.jsonl')
 SEND_BIN = os.environ.get('FM_SEND_BIN') or os.path.join(HERE, 'fm-send.sh')
+HOLD_BIN = os.environ.get('FM_CAPTAIN_HOLD_BIN') or os.path.join(HERE, 'fm-captain-hold.sh')
 BUDGET = float(os.environ.get('FM_JUDGE_FIRST_BUDGET', '40'))
 CALL_TIMEOUT = float(os.environ.get('FM_JUDGE_FIRST_TIMEOUT', '20'))
 DEDUPE_SECONDS = 120
@@ -215,6 +217,29 @@ def guard_rules(synth):
     return hits
 
 
+# ---- captain holds: the judge never answers one ---------------------------------
+
+CAPTAIN_CALL = re.compile(r'^(?:captain[- ](?:call|only|hold|held)|held for the captain)\b', re.I)
+
+
+def is_captain_hold(secondmate, key):
+    """True when `key` names a captain-held task. A cannot-tell result counts as held."""
+    if not key:
+        return False
+    if key.startswith('captain-hold-'):
+        return True
+    try:
+        done = subprocess.run([HOLD_BIN, 'select', secondmate, key], capture_output=True, text=True,
+                              timeout=CALL_TIMEOUT, env=dict(os.environ, FM_HOME=HOME_DIR))
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    return done.returncode != 1
+
+
+def held_verdict():
+    return {'auto': False, 'rules_hit': ['captain_hold'], 'chosen': None, 'source': 'hook'}
+
+
 # ---- journal, dedupe, judge, send ----------------------------------------------
 
 def read_log():
@@ -369,10 +394,14 @@ def ingest(secondmate, lines):
         if prior_cluster(rows, secondmate, identity, at):
             summary['deduped'] += len(cluster)
             continue
-        verdicts = [judge_one(i['synth'], current == 'on', started) for i in cluster]
-        auto = all(v.get('auto') is True for v in verdicts)
         keys = [i['parsed']['key'] for i in cluster if i['parsed']['key']]
         keys = list(dict.fromkeys(keys))
+        if any(CAPTAIN_CALL.match(i['parsed']['body']) for i in cluster) or any(
+                is_captain_hold(secondmate, k) for k in keys):
+            verdicts = [held_verdict() for _ in cluster]
+        else:
+            verdicts = [judge_one(i['synth'], current == 'on', started) for i in cluster]
+        auto = all(v.get('auto') is True for v in verdicts)
         action = ('auto' if current == 'on' else 'would-auto') if auto else 'escalate'
         text = answer_text(head['synth'], verdicts[0]) if auto else None
         errored = any('judge_error' in v.get('rules_hit', []) for v in verdicts)
@@ -393,7 +422,13 @@ def ingest(secondmate, lines):
         rows.extend(rows_out)
         for row in rows_out:
             record_langfuse(row)
-        if action == 'auto':
+        if action == 'auto' and any(is_captain_hold(secondmate, k) for k in keys):
+            # A hold placed after the verdict was journaled: never send.
+            append_log({'at': int(time.time()), 'card': head['synth']['card'], 'verdict': held_verdict(),
+                        'hook': dict(row_base['hook'], action='escalate', card_hash=head['synth']['digest'],
+                                     key=head['parsed']['key'])})
+            summary['escalate'] += len(cluster)
+        elif action == 'auto':
             result = send_answer(secondmate, keys, text)
             final = 'sent' if result['ok'] else 'send-failed'
             append_log({'at': int(time.time()), 'card': head['synth']['card'], 'verdict': verdicts[0],

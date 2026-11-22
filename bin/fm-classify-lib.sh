@@ -876,9 +876,22 @@ EOF
 # writer-side rejection would.
 FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT='pending-reply-'
 
+_fm_captain_hold_relay_id() {  # <key> [<out-var>]
+  local __fm_relay_re='^captain-hold-([A-Za-z0-9._-]+)-[1-9][0-9]*$'
+  [[ "$1" =~ $__fm_relay_re ]] || return 1
+  if [ "$#" -gt 1 ]; then
+    printf -v "$2" '%s' "${BASH_REMATCH[1]}"
+  else
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  fi
+}
+
 # 0 when <key> is not reserved, or is reserved and <note> speaks its vocabulary.
 _fm_decision_key_transition_allowed() {  # <key> <note>
-  local key=$1 note=$2 prefix
+  local key=$1 note=$2 prefix relay_id
+  if _fm_captain_hold_relay_id "$key" relay_id; then
+    case "$note" in "captain hold $relay_id: "*) return 0 ;; *) return 1 ;; esac
+  fi
   for prefix in ${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT}; do
     case "$key" in
       "$prefix"*)

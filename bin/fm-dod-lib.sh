@@ -464,6 +464,20 @@ fm_brief_task_content_valid() {  # <file>
   [ -n "$(printf '%s' "$task" | tr -d '[:space:]')" ]
 }
 
+# Shape check for the opt-in rework section scaffolded by fm-brief.sh.
+# The intake author verifies that the linked sources are the agreed ones.
+fm_brief_agreed_design_valid() {  # <brief>
+  fm_brief_task_heading_present "$1" "## Agreed design" || return 0
+  fm_brief_task_heading_body "$1" "## Agreed design" | awk '
+    /^[[:space:]]*$/ { next }
+    /^Artifact: \[[^]]+\]\((https?:\/\/|\/|\.\.?\/|[[:alnum:]_-]+\/)[^[:space:]<>()]+\)$/ { artifact++; next }
+    /^Decisions: \[[^]]+\]\((https?:\/\/|\/|\.\.?\/|[[:alnum:]_-]+\/)[^[:space:]<>()]+\)$/ { decisions++; next }
+    /^Change: [^[:space:]{}].*$/ { change++; next }
+    { invalid = 1 }
+    END { exit (invalid || artifact != 1 || decisions != 1 || change != 1) }
+  '
+}
+
 # Print the first `## Captain's intent` body line that opens with an operator
 # address spelling; fail when there is none. The body is never rewritten.
 fm_brief_intent_address_line() {  # <file>

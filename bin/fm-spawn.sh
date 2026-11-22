@@ -4377,6 +4377,10 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: $BRIEF must contain nonempty ## Captain's intent and ## Firstmate spec subsections (or a nonempty legacy # Task body) before spawn" >&2
     exit 1
   fi
+  if ! fm_brief_agreed_design_valid "$BRIEF"; then
+    echo "error: $BRIEF must link the agreed artifact and prior captain decisions and state the requested change in ## Agreed design before spawn" >&2
+    exit 1
+  fi
   if ADDRESS_LINE=$(fm_brief_intent_address_line "$BRIEF"); then
     echo "error: $BRIEF ## Captain's intent has an operator-address line: $ADDRESS_LINE; write the captain's actual words without a Captain label or address before spawn, since the heading already records provenance" >&2
     exit 1

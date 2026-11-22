@@ -13,7 +13,7 @@
 #      line that slipped past judge.py (force-with-lease, revocation, shared
 #      staging migration, run abort, bot protection, a 19-call bundle, a
 #      conditional recommendation, a pipeline step skip).
-#   4. Dedupe by decision identity: a hold line plus its plain twin get one
+#   4. Dedupe by decision identity: a numbered line plus its plain twin get one
 #      answer closing both keys; a replay and a re-journaled twin get none;
 #      successive rounds stay separate decisions.
 #   5. Live sends go through the real fm-send --resolve-key exactly once and are
@@ -280,13 +280,13 @@ test_dedupe_by_decision_identity() {
   new_home dedupe
   printf 'on\n' > "$HOME_DIR/config/judge-first"
   local a b lines
-  a='needs-decision [key=captain-hold-ce-policy-1] [at=5000]: captain hold: Options: (A, recommended) keep the field; (B) omit it.'
+  a='needs-decision [key=ce-policy-1] [at=5000]: Options: (A, recommended) keep the field; (B) omit it.'
   b='needs-decision [at=5002] [key=ce-policy]: corr=0123456789abcdef Options: (A, recommended) keep the field as recommended; (B) omit it.'
   lines=$(line_file in "$a" "$b")
   run_hook "$lines" >/dev/null
-  assert_equals 1 "$(sends)" "a hold line and its plain twin are one decision with one answer"
-  assert_contains "$(cat "$HOME_DIR/sends")" "--resolve-key captain-hold-ce-policy-1 --resolve-key ce-policy" "the one answer must close both keys"
-  pass "dedupe: a hold line plus its twin get one answer that closes both keys"
+  assert_equals 1 "$(sends)" "two lines of one decision get one answer"
+  assert_contains "$(cat "$HOME_DIR/sends")" "--resolve-key ce-policy-1 --resolve-key ce-policy" "the one answer must close both keys"
+  pass "dedupe: a numbered line plus its plain twin get one answer that closes both keys"
 
   run_hook "$lines" >/dev/null
   assert_equals 1 "$(sends)" "a replay must not answer again"
@@ -297,10 +297,10 @@ test_dedupe_by_decision_identity() {
 
   new_home dedupe-rounds
   printf 'on\n' > "$HOME_DIR/config/judge-first"
-  a='needs-decision [key=captain-hold-ce-cal-1] [at=5000]: Options: (A, recommended) keep the field; (B) omit it.'
-  b='needs-decision [key=captain-hold-ce-cal-2] [at=5900]: Options: (A, recommended) drop the cache; (B) keep it.'
+  a='needs-decision [key=ce-cal-1] [at=5000]: Options: (A, recommended) keep the field; (B) omit it.'
+  b='needs-decision [key=ce-cal-2] [at=5900]: Options: (A, recommended) drop the cache; (B) keep it.'
   run_hook "$(line_file in "$a" "$b")" >/dev/null
-  assert_equals 2 "$(sends)" "successive rounds of one hold are separate decisions"
+  assert_equals 2 "$(sends)" "successive rounds of one decision family are separate decisions"
   pass "dedupe: successive rounds of a key family stay separate decisions"
 
   new_home dedupe-families
@@ -313,7 +313,7 @@ test_dedupe_by_decision_identity() {
 
   new_home dedupe-risky-twin
   printf 'on\n' > "$HOME_DIR/config/judge-first"
-  a='needs-decision [key=captain-hold-ce-risk-1] [at=5000]: Options: (A, recommended) keep the field; (B) omit it.'
+  a='needs-decision [key=ce-risk-1] [at=5000]: Options: (A, recommended) keep the field; (B) omit it.'
   b='needs-decision [key=ce-risk] [at=5001]: Options: (A, recommended) force-with-lease push the branch; (B) leave it.'
   run_hook "$(line_file in "$a" "$b")" >/dev/null
   assert_equals 0 "$(sends)" "a decision is auto only when every line of it is auto"
@@ -327,6 +327,34 @@ test_dedupe_by_decision_identity() {
   assert_equals 1 "$(sends)" "identical keyless lines are one decision"
   assert_not_contains "$(cat "$HOME_DIR/sends")" "--resolve-key" "a keyless decision has nothing to close"
   pass "dedupe: identical keyless lines are one decision answered without --resolve-key"
+}
+
+test_captain_holds_are_never_answered() {
+  new_home holds
+  printf 'on\n' > "$HOME_DIR/config/judge-first"
+  cp "$ROOT/.tasks.toml" "$HOME_DIR/.tasks.toml"
+  local ans
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-tasks-axi.sh" add held-one "synthetic hold" --kind ship --repo x >/dev/null \
+    || fail "setup: could not create synthetic hold"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-captain-hold.sh" hold held-one --reason "synthetic captain call" >/dev/null 2>&1
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-captain-hold.sh" open held-one || fail "setup: the synthetic task is not an open captain hold"
+  run_hook "$(line_file in 'needs-decision [key=held-one] [at=1000]: Options: (A, recommended) keep the field; (B) omit it.')" >/dev/null
+  assert_equals 0 "$(sends)" "a judge pick must never answer an open captain-held task"
+  assert_equals 0 "$(calls)" "a captain hold is not even put to the judge"
+  assert_contains "$(journal "rows[-1]['verdict']['rules_hit']")" captain_hold "the escalation reason should be journaled"
+  assert_equals escalate "$(journal "rows[-1]['hook']['action']")" "a held decision escalates"
+  run_hook "$(line_file in2 'needs-decision [key=captain-hold-x-1] [at=2000]: Options: (A, recommended) keep the field; (B) omit it.')" >/dev/null
+  assert_equals 0 "$(sends)" "a captain-hold- key is never answered"
+  run_hook "$(line_file in2-twin 'needs-decision [key=x] [at=2010]: Options: (A, recommended) keep the field; (B) omit it.')" >/dev/null
+  assert_equals 0 "$(sends)" "a later plain twin of a captain hold is never answered"
+  run_hook "$(line_file in3 'needs-decision [key=plain-ask] [at=3000]: captain call: Options: (A, recommended) keep the field; (B) omit it.')" >/dev/null
+  assert_equals 0 "$(sends)" "captain call wording is never answered"
+  run_hook "$(line_file in4 'needs-decision [key=plain-ask-2] [at=4000]: Options: (A, recommended) keep the field; (B) omit it.')" >/dev/null
+  assert_equals 1 "$(sends)" "an ordinary unheld decision is still answered"
+  ans="$HOME_DIR/answer.txt"; printf 'a\n' > "$ans"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-captain-hold.sh" answer held-one --decision-file "$ans" >/dev/null 2>&1 || fail "the human answer path was refused"
+  if FM_HOME="$HOME_DIR" "$ROOT/bin/fm-captain-hold.sh" open held-one; then fail "the human answer did not close the hold"; fi
+  pass "captain holds: a judge pick is never sent for a held task, a captain-hold- key or captain-call wording; ordinary decisions and the human answer path still work"
 }
 
 test_send_failure_leaves_ordinary_wake() {
@@ -395,6 +423,23 @@ SH
   sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/mate.status" | grep -qF 'resolved [key=clause-policy]: answered: judge auto-decided' \
     || fail "the keyed decision was not closed:"$'\n'"$(cat "$HOME_DIR/state/mate.status")"
   assert_equals sent "$(journal "rows[-1]['hook']['action']")" "the journal should end at sent"
+  if command -v tasks-axi >/dev/null 2>&1; then
+    FM_HOME="$HOME_DIR" "$ROOT/bin/fm-captain-hold.sh" hold clause-policy --title "Hold the exact policy choice" \
+      --reason "Wait for the captain's selection" >/dev/null || fail "could not register a same-key captain hold"
+    printf '%s\n' "$BENIGN" > "$HOME_DIR/state/mate.status"
+    out=$(env PATH="$fb:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$HOME_DIR" FM_SEND_SETTLE=0 \
+      "$ROOT/bin/fm-send.sh" mate --resolve-key clause-policy "agent recommends option A" 2>&1) \
+      && fail "a generic same-key send answered a captain hold"
+    assert_contains "$out" "names a captain hold" "same-key send did not explain its refusal"
+    [ ! -e "$HOME_DIR/state/mate.inbox/002.msg" ] || fail "the generic answer reached the worker"
+    env PATH="$fb:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$HOME_DIR" FM_SEND_SETTLE=0 \
+      "$ROOT/bin/fm-send.sh" mate --captain-answer --resolve-key clause-policy "I choose option B." >/dev/null \
+      || fail "the human answer could not use the existing keyed route"
+    out=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-tasks-axi.sh" show clause-policy --full)
+    assert_contains "$out" "state: done" "the authorized answer did not close the same-key hold"
+    assert_contains "$out" "I choose option B." "the authorized answer lost its actual words"
+    assert_not_contains "$out" "agent recommends option A" "an ordinary recommendation was recorded as approval"
+  fi
   pass "live: the real fm-send --resolve-key delivers one answer and closes the decision"
 }
 
@@ -454,6 +499,7 @@ test_guard_rules_from_real_lines
 test_guard_rule_variants
 test_judge_findings_and_failures_escalate
 test_dedupe_by_decision_identity
+test_captain_holds_are_never_answered
 test_send_failure_leaves_ordinary_wake
 test_non_decision_lines_are_ignored
 test_summary
@@ -527,6 +573,7 @@ class HookTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             (home/'config').mkdir()
+            (home/'data').mkdir()  # the hold check needs a readable data dir; no backlog = no holds
             (home/'config/judge-first').write_text('on')
             judge = home/'judge.py'
             judge.write_text('''import json, os, sys

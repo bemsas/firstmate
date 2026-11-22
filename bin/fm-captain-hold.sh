@@ -25,14 +25,18 @@
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh pr-policy <task-id> <PR-url> <merged|closed|terminal> <close|release>
 #   fm-captain-hold.sh settle-pr <task-id> <PR-url>
-#   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
+#   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (human answers on stdin)
+#   fm-captain-hold.sh select <origin-id> <key>
+#     Prints the exact or legacy open hold id. Exit 0 means ready for an answer,
+#     4 means a prerequisite is pending, 1 means no matching hold, and 2 means unknown.
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
 #   fm-captain-hold.sh unbind <source-id>
 #   fm-captain-hold.sh binding <source-id>
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
-#   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
+#   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent] [--ready]
+#     --ready returns 4 for an open hold still waiting on a prerequisite.
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
@@ -481,6 +485,26 @@ show_field_value() {  # <show-output> <field>
   value=$(decode_shown_value "$(show_field "$1" "$2")")
   [ "$value" != '-' ] || value=''
   printf '%s' "$value"
+}
+
+# tasks-axi reports known open prerequisites in blocked/blocked_by. A missing
+# prerequisite can still appear in deps with blocked=no, so require positive
+# Done records for every declared edge, just as the fleet view does.
+hold_dependencies_ready() {  # <show-output>
+  local show=$1 deps dep id
+  case "$(show_field "$show" blocked)" in
+    yes) return 1 ;;
+    no|'') ;;
+    *) return 1 ;;
+  esac
+  deps=$(show_field_value "$show" deps) || return 1
+  while IFS= read -r dep; do
+    case "$dep" in blocked-by:*) id=${dep#blocked-by:} ;; *) continue ;; esac
+    case "$id" in ''|*[!A-Za-z0-9._-]*|.*) return 1 ;; esac
+    task_show "$id" && [ "$(show_field "$TASK_SHOW_OUTPUT" state)" = "done" ] || return 1
+  done <<EOF
+$(printf '%s\n' "$deps" | tr ',' '\n')
+EOF
 }
 
 origin_exists_here() {  # <origin-id>
@@ -1224,7 +1248,9 @@ command_hold() {
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id lost its hold-set stamp while being held"
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
-  publish_parent_hold "$id" "$occurrence" needs-decision "$reason" "$until"
+  if hold_dependencies_ready "$show"; then
+    publish_parent_hold "$id" "$occurrence" needs-decision "$reason" "$until"
+  fi
   if [ -n "$origin" ]; then
     write_hold_origin "$id" "$(show_field "$show" body)" "$origin" || exit $?
   fi
@@ -1395,6 +1421,7 @@ command_answer() {
     # this really was the captain's item rather than ordinary finished work.
     [ "$hold_kind" = captain ] \
       || fail "task $id was never held for the captain; nothing to record an answer on"
+    hold_dependencies_ready "$show" || fail "task $id has an unresolved prerequisite"
     write_resolution_record "$id" repaired "$body"
     remove_interrupted_answer_stamp "$id"
     task_show "$id" || fail "task $id disappeared while recording the answer"
@@ -1408,6 +1435,7 @@ command_answer() {
   fi
 
   if [ "$hold_kind" = captain ]; then
+    hold_dependencies_ready "$show" || fail "task $id has an unresolved prerequisite"
     # Actively the captain's item (a date-expired hold keeps its annotations
     # and stays answerable). A matching record means an interrupted close to
     # finish; a different digest is a NEW answer on a re-held task and gets
@@ -1919,6 +1947,9 @@ Settlement policy: $(jq -r .on "$policy") -> $action"
   require_tasks_axi
   task_show_or_fail "$id" "task $id is absent while settling its PR hold"
   body=$(show_field "$show" body)
+  if [ "$(show_field "$show" state)" != "done" ] && [ "$(show_field_value "$show" hold_kind)" = captain ]; then
+    hold_dependencies_ready "$show" || return 0
+  fi
   if [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
     && [ "$(recorded_resolution_mode "$body" || true)" = "$mode" ] \
     && [ "$(resolution_record_count "$body")" = "$occurrence" ]; then
@@ -2349,12 +2380,13 @@ EOF
 # exist holds nothing. Every read failure over a record that DOES exist is a 2,
 # printed to stderr, because a mechanical closer must never read "cannot tell"
 # as permission to close.
-command_open() {  # <task-id> [--identity] [--distinguish-absent]
-  local id='' identity=0 distinguish_absent=0 data state root file backend show shown_body
+command_open() {  # <task-id> [--identity] [--distinguish-absent] [--ready]
+  local id='' identity=0 distinguish_absent=0 ready=0 data state root file backend show shown_body
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --identity) identity=1 ;;
       --distinguish-absent) distinguish_absent=1 ;;
+      --ready) ready=1 ;;
       -*) usage >&2; exit 2 ;;
       *)
         [ -z "$id" ] || { usage >&2; exit 2; }
@@ -2392,12 +2424,17 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   if fm_backlog_row_probe "$data" "$id"; then
     state=${FM_BACKLOG_ROW_STATE%% *}
     if [ "$state" != "done" ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
-      if [ "$identity" -eq 1 ]; then
+      if [ "$identity" -eq 1 ] || [ "$ready" -eq 1 ]; then
         task_show "$id" || {
           printf 'fm-captain-hold: captain call %s is open but its record could not be read\n' "$id" >&2
           exit 2
         }
         show=$TASK_SHOW_OUTPUT
+      fi
+      if [ "$ready" -eq 1 ]; then
+        hold_dependencies_ready "$show" || return 4
+      fi
+      if [ "$identity" -eq 1 ]; then
         shown_body=$(show_field "$show" body)
         printf '%s#%s\n' \
           "$(body_hold_set_timestamp "$(decode_shown_value "$shown_body")")" \
@@ -2415,6 +2452,24 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   exit 2
 }
 
+command_select() {  # <origin-id> <decision-key>
+  local origin=${1:-} key=${2:-} id rc
+  [ "$#" -eq 2 ] || return 2
+  validate_slug origin-id "$origin"
+  validate_slug decision-key "$key"
+  [ -e "$DATA" ] || [ -L "$DATA" ] || return 1
+  for id in "$key" "$(legacy_hold_id "$origin" "$key")"; do
+    rc=0
+    command_open "$id" --ready || rc=$?
+    case "$rc" in
+      0|4) printf '%s\n' "$id"; return "$rc" ;;
+      1) ;;
+      *) return 2 ;;
+    esac
+  done
+  return 1
+}
+
 case "${1:-}" in
   hold) shift; command_hold "$@" ;;
   answer) shift; command_answer "$@" ;;
@@ -2426,6 +2481,7 @@ case "${1:-}" in
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
+  select) shift; command_select "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   reconcile) shift; command_reconcile "$@" ;;
   pr-policy) shift; command_pr_policy "$@" ;;

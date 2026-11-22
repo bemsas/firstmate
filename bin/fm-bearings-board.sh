@@ -11,8 +11,8 @@
 #   fm-bearings-board.sh build <data.json>
 #   fm-bearings-board.sh path
 #
-# build      Validate the payload, drop the Captain's Call cards whose subject
-#            already landed, give every surviving decision card the standard
+# build      Validate the payload, drop landed or pending Captain's Call cards,
+#            give every surviving decision card the standard
 #            reconcile choice, and inject the result into a fresh copy of the
 #            shipped template at the stable board path. Establish the Lavish
 #            session on that board and PROVE it is live BEFORE binding and
@@ -30,9 +30,7 @@
 #              armed: <source-id>            (first registration)
 #              already-armed: <source-id>    (registration already present)
 #              listening: <owner>            (only when a replacement was needed)
-#            Every dropped card is named on stderr as a `dropped-landed-card:`
-#            line, so a rebuild states what it removed instead of quietly
-#            shrinking Captain's Call.
+#            Every dropped card is named on stderr.
 # path       Print the stable board path for this home.
 #
 # A LIVE SESSION IS PROVED, NEVER ASSUMED. `lavish-axi <file>` exits 0 even
@@ -49,7 +47,8 @@
 # CAPTAIN'S CALL HYGIENE. A decision card is dropped when its work item, PR, or
 # structured artifact/version subject appears among the payload's own landed
 # rows, or when `bin/fm-captain-hold.sh open` reports the task is no longer an
-# open captain call. A newer published version also supersedes a version card.
+# open captain call or still has an unresolved prerequisite.
+# A newer published version also supersedes a version card.
 # A task whose state cannot be established is kept, because a call wrongly
 # hidden is worse than a card wrongly shown. Cleanup is therefore a normal
 # rebuild effect rather than a committed migration or direct state mutation.
@@ -272,19 +271,23 @@ establish_board_session() {  # <board>
 # dropped here instead of being carded again. All checks use exact structured
 # identities; unknown subject state keeps the card.
 
-decision_card_is_stale() {  # <task-id> <landed-0-or-1>
+decision_card_drop_reason() {  # <task-id> <landed-0-or-1>; pending cards return 4
   local task=$1 landed=$2 rc=0
   if [ "$landed" = 1 ]; then
     printf 'structured subject already landed\n'
     return 0
   fi
-  "$SCRIPT_DIR/fm-captain-hold.sh" open "$task" --distinguish-absent >/dev/null 2>&1 || rc=$?
+  "$SCRIPT_DIR/fm-captain-hold.sh" open "$task" --distinguish-absent --ready >/dev/null 2>&1 || rc=$?
   # 1 is a definite "no longer an open captain call". 2 is "cannot tell", 3 is
   # absent from this backlog, and a call wrongly hidden is worse than a card
   # wrongly shown, so both uncertain and absent cards stay.
   if [ "$rc" -eq 1 ]; then
     printf 'no longer an open captain call\n'
     return 0
+  fi
+  if [ "$rc" -eq 4 ]; then
+    printf 'captain call still has an unresolved prerequisite\n'
+    return 4
   fi
   return 1
 }
@@ -294,7 +297,7 @@ decision_card_is_stale() {  # <task-id> <landed-0-or-1>
 # card offers reconcile" a property of the board rather than of the composer's
 # memory; the validator prevents duplicate decision options.
 effective_payload() {  # <data.json> <dest.json>
-  local data=$1 dest=$2 landed_keys key reason drop='' tmp landed=0
+  local data=$1 dest=$2 landed_keys key reason rc drop='' tmp landed=0
   landed_keys=$(jq -c '
     def version_parts: split(".") | map(tonumber);
     . as $payload
@@ -317,8 +320,13 @@ effective_payload() {  # <data.json> <dest.json>
     if jq -e --arg key "$key" 'index($key) != null' <<< "$landed_keys" >/dev/null; then
       landed=1
     fi
-    reason=$(decision_card_is_stale "$key" "$landed") || continue
-    printf 'dropped-landed-card: %s (%s)\n' "$key" "$reason" >&2
+    rc=0
+    reason=$(decision_card_drop_reason "$key" "$landed") || rc=$?
+    case "$rc" in
+      0) printf 'dropped-landed-card: %s (%s)\n' "$key" "$reason" >&2 ;;
+      4) printf 'dropped-pending-card: %s (%s)\n' "$key" "$reason" >&2 ;;
+      *) continue ;;
+    esac
     drop=$drop$key$'\n'
   done < <(jq -r '.captains_call[]? | select(.type == "decision") | .key' "$data")
   tmp=$(printf '%s' "$drop" | jq -R -s 'split("\n") | map(select(length > 0))') || return 1

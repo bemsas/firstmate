@@ -1,6 +1,6 @@
 ---
 name: ship-landing
-description: Load when a ship reports a PR or ready branch, when deciding or monitoring landing, and before task cleanup.
+description: Load when a ship reports a PR or ready branch, when deciding or monitoring landing, before reporting deployment or live status, and before task cleanup.
 user-invocable: false
 metadata:
   internal: true
@@ -31,6 +31,13 @@ Tear down any other ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
 After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
+
+For a live handoff, read the project's existing delivery evidence and identify the latest deployment, health-check or rollback transition for the same environment and release.
+Use a fresh observation of the exact revision served by that environment, taken after the transition, and recheck the transition before reporting.
+A successful build, merge, checkout, HTTP response or screenshot supplies only its own observation.
+When another home owns the environment, request the same evidence from that owner.
+Format the handoff with [live-handoff.sh](references/live-handoff.sh) using the observed state, candidate revision, transition time and served-version receipt.
+Use the resulting state and verification together in the task note and captain-facing handoff.
 
 A secondmate is persistent and an empty queue is healthy.
 Retire one only on an explicit captain or main-firstmate decision, after loading `secondmate-provisioning`; its home must contain no work under way, and forced discard still requires explicit captain authority.

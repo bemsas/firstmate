@@ -1195,6 +1195,7 @@ The optional local, gitignored `config/judge-first` file opts this home into run
 Absent means the hook does nothing.
 Present and empty, or holding any value other than `on`, means shadow: the hook computes each verdict, appends it to `judge-log.jsonl` beside `judge.py`, and sends nothing.
 Only the exact word `on` answers an auto verdict, through `bin/fm-send.sh` with `--resolve-key`, journaled before the send and never retried.
+Captain holds go through their own [answer path](captain-hold-lifecycle.md).
 Deleting the file is the kill switch.
 `bin/fm-judge-first.sh summary [--since <epoch>]` lists the shadow verdicts so a day of them can be compared with the supervisor's own answers.
 A line with no recommendation, a recommendation the guard rules reject, a judge failure or timeout, an unknown judge policy, or (in `on` mode) a missing second opinion always keeps the ordinary wake.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell through its backend endpoint, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
+# Usage: fm-send.sh <target> [--captain-answer] [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -202,15 +202,13 @@
 # to the branch (contract: bin/fm-lease-lib.sh); which findings firstmate may
 # decide at all remains ask-user-authority's judgment for either actor.
 #
-# Chat is also a channel that carries keyed captain answers, so the same flag
-# feeds bin/fm-captain-hold.sh's one keyed-answer intake for any key that names
-# a captain-held task in this home - the key as a task id itself, or through
-# the legacy `<task>-decision-<key>` identity for pre-collapse rows. fm-send
-# closes nothing itself; it hands the intake `<task-id>\t<answer>\t<label>`
-# exactly as every other channel does, and the intake owns what that means.
-# This is what lets an answer reach a decision that has already been
-# transferred from the live status log to its durable captain-held task, which
-# the status ledger alone can no longer close.
+# Use --captain-answer with --resolve-key only to relay words received directly
+# from the captain. Generic sends, including judge sends, cannot answer a
+# captain hold even when a status decision uses the same key. A local hold
+# goes through fm-captain-hold.sh's keyed intake. A relayed mate hold gets the
+# words for its owner to record and stays open here until that owner reports
+# its resolution. The flag is an explicit operator action, not proof of who
+# produced the input. It is never relocated to the supervision branch.
 #
 # Each named key must therefore currently be open in ONE of the two ledgers: open
 # in this home's status log per status_open_decisions (bin/fm-classify-lib.sh), or
@@ -516,6 +514,7 @@ fi
 # must precede --key or the message text; everything after the last flag is the
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
+CAPTAIN_ANSWER=0
 FIRE_AND_FORGET_ID=
 fm_send_add_resolve_key() { # <key>
   local k=$1
@@ -535,6 +534,10 @@ fm_send_add_resolve_key() { # <key>
 }
 while :; do
   case "${1:-}" in
+  --captain-answer)
+    CAPTAIN_ANSWER=1
+    shift
+    ;;
   --resolve-key)
     [ $# -ge 2 ] || {
       echo "error: --resolve-key requires a key" >&2
@@ -604,36 +607,12 @@ fi
 # send, is what keeps a mistyped key loud instead of delivering an answer that
 # silently leaves its decision open.
 RESOLVE_STATUS_FILE=
-# Which ledger each answered key belongs to. A key still open in the status log
-# is owned by the status log: fm-captain-hold's `complete` closes that live copy
-# at the moment it transfers a decision to its durable captain-held task, so
-# "still open in status" and "already held" are the two sides of one transfer,
-# never both at once. Checking the backlog only for keys the status log no
-# longer owns also keeps the common path free of any backlog read.
+# A captain hold takes precedence over a matching status key, even during
+# transfer to the backlog. The two outputs serve distinct ledgers.
 RESOLVE_STATUS_KEYS=
 RESOLVE_HOLD_KEYS=
+RESOLVE_RELAY_KEYS=
 RESOLVE_CLOSE_MAX=$FM_LINE_CAP_DEFAULT
-
-# Resolve a --resolve-key key that the status log no longer owns to the
-# captain-held task that carries it: the key as a task id itself (the collapsed
-# identity - a captain call IS a task held for the captain), then the legacy
-# derived `<task>-decision-<key>` identity for pre-collapse rows. Answerable
-# means not closed and still carrying the captain-hold annotations tasks-axi
-# preserves even past a hold-until date.
-fm_send_hold_resolved_id() { # <task-id> <decision-key>
-  local show id state hold_kind
-  command -v tasks-axi >/dev/null 2>&1 || return 1
-  for id in "$2" "$1-decision-$2"; do
-    show=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" show "$id" --full 2>/dev/null) || continue
-    state=$(printf '%s\n' "$show" | sed -n 's/^  state: //p' | head -1)
-    hold_kind=$(printf '%s\n' "$show" | sed -n 's/^  hold_kind: //p' | head -1)
-    [ "$state" != "done" ] || continue
-    [ "$hold_kind" = captain ] || continue
-    printf '%s\n' "$id"
-    return 0
-  done
-  return 1
-}
 
 # The still-open keys in a folded "<key>\t<verb>\t<note>" open set, one per line.
 fm_send_open_set_keys() {  # <open-set>
@@ -709,6 +688,11 @@ if [ -n "$FIRE_AND_FORGET_ID" ]; then
     }
 fi
 
+if [ "$CAPTAIN_ANSWER" = 1 ]; then
+  [ -n "$RESOLVE_KEYS" ] || { echo 'error: --captain-answer requires --resolve-key' >&2; exit 1; }
+  fm_lease_forbid_branch 'captain answer (fm-send --captain-answer)'
+fi
+
 if [ -n "$RESOLVE_KEYS" ]; then
   if [ -z "$TARGET_SELECTOR" ] || [ -z "$TARGET_META" ]; then
     echo "error: --resolve-key needs a task selector resolved through this home's metadata; an explicit backend target has no decision ledger here" >&2
@@ -726,8 +710,54 @@ if [ -n "$RESOLVE_KEYS" ]; then
   RESOLVE_STATUS_FILE="$STATE/$RESOLVE_TASK_ID.status"
   resolve_open_set=$(status_open_decisions "$RESOLVE_STATUS_FILE")
   resolve_resend_args=
+  [ "$CAPTAIN_ANSWER" = 0 ] || resolve_resend_args=' --captain-answer'
   resolve_refused_keys=
   for k in $RESOLVE_KEYS; do
+    if _fm_captain_hold_relay_id "$k" >/dev/null; then
+      if [ "$CAPTAIN_ANSWER" = 1 ] && [ "$MARK_FROM_FIRSTMATE" = 1 ] \
+        && _fm_open_set_has "$resolve_open_set" "$k"; then
+        RESOLVE_RELAY_KEYS="${RESOLVE_RELAY_KEYS}${RESOLVE_RELAY_KEYS:+ }$k"
+        resolve_resend_args="$resolve_resend_args --resolve-key $k"
+        continue
+      fi
+      echo "error: --resolve-key '$k': relay the captain's actual answer to the owning mate with --captain-answer; a generic send cannot close its hold. Nothing was sent." >&2
+      exit 1
+    fi
+    # A plain status key can be the twin of the mate's relayed hold.
+    if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
+      relay_id=
+      while IFS=$'\t' read -r relay_key _; do
+        if _fm_captain_hold_relay_id "$relay_key" relay_id && [ "$relay_id" = "$k" ]; then
+          echo "error: --resolve-key '$k' also names a relayed captain hold; use the owning mate's key '$relay_key' for an actual captain answer. Nothing was sent." >&2
+          exit 1
+        fi
+      done <<< "$resolve_open_set"
+    fi
+    hold_rc=0
+    resolved_hold_id=$("$SCRIPT_DIR/fm-captain-hold.sh" select "$RESOLVE_TASK_ID" "$k") || hold_rc=$?
+    case "$hold_rc" in
+      0)
+        if [ "$CAPTAIN_ANSWER" != 1 ]; then
+          echo "error: --resolve-key '$k' names a captain hold; use --captain-answer only with the captain's actual words. Nothing was sent." >&2
+          exit 1
+        fi
+        RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id"
+        if _fm_open_set_has "$resolve_open_set" "$k"; then
+          RESOLVE_STATUS_KEYS="${RESOLVE_STATUS_KEYS}${RESOLVE_STATUS_KEYS:+ }$k"
+        fi
+        resolve_resend_args="$resolve_resend_args --resolve-key $k"
+        continue
+        ;;
+      1) ;;
+      4)
+        echo "error: --resolve-key '$k': captain hold '$resolved_hold_id' has an unresolved prerequisite. Nothing was sent." >&2
+        exit 1
+        ;;
+      *)
+        echo "error: --resolve-key '$k': cannot determine captain-hold ownership. Nothing was sent." >&2
+        exit 1
+        ;;
+    esac
     case "$resolve_open_set" in
     "$k"$'\t'* | *$'\n'"$k"$'\t'*)
       RESOLVE_STATUS_KEYS="${RESOLVE_STATUS_KEYS}${RESOLVE_STATUS_KEYS:+ }$k"
@@ -735,14 +765,6 @@ if [ -n "$RESOLVE_KEYS" ]; then
       continue
       ;;
     esac
-    # Not open in the status log. A decision already transferred to its durable
-    # captain-held task is exactly this case, and it is answerable - just
-    # through the other ledger - so check there before refusing.
-    if resolved_hold_id=$(fm_send_hold_resolved_id "$RESOLVE_TASK_ID" "$k"); then
-      RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id"
-      resolve_resend_args="$resolve_resend_args --resolve-key $k"
-      continue
-    fi
     resolve_refused_keys="${resolve_refused_keys}${resolve_refused_keys:+ }$k"
     resolve_resend_args="$resolve_resend_args --resolve-key '<key>'"
   done
@@ -942,6 +964,9 @@ else
   # The pre-marker answer text, kept for the closing resolved note so the
   # durable ledger records the plain answer without marker or corr bytes.
   RESOLVE_ANSWER_TEXT=$MESSAGE
+  if [ -n "$RESOLVE_RELAY_KEYS" ]; then
+    MESSAGE="Captain answer for $RESOLVE_RELAY_KEYS"$'\n\n'"$MESSAGE"
+  fi
   if [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ -n "$FIRE_AND_FORGET_ID" ]; then
     fm_message_mark_from_firstmate "$MESSAGE" MESSAGE
     MESSAGE="${FM_FROMFIRST_MARK}delivery=${FIRE_AND_FORGET_ID} ${MESSAGE#"$FM_FROMFIRST_MARK"}"
@@ -1129,8 +1154,8 @@ else
       fi
     fi
     if [ -n "$RESOLVE_KEYS" ]; then
-      fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
       fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
+      fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
     fi
     exit 0
   fi
@@ -1221,8 +1246,8 @@ else
     # The answer is durably sent: close each answered decision at enqueue time
     # (answerer-closes; see the header contract).
     if [ -n "$RESOLVE_KEYS" ]; then
-      fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
       fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
+      fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
     fi
     # Ring the doorbell, best-effort: no ring outcome changes the exit status,
     # because the watcher owns loss detection from here, either through its
@@ -1363,8 +1388,8 @@ else
   # Delivery is fully confirmed: close each answered decision in this home's
   # ledger (answerer-closes; see the header contract).
   if [ -n "$RESOLVE_KEYS" ]; then
-    fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
     fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
+    fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
   fi
   # Submit landed with exact empty. Confirmation only proves the text was
   # accepted; the harness still needs a beat to spin up the

@@ -2530,7 +2530,7 @@ SH
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
-    "$ROOT/bin/fm-send.sh" "$id" --resolve-key chat-choice "go with option A" >/dev/null 2>&1 \
+    "$ROOT/bin/fm-send.sh" "$id" --captain-answer --resolve-key chat-choice "go with option A" >/dev/null 2>&1 \
     || fail "an answer to a transferred legacy decision was refused by the chat channel"
   # The answer rides fm-send's durable inbox plane: the record carries the
   # text while the typed channel carries only the doorbell.
@@ -2544,7 +2544,7 @@ SH
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
-    "$ROOT/bin/fm-send.sh" "$id" --resolve-key sample-chat-followup "take the second option" >/dev/null 2>&1 \
+    "$ROOT/bin/fm-send.sh" "$id" --captain-answer --resolve-key sample-chat-followup "take the second option" >/dev/null 2>&1 \
     || fail "an answer keyed by a task id was refused by the chat channel"
   show=$(tasks_in "$home" show sample-chat-followup --full)
   assert_contains "$show" "state: done" "a chat answer left the task-id call open"
@@ -2557,7 +2557,7 @@ SH
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
-    "$ROOT/bin/fm-send.sh" "$id" --resolve-key sample-chat-reconcile reconcile >/dev/null 2>&1
+    "$ROOT/bin/fm-send.sh" "$id" --captain-answer --resolve-key sample-chat-reconcile reconcile >/dev/null 2>&1
   set -e
   show=$(tasks_in "$home" show sample-chat-reconcile --full)
   assert_contains "$show" "state: queued" "a chat reconcile answer closed the call"
@@ -2581,6 +2581,47 @@ SH
   run_captain "$home" verify "$id" >/dev/null \
     || fail "chat-answered calls did not satisfy the completion gate"
   pass "the chat channel feeds the same keyed-answer intake a captured review does"
+}
+
+test_signoff_stays_gated_until_review_is_done() {
+  local home show view rc
+  home=$(make_home pending-signoff)
+  tasks_in "$home" add review-fix "Finish review fixes" --repo sample >/dev/null || fail "review fixture failed"
+  tasks_in "$home" add signoff "Sign off revised design" --repo sample >/dev/null || fail "sign-off fixture failed"
+  tasks_in "$home" block signoff --by review-fix >/dev/null || fail "could not record the prerequisite"
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold signoff --reason "Approve revised design?" >/dev/null \
+    || fail "could not register the pending sign-off"
+
+  view=$(run_bearings "$home" --all-decisions)
+  jq -e '(.decisions_open | all(.id != "signoff"))
+    and (.gates | any(.id == "signoff" and .blocked_by == "review-fix"))' <<< "$view" >/dev/null \
+    || fail "pending sign-off appeared as an actionable call"
+  run_captain "$home" open signoff >/dev/null || fail "pending sign-off was removed from inventory"
+  rc=0
+  run_captain "$home" open signoff --ready >/dev/null || rc=$?
+  expect_code 4 "$rc" "pending sign-off was marked ready"
+
+  printf 'Approve revised design as shown.\n' > "$home/answer"
+  if run_captain "$home" answer signoff --decision-file "$home/answer" > "$home/out" 2>&1; then
+    fail "the direct human answer advanced a pending sign-off"
+  fi
+  assert_grep "unresolved prerequisite" "$home/out" "answer did not explain the review wait"
+  if printf 'signoff\tapprove\tApprove\n' | run_captain "$home" answers --source "captured fixture" > "$home/out" 2>&1; then
+    fail "a captured answer advanced a pending sign-off"
+  fi
+  show=$(tasks_in "$home" show signoff --full)
+  assert_contains "$show" "state: queued" "pending answer closed the sign-off"
+  assert_not_contains "$show" "Resolution mode:" "pending answer wrote a durable approval"
+
+  tasks_in "$home" "done" review-fix >/dev/null || fail "could not complete the review"
+  view=$(run_bearings "$home")
+  jq -e '[.decisions_open[] | select(.id == "signoff")] | length == 1' <<< "$view" >/dev/null \
+    || fail "completed review did not expose exactly one sign-off"
+  run_captain "$home" answer signoff --decision-file "$home/answer" >/dev/null || fail "a ready sign-off refused the human answer"
+  show=$(tasks_in "$home" show signoff --full)
+  assert_contains "$show" "state: done" "a ready sign-off stayed open"
+  assert_contains "$show" "Approve revised design as shown." "the record lost the actual human words"
+  pass "a sign-off waits for its exact review prerequisite before it can accept approval"
 }
 
 test_origin_slug_validation_precedes_path_construction() {
@@ -5153,6 +5194,7 @@ test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
 test_board_answer_reaches_the_keyed_answer_intake
 test_chat_channel_feeds_the_same_keyed_answer_intake
+test_signoff_stays_gated_until_review_is_done
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal

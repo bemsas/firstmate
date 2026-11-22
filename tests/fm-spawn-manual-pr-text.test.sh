@@ -79,7 +79,37 @@ test_spawn_refuses_a_pr_text_mismatch_before_launch() {
   pass "fm-spawn: a brief and registry that disagree on pr=manual refuse before launch in both directions"
 }
 
+test_design_rework_requires_sources_before_launch() {
+  local id=design-rework-a1 out rc brief content
+  make_case rework "$id" "no-mistakes" --design-rework
+  brief="$HOME_DIR/data/$id/brief.md"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off); rc=$?
+  [ "$rc" -ne 0 ] || fail "rework launched while its source links were missing"
+  assert_contains "$out" "must link the agreed artifact and prior captain decisions" "rework refusal did not name the missing sources"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the refused rework published a task record"
+
+  content=$(cat "$brief")
+  content=${content//'<artifact-link>'/https:\/\/design.example.invalid\/accepted-frame}
+  content=${content//'<decision-link>'/data\/design-review\/report.md}
+  content=${content//'{DESIGN_CHANGE}'/Keep the accepted frame and simplify search.}
+  printf '%s\n' "$content" > "$brief"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off); rc=$?
+  expect_code 0 "$rc" "rework with both source links and the requested change should launch"$'\n'"$out"
+  assert_grep 'https://design.example.invalid/accepted-frame' "$HOME_DIR/data/$id/launch-brief.md" "the launch capsule lost the agreed artifact"
+  assert_grep 'data/design-review/report.md' "$HOME_DIR/data/$id/launch-brief.md" "the launch capsule lost the prior decisions"
+
+  id=fresh-design-a1
+  make_case fresh-design "$id" "no-mistakes"
+  content=$(cat "$HOME_DIR/data/$id/brief.md")
+  content=${content/Write the PR text by hand./Explore the first design for this new screen.}
+  printf '%s\n' "$content" > "$HOME_DIR/data/$id/brief.md"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off); rc=$?
+  expect_code 0 "$rc" "genuinely fresh design should launch with no prior agreement"$'\n'"$out"
+  pass "design rework carries agreed sources through spawn, and fresh design can launch without past sources"
+}
+
 test_spawn_launches_when_brief_and_registry_agree_on_pr_text
 test_spawn_refuses_a_pr_text_mismatch_before_launch
+test_design_rework_requires_sources_before_launch
 
 echo "# all fm-spawn-manual-pr-text tests passed"

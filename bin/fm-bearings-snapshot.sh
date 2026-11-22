@@ -42,9 +42,9 @@
 # held task may also appear in Underway. A "live" hold is a default Captain's Call
 # entry; "blocked", "dated", and "aged" leave the default Captain's Call, render
 # as Charted Next gates stating why (the blocking work, the until date, or the
-# floored age), and are counted in omitted[].
-# --all-decisions reveals every captain hold available within the bounded snapshot
-# and drops its gate, so a hold is never in both Captain's Call and Charted Next.
+# floored age).
+# --all-decisions moves dated and aged holds into Captain's Call.
+# Blocked holds stay in Charted Next until their prerequisites finish.
 # Aging is a projection safety net only; the durable
 # deferral remains re-holding with --until.
 #
@@ -81,7 +81,7 @@
 #   --include-prs    ALSO do live GitHub open-PR discovery + checks
 #   --fields <list>  opt in to dropped surfaces: bodies,paths,actions,endpoints
 #   --all-in-flight  include every in-flight task
-#   --all-decisions  include every open decision and captain hold in the bounded snapshot
+#   --all-decisions  include dated and aged holds in the bounded decision view
 #   --all-secondmates include every aggregated secondmate record
 #   --all-landed     include every landed record from every home (default: bounded)
 #   --all-reports    include the full scout-report inventory (default: relevant only)
@@ -168,7 +168,7 @@ For every registered secondmate, readable structured facts from its own home are
   evidence and never become current work. The provenance and freshness fields
   distinguish live and cached ledgers; a home without either is explicitly unreadable.
 Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
-  --all-decisions (all open decisions and captain holds in the bounded snapshot),
+  --all-decisions (include dated and aged holds in the bounded decision view),
   --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
   --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs).
 Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
@@ -394,7 +394,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       else . end;
   def live_captain_call: .hold_bucket == "live";
   def projected_deferred_hold:
-    .hold_bucket != null and .hold_bucket != "live";
+    .hold_bucket == "dated" or .hold_bucket == "aged";
   def bounded_blocker_note($n):
     ((.unresolved_blocker_ids // []) | map(tostring)) as $ids
     | reduce range(0; $ids | length) as $i
@@ -529,6 +529,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and .hold_bucket != null)
+         | select(.hold_bucket != "blocked")
          | select(($all_decisions == 1) or live_captain_call)
          | {id,key:.id,verb:"captain-hold",
             summary:hold_summary(.title; .hold_reason),
@@ -542,7 +543,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                                       (.reason // "captain decision pending")),
                  question:(.question // ((.summary // .id) + ": " + (.reason // "captain decision pending"))),owner:$m.id} ]
             + [ $m.queued[]?
-                | select($all_decisions == 1 and .hold_kind == "captain")
+                | select($all_decisions == 1 and .hold_kind == "captain" and .hold_bucket != "blocked")
                 | select(.id as $id
                          | [$m.decisions_open[]?
                             | select(.source == "backlog" and .verb == "captain-hold")
@@ -585,13 +586,13 @@ MODEL=$(printf '%s' "$SNAP" | jq \
              (.hold_bucket != null or .state == "queued" or
               (.state == "in_flight" and .current_role == "held" and ($working_ids | index($record.id) | not))))
          | select(.captain_actionable != true)
-         | select((.hold_bucket == null) or ($all_decisions == 0))
+         | select((.hold_bucket == null) or (.hold_bucket == "blocked") or ($all_decisions == 0))
          | as_gate("(main)") ]
      + [ (.secondmate_current.records // [])[] as $m
          | select($m.provenance.selected == "structured-home")
          | $m.queued[]?
          | select(.captain_actionable != true)
-         | select((.hold_bucket == null) or ($all_decisions == 0))
+         | select((.hold_bucket == null) or (.hold_bucket == "blocked") or ($all_decisions == 0))
          | as_gate($m.id) ]) as $gates_all
   | ([ .scout_reports[]
        | . as $r
@@ -693,7 +694,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (([($snap.secondmate_current.records // [])[] | select(.parent_event.activity_scan.input_truncated == true or .parent_event.activity_scan.retained_truncated == true)] | length) as $n | if $n > 0 then {surface:("secondmate parent activity evidence truncated for \($n) record(s)"), reveal:"raise FM_SNAPSHOT_PARENT_ACTIVITY_LINES, FM_SNAPSHOT_PARENT_ACTIVITY_BYTES, or FM_SNAPSHOT_PARENT_ACTIVITIES"} else empty end),
         (([($snap.secondmate_current.records // [])[] | select(.parent_event.activity_scan.available == false)] | length) as $n | if $n > 0 then {surface:("secondmate parent activity evidence unavailable for \($n) record(s)"), reveal:"inspect the parent status logs"} else empty end),
         (if $all_decisions == 0 and ($decisions_all | length) > $decisions_n then {surface:("decisions_open showing \($decisions_n) of \($decisions_all | length)"), reveal:"--all-decisions"} else empty end),
-        (if $all_decisions == 0 and $decisions_marked_deferred > 0 then {surface:("captain holds bucketed blocked, dated, or aged: \($decisions_marked_deferred)"), reveal:"--all-decisions"} else empty end),
+        (if $all_decisions == 0 and $decisions_marked_deferred > 0 then {surface:("captain holds bucketed dated or aged: \($decisions_marked_deferred)"), reveal:"--all-decisions"} else empty end),
         (if $all_queued == 0 and ($gates_all | length) > $gates_n then {surface:("gates showing \($gates_n) of \($gates_all | length)"), reveal:"--all-queued"} else empty end),
         (if $all_reports == 0 and ($reports_all | length) > $reports_n then {surface:("reports showing \($reports_n) of \($reports_all | length)"), reveal:"--all-reports"} else empty end),
         (if $all_recorded_prs == 0 and ($recorded_prs_all | length) > $recorded_prs_n then {surface:("recorded_prs showing \($recorded_prs_n) of \($recorded_prs_all | length)"), reveal:"--all-recorded-prs"} else empty end),

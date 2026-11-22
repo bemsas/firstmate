@@ -474,7 +474,7 @@ EOF
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
 print_open_decisions_section() {
-  local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
+  local snapshot=${1:-} open task key verb note line hold_rc item_bytes=220 global_bytes=4000
   local output='' used=0 shown=0 omitted=0 bytes
 
   if [ -n "$snapshot" ]; then
@@ -486,6 +486,16 @@ print_open_decisions_section() {
 
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
+    # An owner relay is a notification. Bearings uses the owning backlog
+    # for current readiness. A local status twin must also defer to its hold.
+    if _fm_captain_hold_relay_id "$key" >/dev/null; then
+      continue
+    fi
+    if [ "$verb" = needs-decision ]; then
+      hold_rc=0
+      "$SCRIPT_DIR/fm-captain-hold.sh" select "$task" "$key" >/dev/null 2>&1 || hold_rc=$?
+      case "$hold_rc" in 0|4) continue ;; esac
+    fi
     # State the folded key on EVERY entry, "default" included. This section's
     # own hint asks the operator to pass that key to fm-send, and the note is
     # unedited worker prose that may itself carry a "[key=...]" token the key

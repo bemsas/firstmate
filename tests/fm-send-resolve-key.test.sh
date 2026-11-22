@@ -853,6 +853,38 @@ test_remote_reserved_pending_reply_key_closes_locally() {
   pass "fm-send --resolve-key: a remote secondmate reserved-key close is the same local ledger append"
 }
 
+test_remote_captain_answer_leaves_closure_to_the_owner() {
+  local dir fb home status ssh_log key out rc
+  dir="$TMP_ROOT/remote-captain"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir")
+  cat > "$fb/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+cat >> "$FM_SSH_LOG"
+SH
+  home=$(setup_remote_home remote-captain)
+  status="$home/state/rsm.status"
+  ssh_log="$dir/ssh.log"
+  key=captain-hold-design-signoff-1
+  printf 'needs-decision [key=%s]: captain hold design-signoff: Approve the design?\n' "$key" > "$status"
+  printf 'needs-decision [key=design-signoff]: Choose option A or B\n' >> "$status"
+  printf 'resolved [key=%s]: answered: the judge picked A\n' "$key" >> "$status"
+
+  out=$(env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" FM_FAKE_SSH_RC=0 \
+    "$SEND" rsm --resolve-key design-signoff "judge recommends A" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "a generic answer traversed a plain twin of a relayed hold"
+  assert_contains "$out" "also names a relayed captain hold" "the forged status close hid the protected twin"
+  [ ! -e "$ssh_log" ] || fail "the generic answer touched remote transport"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" FM_FAKE_SSH_RC=0 \
+    "$SEND" rsm --captain-answer --resolve-key "$key" "I approve the existing design." >/dev/null \
+    || fail "the captain could not relay the answer to its owner"
+  assert_grep "I approve the existing design." "$ssh_log" "the remote operator's answer was lost"
+  assert_grep "Captain answer for $key" "$ssh_log" "the mate could not identify which hold the captain answered"
+  assert_no_grep 'answered: I approve the existing design.' "$status" "Main closed the owning mate's decision before the owner recorded it"
+  pass "remote captain answers reach the owner while forged and generic closes leave its hold open"
+}
+
 # The decision-answer partition (bin/fm-send.sh header "Answering a decision"):
 # a --resolve-key naming an open needs-decision or a captain-held task is a
 # decision answer, main-owned while attended and refused for the supervision
@@ -892,6 +924,10 @@ test_decision_answer_partition_relocates_under_the_record() {
 
   # Under the record: the same decision answer is sent and closes the key.
   FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter >/dev/null || fail "away entry failed"
+  out=$(env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_SUPERVISION_ACTOR=branch "$SEND" t1 --captain-answer --resolve-key api-shape "go with REST" 2>&1); rc=$?
+  expect_code 6 "$rc" "away relocation cannot confer captain-answer authority"
+  [ ! -e "$home/state/t1.inbox/002.msg" ] || fail "the away branch relayed an answer as the captain"
   out=$(env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     FM_SUPERVISION_ACTOR=branch "$SEND" t1 --resolve-key api-shape "go with REST" 2>&1); rc=$?
   expect_code 0 "$rc" "under the away-posture record the branch's decision answer must be sent: $out"
@@ -1197,4 +1233,5 @@ test_long_decision_key_refuses_before_send
 test_stamped_close_line_stays_within_the_status_line_cap
 test_failed_close_recovery_command_is_shell_safe
 test_remote_reserved_pending_reply_key_closes_locally
+test_remote_captain_answer_leaves_closure_to_the_owner
 test_decision_answer_partition_relocates_under_the_record
