@@ -32,11 +32,12 @@ A teardown refusal for uncommitted or unlanded work is a stop-and-investigate re
 Never force teardown without explicit discard authority.
 After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
 
-For a live handoff, read the project's existing delivery evidence and identify the latest deployment, health-check or rollback transition for the same environment and release.
-Use a fresh observation of the exact revision served by that environment, taken after the transition, and recheck the transition before reporting.
+Start the live handoff by recording the current UTC time and reading the project's latest deployment, health-check or rollback transition for the same environment and release.
+Collect an exact served-revision receipt for this report, then re-read the latest transition before comparing the two.
+If another transition occurred during the check, obtain a new observation after that transition.
 A successful build, merge, checkout, HTTP response or screenshot supplies only its own observation.
 When another home owns the environment, request the same evidence from that owner.
-Format the handoff with [live-handoff.sh](references/live-handoff.sh) using the observed state, candidate revision, transition time and served-version receipt.
+Format the handoff with [live-handoff.sh](references/live-handoff.sh) using the observed state, candidate revision, latest transition time, and any fresh receipt with the handoff start time.
 Use the resulting state and verification together in the task note and captain-facing handoff.
 
 A secondmate is persistent and an empty queue is healthy.
