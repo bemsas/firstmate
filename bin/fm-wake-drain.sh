@@ -475,7 +475,7 @@ EOF
 # common case.
 print_open_decisions_section() {
   local snapshot=${1:-} open task key verb note line hold_rc item_bytes=220 global_bytes=4000
-  local output='' used=0 shown=0 omitted=0 bytes
+  local output='' used=0 shown=0 omitted=0 bytes captain_keys=0
 
   if [ -n "$snapshot" ]; then
     open=$(scan_open_decisions_snapshot "$STATE" "$snapshot") || return 1
@@ -486,15 +486,18 @@ print_open_decisions_section() {
 
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
-    # An owner relay is a notification. Bearings uses the owning backlog
-    # for current readiness. A local status twin must also defer to its hold.
+    # An owner relay is a notification. Bearings reads the owner's current
+    # inventory. A local status twin can surface once its own hold is ready.
     if _fm_captain_hold_relay_id "$key" >/dev/null; then
       continue
     fi
     if [ "$verb" = needs-decision ]; then
       hold_rc=0
       "$SCRIPT_DIR/fm-captain-hold.sh" select "$task" "$key" >/dev/null 2>&1 || hold_rc=$?
-      case "$hold_rc" in 0|4) continue ;; esac
+      case "$hold_rc" in
+        0) captain_keys=1 ;;
+        4) continue ;;
+      esac
     fi
     # State the folded key on EVERY entry, "default" included. This section's
     # own hint asks the operator to pass that key to fm-send, and the note is
@@ -534,6 +537,9 @@ EOF
   # depends on the busy worker writing a matching resolved line (contract:
   # bin/fm-send.sh header).
   printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n" || return 1
+  if [ "$captain_keys" -eq 1 ]; then
+    printf 'OPEN DECISIONS: a matching captain-held task requires --captain-answer and the captain\047s actual words.\n' || return 1
+  fi
   printf 'OPEN DECISIONS: <key> is the [key=...] printed before the verb; a token inside a note is prose, not a key.\n' || return 1
 }
 

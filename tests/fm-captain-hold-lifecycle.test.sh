@@ -2584,18 +2584,22 @@ SH
 }
 
 test_signoff_stays_gated_until_review_is_done() {
-  local home show view rc
+  local home show view rc drain
   home=$(make_home pending-signoff)
   tasks_in "$home" add review-fix "Finish review fixes" --repo sample >/dev/null || fail "review fixture failed"
   tasks_in "$home" add signoff "Sign off revised design" --repo sample >/dev/null || fail "sign-off fixture failed"
   tasks_in "$home" block signoff --by review-fix >/dev/null || fail "could not record the prerequisite"
   FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold signoff --reason "Approve revised design?" >/dev/null \
     || fail "could not register the pending sign-off"
+  write_origin_meta "$home" design-review
+  printf 'needs-decision [key=signoff]: Approve revised design?\n' > "$home/state/design-review.status"
 
   view=$(run_bearings "$home" --all-decisions)
   jq -e '(.decisions_open | all(.id != "signoff"))
     and (.gates | any(.id == "signoff" and .blocked_by == "review-fix"))' <<< "$view" >/dev/null \
     || fail "pending sign-off appeared as an actionable call"
+  drain=$(run_drain "$home")
+  assert_not_contains "$drain" '[key=signoff]' "the status twin bypassed the pending hold in the wake drain"
   run_captain "$home" open signoff >/dev/null || fail "pending sign-off was removed from inventory"
   rc=0
   run_captain "$home" open signoff --ready >/dev/null || rc=$?
@@ -2617,6 +2621,9 @@ test_signoff_stays_gated_until_review_is_done() {
   view=$(run_bearings "$home")
   jq -e '[.decisions_open[] | select(.id == "signoff")] | length == 1' <<< "$view" >/dev/null \
     || fail "completed review did not expose exactly one sign-off"
+  drain=$(run_drain "$home")
+  assert_contains "$drain" '[key=signoff]' "the ready status twin stayed hidden"
+  assert_contains "$drain" '--captain-answer' "the ready twin received incorrect answer guidance"
   run_captain "$home" answer signoff --decision-file "$home/answer" >/dev/null || fail "a ready sign-off refused the human answer"
   show=$(tasks_in "$home" show signoff --full)
   assert_contains "$show" "state: done" "a ready sign-off stayed open"

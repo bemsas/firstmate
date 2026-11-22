@@ -52,6 +52,7 @@ For chat, relay the captain's actual words through `bin/fm-send.sh --captain-ans
 A captured-answer source feeds the intake once bound with `bin/fm-captain-hold.sh bind <source-id>`; bind before arming the source, and key each structured question by the held task's id.
 Recommendations, automated picks, agent text, and status metadata never supply the captain's words.
 For a mate-owned hold, verify the recorded outcome with the owner before reporting it answered.
+If the mate hold is known only by its backlog row, include that exact task id when relaying the captain's words to its owner.
 An unbound source and a key that names no captain-held task both simply feed nothing: the answer is still captured and firstmate is still woken, and closing falls back to the direct command above.
 One answer value is reserved and closes nothing: `reconcile` means "go re-check reality", never "the captain answered", so the shared intake refuses it from every channel and creates nothing.
 A bound captured source uses a separate seam: its adapter omits reconcile from keyed answers and emits the selected task id through `reconciles`, the generic runner feeds that into `reconcile-requests`, and the intake verifies the source binding and the local captain-held task before filing the durable board request.
