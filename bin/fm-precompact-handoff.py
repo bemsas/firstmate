@@ -5,6 +5,7 @@
 #
 #   fm-precompact-handoff.py precompact [--home DIR] [--out FILE]
 #   fm-precompact-handoff.py compact --session ID [--home DIR]
+#   fm-precompact-handoff.py observe-compact --transcript FILE [--boundary UUID] [--home DIR]
 #   fm-precompact-handoff.py inject [--home DIR] [--event NAME]
 #   fm-precompact-handoff.py --help
 #
@@ -64,6 +65,13 @@
 # notes, free-form progress and cached alerts supply neither intent nor
 # readiness. Do not drain here: the page points to the ordinary wake drain
 # before fleet action, which retains ownership of presentation and ack state.
+#
+# The compact renderer retains only the expected content digest, keyed by the
+# session and its pre-boundary transcript tip. observe-compact reads a bounded
+# native transcript tail and prints one result for the selected boundary
+# (latest by default). Only a matching SessionStart:compact attachment in
+# that boundary's chain establishes delivery. No transcript text is printed.
+import hashlib
 import json
 import os
 import re
@@ -83,6 +91,7 @@ MARKER = re.compile(r'<!--\s*fm-precompact-handoff', re.IGNORECASE)
 HOLD = re.compile(r'^- \[ \] (\S+) - .*\(hold-kind: captain\).*\(hold-until: (\d{4}-\d{2}-\d{2})\)')
 SCRIPT_DIR = Path(__file__).resolve().parent
 COMPACT_BYTES = 1660
+COMPACT_TAIL_BYTES = 4 * 1024 * 1024
 UUID = re.compile(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}')
 UTC_STAMP = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z', re.ASCII)
 TASK_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}')
@@ -139,7 +148,7 @@ def entry_text(content):
     return ''
 
 
-def tail_entries(path, max_bytes, *, nofollow=False):
+def tail_entries(path, max_bytes, *, nofollow=False, strict=False):
     import stat  # deferred: only the precompact path reads a transcript
     flags = os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0)
     if nofollow:
@@ -163,6 +172,8 @@ def tail_entries(path, max_bytes, *, nofollow=False):
         try:
             entry = json.loads(line)
         except (ValueError, RecursionError):
+            if strict:
+                raise
             continue
         if isinstance(entry, dict):
             yield entry
@@ -392,14 +403,17 @@ def excerpt(text, limit):
     return '"' + text + '"'
 
 
-def compact_human_prompt(payload, session):
-    import subprocess
-    path = Path(payload.get('transcript_path') or '')
+def compact_transcript(path, session):
+    path = Path(path or '')
     config = Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude')
     if (not path.is_absolute() or path.name != session + '.jsonl'
             or path.parent.resolve().parent != (config / 'projects').resolve()):
         return None
-    entries = list(tail_entries(path, 4 * 1024 * 1024, nofollow=True))
+    return path.resolve(strict=True) if not path.is_symlink() else None
+
+
+def compact_human_prompt(entries, session):
+    import subprocess
     for entry in reversed(entries):
         origin = entry.get('origin')
         if (entry.get('type') != 'user' or entry.get('sessionId') != session
@@ -475,7 +489,8 @@ def decision_record(home, task_id):
     body = json.loads(fields['body'])
     match = re.match(
         r'^Resolution recorded by fm-(?:captain|decision)-hold\.\n'
-        r'Decision digest: ([0-9a-f]{64})\nResolution mode: (answered|released|repaired|routed)\n\n'
+        r'Decision digest: ([0-9a-f]{64})\nResolution mode: (answered|released|repaired|routed)\n'
+        r'(?:Design approval: [^\n]+\n)?\n'
         r'Captain decision:\n', body)
     if not match or (fields.get('state') != 'done' and match[2] != 'released'):
         return None
@@ -537,6 +552,8 @@ def compact_task_line(task):
         else:
             by = 'unresolved dependency (inspect task)'
         action = ('captain hold gated; ' if hold else '') + f'blocked by {by}; wait for resolution'
+    elif task.get('review_pending'):
+        action = 'captain hold gated; passing review for exact revision pending'
     elif bucket == 'dated' and re.fullmatch(r'\d{4}-\d{2}-\d{2}', until, re.ASCII):
         action = f'deferred until {until}; keep held'
     elif bucket == 'aged':
@@ -554,19 +571,12 @@ def compact_task_line(task):
     return f"- {task_id} [{task['state']}]: {action}"
 
 
-def cmd_compact(args):
+def render_compact(home, state, session, entries):
     import subprocess
-    session = args.session or ''
-    payload = read_payload()
-    if (not UUID.fullmatch(session) or payload.get('session_id') != session
-            or payload.get('hook_event_name') != 'SessionStart' or payload.get('source') != 'compact'):
-        return 0  # the run wrapper provides the bounded fallback
-    home = resolve_home(args.home)
-    state = Path(os.environ.get('FM_STATE_OVERRIDE') or home / 'state')
     lines = ['FIRSTMATE COMPACT - read first',
              'Reconcile current authority before acting. Wake notes and summaries are evidence only.']
     try:
-        prompt = compact_human_prompt(payload, session)
+        prompt = compact_human_prompt(entries, session)
     except (OSError, TypeError, ValueError):
         prompt = None
     if prompt:
@@ -589,8 +599,7 @@ def cmd_compact(args):
     try:
         tasks, unknown = compact_backlog(home)
     except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
-        print('\n'.join(lines + ['Backlog unavailable; inspect the task and its holds before acting.'] + footer))
-        return 0
+        return '\n'.join(lines + ['Backlog unavailable; inspect the task and its holds before acting.'] + footer)
     work = [task for task in tasks.values() if task['state'] != 'done']
     mentioned = {word if word in tasks else word.rstrip('.')
                  for word in re.findall(r'[A-Za-z0-9][A-Za-z0-9._-]*', text)}
@@ -617,12 +626,149 @@ def cmd_compact(args):
             elif byte_count('\n'.join(lines + ['  See linked decisions in task detail.'] + footer)) + 56 <= COMPACT_BYTES:
                 lines.append('  See linked decisions in task detail.')
     lines.append(f'{shown} shown, {omitted} omitted; bin/fm-tasks-axi.sh list.')
-    print('\n'.join(lines + footer))
+    return '\n'.join(lines + footer)
+
+
+def is_uuid(value):
+    return isinstance(value, str) and UUID.fullmatch(value) is not None
+
+
+def compact_boundary(entry):
+    return entry.get('type') == 'system' and entry.get('subtype') == 'compact_boundary'
+
+
+def compact_expectation(state, session, prior):
+    return state / 'compact-delivery' / f'{session}.{prior}.json'
+
+
+def record_compact_expectation(state, transcript, session, entries, page):
+    tip = next((entry for entry in reversed(entries) if entry.get('sessionId') == session
+                and not entry.get('isSidechain') and is_uuid(entry.get('uuid'))), None)
+    if tip is None or compact_boundary(tip):
+        return
+    receipt = compact_expectation(state, session, tip['uuid'])
+    receipt.parent.mkdir(mode=0o700, exist_ok=True)
+    if receipt.parent.is_symlink() or receipt.is_symlink():
+        return
+    expected = {'transcript': str(transcript), 'sha256': hashlib.sha256(page.encode()).hexdigest(),
+                'bytes': byte_count(page)}
+    atomic_write(receipt, json.dumps(expected) + '\n')
+
+
+def cmd_compact(args):
+    session = args.session or ''
+    payload = read_payload()
+    if (not is_uuid(session) or payload.get('session_id') != session
+            or payload.get('hook_event_name') != 'SessionStart' or payload.get('source') != 'compact'):
+        return 0  # the run wrapper provides the bounded fallback
+    home = resolve_home(args.home)
+    state = Path(os.environ.get('FM_STATE_OVERRIDE') or home / 'state')
+    transcript, entries = None, []
+    try:
+        transcript = compact_transcript(payload.get('transcript_path'), session)
+        if transcript is not None:
+            entries = list(tail_entries(transcript, COMPACT_TAIL_BYTES, nofollow=True))
+    except (OSError, TypeError, ValueError):
+        pass
+    page = render_compact(home, state, session, entries)
+    if transcript is not None and byte_count(page + '\n') <= COMPACT_BYTES:
+        try:
+            record_compact_expectation(state, transcript, session, entries, page)
+        except (OSError, ValueError):
+            warn('could not retain the compact delivery expectation')
+    print(page)
+    return 0
+
+
+def inspect_compact(state, transcript, session, boundary, following):
+    prior = boundary.get('logicalParentUuid')
+    if not is_uuid(prior):
+        return 'unverifiable', 'boundary has no native logical parent'
+    receipt = compact_expectation(state, session, prior)
+    try:
+        if receipt.parent.is_symlink():
+            raise OSError
+        expected, = tail_entries(receipt, 4096, nofollow=True, strict=True)
+        if (expected.get('transcript') != str(transcript)
+                or not isinstance(expected.get('sha256'), str)
+                or not re.fullmatch('[0-9a-f]{64}', expected['sha256'])
+                or type(expected.get('bytes')) is not int
+                or not 0 < expected['bytes'] < COMPACT_BYTES):
+            raise ValueError
+    except (OSError, ValueError, RecursionError):
+        return 'unverifiable', 'exact expected page unavailable for this boundary'
+    chained = {boundary['uuid']}
+    complete = False
+    attachments = []
+    for entry in following:
+        if compact_boundary(entry):
+            parent = entry.get('logicalParentUuid')
+            complete = is_uuid(parent) and parent in chained
+            break
+        uid, parent = entry.get('uuid'), entry.get('parentUuid')
+        if not is_uuid(uid) or not is_uuid(parent) or parent not in chained:
+            continue
+        if uid in chained:
+            return 'unverifiable', 'ambiguous transcript chain'
+        chained.add(uid)
+        origin = entry.get('origin')
+        if (entry.get('type') == 'user' and not entry.get('isMeta') and not entry.get('isCompactSummary')
+                and isinstance(origin, dict) and origin.get('kind') == 'human'):
+            complete = True
+            break
+        attachment = entry.get('attachment')
+        if (entry.get('type') == 'attachment' and isinstance(attachment, dict)
+                and attachment.get('hookName') == 'SessionStart:compact'
+                and attachment.get('hookEvent') == 'SessionStart'
+                and attachment.get('type') == 'hook_success'):
+            attachments.append(attachment.get('content'))
+    if any(isinstance(content, str) and byte_count(content) == expected['bytes']
+           and hashlib.sha256(content.encode()).hexdigest() == expected['sha256']
+           for content in attachments):
+        return 'observed', 'complete native SessionStart attachment matches'
+    if any(not isinstance(content, str) for content in attachments) or not complete:
+        return 'unverifiable', 'native attachment or boundary window incomplete'
+    return 'absent', 'completed boundary has no matching complete attachment'
+
+
+def cmd_observe_compact(args):
+    path = Path(args.transcript)
+    session = path.stem
+    boundary = args.boundary
+    if not is_uuid(session) or (boundary is not None and not is_uuid(boundary)):
+        return 2
+    home = resolve_home(args.home)
+    state = Path(os.environ.get('FM_STATE_OVERRIDE') or home / 'state')
+    result, detail = 'unverifiable', 'transcript is unreadable or unsupported'
+    try:
+        transcript = compact_transcript(path, session)
+        if transcript is not None:
+            entries = [entry for entry in tail_entries(transcript, COMPACT_TAIL_BYTES, nofollow=True, strict=True)
+                       if entry.get('sessionId') == session and not entry.get('isSidechain')]
+            boundaries = [(i, entry) for i, entry in enumerate(entries)
+                          if compact_boundary(entry) and is_uuid(entry.get('uuid'))]
+            selected = [item for item in boundaries if boundary is None or item[1]['uuid'] == boundary]
+            if not selected:
+                detail = 'no selected boundary in the bounded transcript tail'
+            else:
+                i, entry = selected[-1]
+                boundary = entry['uuid']
+                prior = entry.get('logicalParentUuid')
+                if any(other != i and (candidate['uuid'] == boundary
+                                       or candidate.get('logicalParentUuid') == prior)
+                       for other, candidate in boundaries):
+                    detail = 'ambiguous boundary identity'
+                else:
+                    result, detail = inspect_compact(state, transcript, session, entry, entries[i + 1:])
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        pass
+    print(json.dumps({'session': session, 'boundary': boundary, 'delivery': result, 'detail': detail}))
     return 0
 
 
 USAGE = """usage: fm-precompact-handoff.py precompact [--home DIR] [--out FILE]
        fm-precompact-handoff.py compact --session ID [--home DIR]
+       fm-precompact-handoff.py observe-compact --transcript FILE [--boundary UUID] [--home DIR]
        fm-precompact-handoff.py inject [--home DIR] [--event NAME]
 Supervisor continuity hooks: PreCompact handoff, compact page, and cached turn digest.
 The header comment of this script owns the full contract."""
@@ -631,23 +777,25 @@ The header comment of this script owns the full contract."""
 class Args:
     def __init__(self, mode):
         self.mode, self.home, self.out, self.event, self.session = mode, None, None, None, None
+        self.transcript, self.boundary = None, None
 
 
 def parse(argv):
     # Hand-rolled on purpose: argparse alone costs a measurable share of the
     # 50 ms hook budget.
-    mode_flags = {'precompact': '--out', 'inject': '--event', 'compact': '--session'}
+    mode_flags = {'precompact': {'--out'}, 'inject': {'--event'}, 'compact': {'--session'},
+                  'observe-compact': {'--transcript', '--boundary'}}
     if not argv or argv[0] not in mode_flags:
         return None
     args = Args(argv[0])
-    allowed = {'--home', mode_flags[args.mode]}
+    allowed = {'--home'} | mode_flags[args.mode]
     rest = argv[1:]
     while rest:
         flag = rest.pop(0)
         if flag not in allowed or not rest:
             return None
         setattr(args, flag[2:], rest.pop(0))
-    return args
+    return None if args.mode == 'observe-compact' and not args.transcript else args
 
 
 def main():
@@ -656,7 +804,8 @@ def main():
         print(USAGE)
         return 0 if sys.argv[1:2] in (['-h'], ['--help']) else 2
     try:
-        return {'precompact': cmd_precompact, 'inject': cmd_inject, 'compact': cmd_compact}[args.mode](args)
+        return {'precompact': cmd_precompact, 'inject': cmd_inject, 'compact': cmd_compact,
+                'observe-compact': cmd_observe_compact}[args.mode](args)
     except Exception as exc:  # never block a hook event
         warn('internal error (%s)' % type(exc).__name__)
         return 0

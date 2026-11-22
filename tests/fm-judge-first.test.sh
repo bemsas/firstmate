@@ -415,12 +415,71 @@ test_summary() {
   pass "summary lists a day of shadow verdicts for comparison with the supervisor's answers"
 }
 
+test_summary_human_reversals() {
+  new_home reversals
+  local receipts="$HOME_DIR/reversals.jsonl" out before
+  python3 - "$HOME_DIR" "$LOG" "$receipts" <<'PY'
+import copy, json, sys
+from pathlib import Path
+
+home, journal, receipts = map(Path, sys.argv[1:])
+rows, answers = [], []
+def fixture(i, *, mode="on", action="sent", proof=True):
+    corr = f"{i:016x}"
+    occurrence = {"key": "reused-key", "at": i * 1000, "corr": f"{i + 20:016x}",
+                  "opening_sha256": f"{i:064x}"}
+    send = {"home": str(home), "task": "mate", "delivery_corr": corr, "decisions": [occurrence]}
+    evidence = {"ok": True, "exit": 0}
+    if proof:
+        evidence.update(delivery_corr=corr, openings=[[occurrence["key"], occurrence["opening_sha256"]]])
+    rows.append({"at": 10000 + i, "hook": {"name": "judge-first", "mode": mode, "action": action,
+                 "secondmate": "mate", "key": "reused-key", "send": evidence, "auto_send": send}})
+    receipt = {"schema": "fm-judge-reversal.v1", "event_id": f"answer:{i}", "actor": "captain",
+               "at": 20000, "outcome": "reversed", "unchanged_premises": True,
+               "auto_send": {**send, "decision": occurrence}}
+    del receipt["auto_send"]["decisions"]
+    answers.append(copy.deepcopy(receipt))
+    return answers[-1]
+
+valid = fixture(1)
+answers.append(copy.deepcopy(valid))
+answers.append(dict(valid, event_id="duplicate-label"))
+different = fixture(2)
+different["auto_send"]["decision"] = valid["auto_send"]["decision"]
+fixture(3, mode="shadow", action="would-auto")
+fixture(4, proof=False)
+fixture(5)["actor"] = "unknown"
+fixture(6)["unchanged_premises"] = False
+fixture(7)["auto_send"]["home"] = "/other/home"
+fixture(8)["auto_send"]["task"] = "other-mate"
+fixture(9)["auto_send"]["decision"]["corr"] = "fedcba9876543210"
+fixture(10)["auto_send"]["decision"]["opening_sha256"] = "a" * 64
+fixture(11)["at"] = 1
+conflicting = fixture(12)
+answers.append(dict(conflicting, actor="agent"))
+fixture(13)
+rows.append(copy.deepcopy(rows[-1]))
+journal.write_text("".join(json.dumps(r) + "\n" for r in rows))
+receipts.write_text("".join(json.dumps(r) + "\n" for r in answers))
+PY
+  before=$(cksum < "$LOG")$(cksum < "$receipts")
+  out=$(env FM_HOME="$HOME_DIR" FM_JUDGE_LOG="$LOG" "$HOOK" summary --reversals "$receipts")
+  assert_contains "$out" '"confirmed_human_reversals": 1' "only the one exact matched live send may count"
+  assert_contains "$out" '"live_sends_without_reversal_linkage": 1' "older live sends without evidence must be visible"
+  out=$(env FM_HOME="$HOME_DIR" FM_JUDGE_LOG="$LOG" "$HOOK" summary --since 10002 --reversals "$receipts")
+  assert_contains "$out" '"confirmed_human_reversals": 0' "since must apply to the sent event"
+  assert_equals "$before" "$(cksum < "$LOG")$(cksum < "$receipts")" "summary mutated evidence"
+  assert_equals 0 "$(calls)" "summary called the judge"
+  assert_equals 0 "$(sends)" "summary sent an answer"
+  pass "summary counts exact operator-attested human reversals once and excludes unlinked, shadow and ambiguous events"
+}
+
 # The real fm-send, end to end: the answer reaches the secondmate's durable
 # inbox once and the open keyed decision closes in the status log.
 test_live_send_through_real_fm_send() {
   new_home e2e
   printf 'on\n' > "$HOME_DIR/config/judge-first"
-  local fb="$HOME_DIR/fakebin" out
+  local fb="$HOME_DIR/fakebin" out corr stale current
   mkdir -p "$fb"
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -434,7 +493,7 @@ exit 0
 SH
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/sleep"
   chmod +x "$fb/tmux" "$fb/sleep"
-  fm_write_meta "$HOME_DIR/state/mate.meta" "window=sess:fm-mate" "kind=ship"
+  fm_write_secondmate_meta "$HOME_DIR/state/mate.meta" "$HOME_DIR" "sess:fm-mate"
   printf '%s\n' "$BENIGN" > "$HOME_DIR/state/mate.status"
   out=$(env PATH="$fb:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$HOME_DIR" FM_SEND_BIN="$ROOT/bin/fm-send.sh" \
     FM_SEND_SETTLE=0 FM_JUDGE_LOG="$LOG" STUB_CALLS="$HOME_DIR/calls" \
@@ -446,6 +505,24 @@ SH
   sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/mate.status" | grep -qF 'resolved [key=clause-policy]: answered: judge auto-decided' \
     || fail "the keyed decision was not closed:"$'\n'"$(cat "$HOME_DIR/state/mate.status")"
   assert_equals sent "$(journal "rows[-1]['hook']['action']")" "the journal should end at sent"
+  corr=$(journal "rows[-1]['hook']['auto_send']['delivery_corr']") || fail "native fm-send supplied no correlation"
+  grep -Eq '^delivered_epoch=[0-9]+$' "$HOME_DIR/state/pending-replies/$corr" \
+    || fail "correlation lacks delivery proof"
+  assert_equals 0123456789abcdef "$(journal "rows[-1]['hook']['auto_send']['decisions'][0]['corr']")" \
+    "the native send did not link the exact opening occurrence's own correlation"
+  python3 - "$LOG" "$HOME_DIR/reversal.jsonl" <<'PY'
+import json, sys
+from pathlib import Path
+
+row = json.loads(Path(sys.argv[1]).read_text().splitlines()[-1])
+identity = row["hook"]["auto_send"]
+identity["decision"], = identity.pop("decisions")
+Path(sys.argv[2]).write_text(json.dumps({"schema": "fm-judge-reversal.v1", "event_id": "human:fixture-1",
+    "actor": "captain", "at": row["at"] + 1, "outcome": "reversed", "unchanged_premises": True,
+    "auto_send": identity}) + "\n")
+PY
+  out=$(FM_HOME="$HOME_DIR" FM_JUDGE_LOG="$LOG" "$HOOK" summary --reversals "$HOME_DIR/reversal.jsonl")
+  assert_contains "$out" '"confirmed_human_reversals": 1' "summary failed to join the native fm-send receipt"
   if command -v tasks-axi >/dev/null 2>&1; then
     FM_HOME="$HOME_DIR" "$ROOT/bin/fm-captain-hold.sh" hold clause-policy --title "Hold the exact policy choice" \
       --reason "Wait for the captain's selection" >/dev/null || fail "could not register a same-key captain hold"
@@ -463,7 +540,16 @@ SH
     assert_contains "$out" "I choose option B." "the authorized answer lost its actual words"
     assert_not_contains "$out" "agent recommends option A" "an ordinary recommendation was recorded as approval"
   fi
-  pass "live: the real fm-send --resolve-key delivers one answer and closes the decision"
+  stale=${BENIGN/at=1000/at=2000}
+  current=${BENIGN/at=1000/at=3000}
+  printf '%s\n' "$current" >> "$HOME_DIR/state/mate.status"
+  out=$(env PATH="$fb:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$HOME_DIR" FM_SEND_BIN="$ROOT/bin/fm-send.sh" \
+    FM_SEND_SETTLE=0 FM_JUDGE_LOG="$LOG" STUB_CALLS="$HOME_DIR/calls" \
+    "$HOOK" ingest mate "$(line_file in-stale "$stale")" 2>&1)
+  assert_contains "$out" "auto=1" "the report instrumentation changed existing key-based send behavior"
+  assert_equals "[]" "$(journal "rows[-1]['hook']['auto_send']['decisions']")" \
+    "a key reused by a different open occurrence was linked to the old opening"
+  pass "live: real fm-send links exact delivered occurrences and refuses to report a reused key as proof"
 }
 
 test_adapter_wiring() {
@@ -527,6 +613,7 @@ test_captain_holds_are_never_answered
 test_send_failure_leaves_ordinary_wake
 test_non_decision_lines_are_ignored
 test_summary
+test_summary_human_reversals
 test_live_send_through_real_fm_send
 test_adapter_wiring
 

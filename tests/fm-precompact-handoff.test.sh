@@ -176,6 +176,7 @@ test_compact_page_and_recovery() (
   : > "$home/AGENTS.md"
   fm_fake_exit0 "$home/standins" gh gh-axi
   ln -s "$(command -v bash)" "$home/standins/claude"
+  # shellcheck disable=SC2030 # Each fixture exports only inside its own subshell.
   export FM_HOME="$home" FM_ROOT_OVERRIDE="$home" CLAUDE_CONFIG_DIR="$home/claude"
   export PATH="$home/standins:$PATH" CLAUDE_CODE_SESSION_ID="$session"
   unset NO_MISTAKES_GATE FM_STATE_OVERRIDE FM_CONFIG_OVERRIDE FM_DATA_OVERRIDE
@@ -306,5 +307,127 @@ PY
   pass "compact is byte-bounded, preserves actionable wakes, and follows real task dependencies and hold records"
 )
 
+test_observe_compact_attachment() {
+  python3 - "$TMP_ROOT/observe" "$HOOK" <<'PY' || fail "native compact attachment classification"
+import json, os, subprocess, sys, uuid
+from pathlib import Path
+
+home, hook = map(Path, sys.argv[1:])
+session, prior, boundary, attachment, prompt = (str(uuid.uuid4()) for _ in range(5))
+config = home / "claude"
+path = config / "projects" / "fixture" / f"{session}.jsonl"
+path.parent.mkdir(parents=True)
+(home / "state").mkdir()
+env = {**os.environ, "CLAUDE_CONFIG_DIR": str(config), "FM_STATE_OVERRIDE": str(home / "state")}
+def write(*entries):
+    path.write_text("".join(json.dumps({"sessionId": session, **entry}) + "\n" for entry in entries))
+
+tip = {"type": "system", "subtype": "turn_duration", "uuid": prior}
+cut = {"type": "system", "subtype": "compact_boundary", "uuid": boundary, "logicalParentUuid": prior}
+write(tip)
+payload = {"source": "compact", "hook_event_name": "SessionStart", "session_id": session, "transcript_path": str(path)}
+expected = subprocess.check_output([hook, "compact", "--home", home, "--session", session],
+                                    input=json.dumps(payload), text=True, env=env).removesuffix("\n")
+assert 0 < len(expected.encode()) < 1660
+after = {"type": "user", "uuid": prompt, "parentUuid": attachment, "origin": {"kind": "human"}}
+native = {"type": "hook_success", "hookEvent": "SessionStart", "hookName": "SessionStart:compact",
+          "content": expected, "stdout": expected + "\n"}
+row = {"type": "attachment", "uuid": attachment, "parentUuid": boundary, "attachment": native}
+def observe(expected_status, *, selected=boundary):
+    result = subprocess.check_output([hook, "observe-compact", "--home", home, "--transcript", path,
+                                      "--boundary", selected], text=True, env=env)
+    assert len(result.splitlines()) == 1 and "FIRSTMATE COMPACT" not in result, result
+    observed = json.loads(result)
+    assert observed["session"] == session and observed["boundary"] == selected, observed
+    assert observed["delivery"] == expected_status, observed
+
+write(tip, cut, row, after)
+observe("observed")
+write(tip, cut, {**row, "attachment": {**native, "content": expected[:30]}}, after)
+observe("absent")  # The full raw stdout is insufficient.
+write(tip, cut, {**row, "parentUuid": prior}, {**after, "parentUuid": boundary})
+observe("absent")  # A detached attachment cannot satisfy this boundary.
+write(tip, cut, {**after, "parentUuid": boundary})
+observe("absent")
+write(tip, cut)
+observe("unverifiable")  # The native boundary window can still grow.
+write(tip, {**cut, "logicalParentUuid": str(uuid.uuid4())}, row, after)
+observe("unverifiable")  # Identical page bytes from a different occurrence.
+write(tip, cut, row, after, {**cut, "uuid": str(uuid.uuid4())})
+observe("unverifiable")  # Two boundaries cannot spend the same expected-page anchor.
+path.unlink()
+observe("unverifiable")
+PY
+  pass "compact proof compares the full native attachment and binds exact session and boundary"
+}
+
+test_review_gated_signoff() (
+  local home="$TMP_ROOT/eve-review" holds="$ROOT/bin/fm-captain-hold.sh" tasks="$ROOT/bin/fm-tasks-axi.sh"
+  local verdict="$ROOT/bin/fm-review-verdict.sh" snapshot="$ROOT/bin/fm-fleet-snapshot.sh"
+  local pr=https://github.com/example/eve/pull/12 a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  local b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb rc=0 text="$home/answer.txt" stage out
+  local session=2606db20-3506-452d-9d81-4fa924e083f9 payload
+  command -v tasks-axi >/dev/null 2>&1 || { note "skip: review-gated sign-off requires tasks-axi"; return; }
+  mkdir -p "$home"/{config,data,state}
+  fm_git_init_commit "$home"
+  # shellcheck disable=SC2031 # The earlier fixture's environment is deliberately isolated.
+  export FM_HOME="$home" FM_ROOT_OVERRIDE="$home"
+  unset FM_STATE_OVERRIDE FM_CONFIG_OVERRIDE FM_DATA_OVERRIDE
+  "$tasks" add eve-review-fix 'Independent Eve review' >/dev/null || fail "create review task"
+  "$holds" hold eve-signoff --title 'Eve sign-off' --reason 'Approve the revised frame' \
+    --origin eve-review-fix --require-review "$pr" "$b" >/dev/null || fail "create review-gated hold"
+  "$tasks" block eve-signoff --by eve-review-fix >/dev/null || fail "link the review prerequisite"
+  "$verdict" "$pr" "$b" merge independent >/dev/null || fail "stage passing B"
+  "$holds" open eve-signoff --ready || rc=$?
+  expect_code 4 "$rc" "passing B does not waive the ordinary dependency"
+  "$tasks" "done" eve-review-fix >/dev/null || fail "complete the review task"
+  mv "$home/state/review-verdicts.jsonl" "$home/initial-verdict.jsonl"
+  printf 'Approve the revised frame.\n' > "$text"
+  for stage in missing wrong-revision failed malformed; do
+    case "$stage" in
+      wrong-revision) "$verdict" "$pr" "$a" merge independent || fail "record passing A" ;;
+      failed)
+        "$verdict" "$pr" "$b" merge independent || fail "record initial passing B"
+        "$verdict" "$pr" "$b" fix independent || fail "supersede the passing B with a failing verdict"
+        ;;
+      malformed)
+        "$verdict" "$pr" "$b" merge independent || fail "record passing B before malformed evidence"
+        printf 'not a verdict\n' >> "$home/state/review-verdicts.jsonl"
+        ;;
+    esac
+    rc=0
+    out=$("$holds" select eve-review-fix eve-signoff) || rc=$?
+    expect_code 4 "$rc" "$stage must leave keyed sign-off gated"
+    assert_equals eve-signoff "$out" "$stage lost the held task identity"
+    "$holds" answer eve-signoff --decision-file "$text" >/dev/null 2>&1 \
+      && fail "$stage admitted a direct answer"
+    printf 'eve-signoff\tApprove the revised frame.\n' \
+      | "$holds" answers --source 'fixture human answer' >/dev/null 2>&1 \
+      && fail "$stage admitted a keyed answer"
+    "$snapshot" --contribution-input | jq -e '.backlog.records[]
+      | select(.id == "eve-signoff") | .review_pending == true and .captain_actionable == false
+        and .hold_bucket == "blocked" and .unresolved_blocker_ids == []' >/dev/null \
+      || fail "$stage projected the review-gated hold as actionable"
+  done
+  payload=$(jq -nc --arg sid "$session" '{source:"compact",hook_event_name:"SessionStart",session_id:$sid}')
+  out=$(printf '%s' "$payload" | "$HOOK" compact --session "$session")
+  assert_contains "$out" "eve-signoff [queued]: captain hold gated; passing review for exact revision pending" \
+    "the compact page did not explain the missing passing verdict"
+  mv "$home/initial-verdict.jsonl" "$home/state/review-verdicts.jsonl"
+  "$holds" open eve-signoff --ready || fail "passing B did not admit human intake"
+  "$snapshot" --contribution-input | jq -e '.backlog.records[]
+    | select(.id == "eve-signoff") | .captain_actionable == true and .state != "done"' >/dev/null \
+    || fail "passing B did not project a ready, open hold"
+  touch "$home/config/hold-pr-settle"
+  "$holds" pr-policy eve-signoff "$pr" merged close >/dev/null 2>&1 \
+    && fail "passing B enabled automatic forge settlement"
+  printf 'eve-signoff\tApprove the revised frame.\n' \
+    | "$holds" answers --source 'fixture human answer' >/dev/null || fail "human sign-off could not close"
+  out=$("$tasks" show eve-signoff --full)
+  assert_contains "$out" "state: done" "existing human answer did not close the hold"
+  pass "the Eve sign-off needs Done and passing B, then only human answer intake clears it"
+)
+
 fm_test_run test_precompact_writes_and_replaces_block test_precompact_never_blocks test_inject_digest \
-  test_precompact_bounds_and_preservation test_compact_page_and_recovery
+  test_precompact_bounds_and_preservation test_compact_page_and_recovery test_observe_compact_attachment \
+  test_review_gated_signoff

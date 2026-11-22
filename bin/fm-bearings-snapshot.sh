@@ -411,7 +411,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             + (if $remaining > 0 then " +\($remaining) more" else "" end))
       end;
   def hold_note:
-    if .hold_bucket == "blocked" then bounded_blocker_note(70)
+    if .review_pending and ((.unresolved_blocker_ids // []) | length) == 0 then "exact revision review pending"
+    elif .hold_bucket == "blocked" then bounded_blocker_note(70)
     elif .hold_bucket == "dated" then ("until " + (.hold_until // "-"))
     elif .hold_bucket == "aged" and .hold_age_days != null then
       ("held " + (.hold_age_days | tostring) + "d")

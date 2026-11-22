@@ -23,6 +23,7 @@ Put the question and its options in the hold reason, and keep one held task per 
 Register or re-hold through `bin/fm-captain-hold.sh hold`, which is idempotent per task id.
 For a sign-off that depends on review or fixes, link the exact outstanding work with the backlog's existing blocker edge before holding the sign-off.
 Ask only when the owning backlog shows the prerequisites complete.
+For an opt-in sign-off that requires a passing review of an exact revision, use the hold owner's `--require-review` contract and check readiness with that owner.
 Treat status mirrors and saved handoff text as notifications and recheck the owning backlog before acting on them.
 After inventorying the whole report and review surface, firstmate runs `bin/fm-captain-hold.sh complete` with every captain-held task id, or with `--none` when nothing waits on the captain.
 A scout may attest its own empty inventory only through the narrow command exception in its generated brief's Definition of done.

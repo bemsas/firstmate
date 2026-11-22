@@ -108,8 +108,81 @@ test_design_rework_requires_sources_before_launch() {
   pass "design rework carries agreed sources through spawn, and fresh design can launch without past sources"
 }
 
+test_structured_rework_requires_the_current_approval() {
+  command -v tasks-axi >/dev/null 2>&1 || { note "skip: structured local approval requires tasks-axi"; return; }
+  local id=design-rework-structured out brief scaffold pointer old wrong_digest scout=eve-rework-scout
+  local tasks="$ROOT/bin/fm-tasks-axi.sh" holds="$ROOT/bin/fm-captain-hold.sh"
+  local artifact=https://design.example.invalid/eve/one-frame
+  make_case structured "$id" "no-mistakes" --design-rework
+  brief="$HOME_DIR/data/$id/brief.md"
+  scaffold=$(cat "$brief")
+  scaffold=${scaffold//'<artifact-link>'/$artifact}
+  scaffold=${scaffold//'{DESIGN_CHANGE}'/Keep one frame and simplify search.}
+  FM_HOME="$HOME_DIR" "$tasks" add eve-design "Eve design" >/dev/null || fail "create Eve origin"
+  FM_HOME="$HOME_DIR" "$tasks" add other-design "Other design" >/dev/null || fail "create unrelated origin"
+  FM_HOME="$HOME_DIR" "$tasks" add "$id" "Rework Eve design" --kind ship >/dev/null || fail "create rework task"
+  FM_HOME="$HOME_DIR" "$holds" hold eve-pick --title "Select the Eve design" --reason "Choose a frame" \
+    --origin eve-design >/dev/null || fail "hold Eve choice"
+  printf 'Approve the one-frame design.\n' > "$HOME_DIR/answer"
+  wrong_digest=$(printf '%064d' 0)
+
+  rework_brief() {
+    local content=${scaffold//'<decision-link>'/$1}
+    content=${content//Change:/$'Origin: tasks-axi:'"$2"$'\nChange:'}
+    printf '%s\n' "$content" > "$brief"
+  }
+
+  refuse_rework() {
+    out=$(run_spawn "$id" --mode no-mistakes --yolo off) && fail "$1 launched rework"
+    assert_contains "$out" "must link the agreed artifact and prior captain decisions" "$1 bypassed the rework gate"
+    assert_absent "$HOME_DIR/state/$id.meta" "$1 published a task record"
+  }
+
+  rework_brief "tasks-axi:eve-pick#1-$wrong_digest" eve-design
+  refuse_rework "unresolved choice"
+  FM_HOME="$HOME_DIR" "$holds" answer eve-pick --release --decision-file "$HOME_DIR/answer" >/dev/null \
+    || fail "record ordinary answer"
+  refuse_rework "answer with no structured approval"
+  FM_HOME="$HOME_DIR" "$holds" hold eve-pick --reason "Choose current revision" --origin eve-design >/dev/null \
+    || fail "re-hold Eve"
+  FM_HOME="$HOME_DIR" "$holds" answer eve-pick --release --decision-file "$HOME_DIR/answer" \
+    --approve-design "$artifact" >/dev/null || fail "record exact approval"
+  old=$(FM_HOME="$HOME_DIR" "$holds" design-decision eve-pick) || fail "read exact approval pointer"
+
+  rework_brief "$old" other-design
+  refuse_rework "incorrect home-local origin"
+  mkdir -p "$HOME_DIR/data/$scout"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$scout" > "$HOME_DIR/state/$scout.meta"
+  cp "$brief" "$HOME_DIR/data/$scout/brief.md"
+  out=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-promote.sh" "$scout" --mode direct-PR --yolo off 2>&1) \
+    && fail "promotion accepted the incorrect home-local origin"
+  assert_contains "$out" "must link the agreed artifact and prior captain decisions" "promotion bypassed the rework gate"
+  assert_grep 'kind=scout' "$HOME_DIR/state/$scout.meta" "promotion changed the refused scout"
+  rework_brief "$old" eve-design
+  sed 's@/eve/one-frame@/eve/two-frames@' "$brief" > "$brief.different"
+  mv "$brief.different" "$brief"
+  refuse_rework "different artifact"
+  rework_brief tasks-axi:eve-pick eve-design
+  refuse_rework "unqualified pointer"
+
+  FM_HOME="$HOME_DIR" "$holds" hold eve-pick --reason "Confirm the agreed frame again" >/dev/null \
+    || fail "re-hold existing approved occurrence"
+  rework_brief "$old" eve-design
+  refuse_rework "older approval with new open occurrence"
+  FM_HOME="$HOME_DIR" "$holds" answer eve-pick --release --decision-file "$HOME_DIR/answer" \
+    --approve-design "$artifact" >/dev/null || fail "record new approval with same words"
+  refuse_rework "superseded identical answer"
+  pointer=$(FM_HOME="$HOME_DIR" "$holds" design-decision eve-pick) || fail "read latest approval pointer"
+  [ "$pointer" != "$old" ] || fail "the same words reused the prior occurrence"
+  rework_brief "$pointer" eve-design
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off) || fail "exact approval did not launch: $out"
+  assert_grep 'Origin: tasks-axi:eve-design' "$HOME_DIR/data/$id/launch-brief.md" "launch lost the prior-work identity"
+  pass "spawn binds structured rework to the current approved occurrence, origin and artifact"
+}
+
 test_spawn_launches_when_brief_and_registry_agree_on_pr_text
 test_spawn_refuses_a_pr_text_mismatch_before_launch
 test_design_rework_requires_sources_before_launch
+test_structured_rework_requires_the_current_approval
 
 echo "# all fm-spawn-manual-pr-text tests passed"

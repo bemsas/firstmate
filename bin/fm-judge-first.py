@@ -2,7 +2,7 @@
 # fm-judge-first.py - the decision engine behind bin/fm-judge-first.sh.
 #
 #   fm-judge-first.py ingest <secondmate-id> <status-lines-file|->
-#   fm-judge-first.py summary [--since <epoch>]
+#   fm-judge-first.py summary [--since <epoch>] [--reversals <verified-answer-receipts.jsonl>]
 #
 # Judge-first runs every new needs-decision: / blocked: line a secondmate
 # mirrors into this home's status stream through the private judge
@@ -35,6 +35,15 @@
 # verdict, including local escalations, without another evaluation or journal row.
 # Telemetry failures never prevent the ordinary decision/send path.
 #
+# Summary optionally takes an explicit JSONL export from the operator verifying
+# human answers against the answer source. Each fm-judge-reversal.v1 record
+# has actor="captain", outcome="reversed", unchanged_premises=true, a stable
+# event_id for the original human answer, its epoch at, and the original
+# sent hook's auto_send object with its decisions array replaced by one
+# exact decision object under "decision". Treat this input as an operator
+# attestation, never as authorization. The summary joins it to confirmed
+# live send evidence, reports once per send, and writes nothing.
+#
 # Environment (tests and relocated homes): FM_HOME, FM_JUDGE_PY, FM_JUDGE_LOG,
 # FM_JUDGE_FIRST_BUDGET (total judge seconds per ingest, default 40),
 # FM_JUDGE_FIRST_TIMEOUT (seconds per judge call, default 20), FM_SEND_BIN,
@@ -60,6 +69,9 @@ CALL_TIMEOUT = float(os.environ.get('FM_JUDGE_FIRST_TIMEOUT', '20'))
 DEDUPE_SECONDS = 120
 POLICIES = ('recommended-v1',)
 VERBS = ('needs-decision', 'blocked')
+CORR = re.compile(r'[0-9a-f]{16}')
+DELIVERY_RECEIPT = re.compile(
+    r'^fm-send: confirmed decision delivery corr=([0-9a-f]{16}) key=(\S+) opening-sha256=([0-9a-f]{64})$', re.M)
 
 
 def mode():
@@ -256,7 +268,9 @@ def read_log():
         with open(JUDGE_LOG, encoding='utf-8') as fh:
             for raw in fh:
                 try:
-                    rows.append(json.loads(raw))
+                    row = json.loads(raw)
+                    if isinstance(row, dict):
+                        rows.append(row)
                 except ValueError:
                     continue
     except OSError:
@@ -358,11 +372,32 @@ def send_answer(secondmate, keys, text):
         cmd += ['--resolve-key', key]
     cmd.append(text)
     try:
-        done = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=dict(os.environ, FM_HOME=HOME_DIR))
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
+                              env=dict(os.environ, FM_HOME=HOME_DIR, FM_SEND_REPORT_DELIVERY='1'))
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {'ok': False, 'detail': 'send %s' % type(exc).__name__}
     tail = [l for l in (done.stdout + done.stderr).splitlines() if 'FM_PENDING_REPLY_EXISTING_CORR' in l or l.startswith('error')]
-    return {'ok': done.returncode == 0, 'exit': done.returncode, 'detail': ' | '.join(tail[:3])}
+    result = {'ok': done.returncode == 0, 'exit': done.returncode, 'detail': ' | '.join(tail[:3])}
+    receipts = DELIVERY_RECEIPT.findall(done.stdout)
+    correlations = {corr for corr, _, _ in receipts}
+    if result['ok'] and len(correlations) == 1:
+        result['delivery_corr'] = correlations.pop()
+        result['openings'] = [[key, digest] for _, key, digest in receipts]
+    return result
+
+
+def auto_send_identity(secondmate, cluster, result):
+    if 'delivery_corr' not in result:
+        return {}
+    decisions = []
+    for item in cluster:
+        parsed = item['parsed']
+        if (parsed['key'] and parsed['at'] and parsed['corr'] and item['one_corr']
+                and result['openings'].count([parsed['key'], item['opening']]) == 1):
+            decisions.append({'key': parsed['key'], 'at': parsed['at'], 'corr': parsed['corr'],
+                              'opening_sha256': item['opening']})
+    return {'auto_send': {'home': os.path.realpath(HOME_DIR), 'task': secondmate,
+                          'delivery_corr': result['delivery_corr'], 'decisions': decisions}}
 
 
 def cluster_lines(items):
@@ -391,7 +426,9 @@ def ingest(secondmate, lines):
         parsed = parse_line(line)
         if parsed is None:
             continue
-        items.append({'parsed': parsed, 'synth': synthesize(parsed, secondmate)})
+        items.append({'parsed': parsed, 'synth': synthesize(parsed, secondmate),
+                      'opening': hashlib.sha256(line.encode(errors='surrogateescape')).hexdigest(),
+                      'one_corr': len(set(re.findall(r'\bcorr=([0-9a-f]{16})\b', line.lower()))) == 1})
     summary['lines'] = len(items)
     items.sort(key=lambda i: i['parsed']['at'] or 0)
     rows = read_log()
@@ -441,7 +478,8 @@ def ingest(secondmate, lines):
             final = 'sent' if result['ok'] else 'send-failed'
             append_log({'at': int(time.time()), 'card': head['synth']['card'], 'verdict': verdicts[0],
                         'hook': dict(row_base['hook'], action=final, card_hash=head['synth']['digest'],
-                                     key=head['parsed']['key'], send=result)})
+                                     key=head['parsed']['key'], send=result,
+                                     **auto_send_identity(secondmate, cluster, result))})
             summary['auto' if result['ok'] else 'error'] += len(cluster)
         elif action == 'would-auto':
             summary['auto'] += len(cluster)
@@ -450,18 +488,98 @@ def ingest(secondmate, lines):
     return summary
 
 
-def summarize(since):
+def linked_decision(decision, openings):
+    return (isinstance(decision, dict) and isinstance(decision.get('key'), str) and bool(decision['key'])
+            and type(decision.get('at')) is int and decision['at'] > 0
+            and isinstance(decision.get('corr'), str) and CORR.fullmatch(decision['corr'])
+            and isinstance(decision.get('opening_sha256'), str)
+            and re.fullmatch(r'[0-9a-f]{64}', decision['opening_sha256'])
+            and openings.count([decision['key'], decision['opening_sha256']]) == 1)
+
+
+def confirmed_auto_send(hook):
+    sent, send = hook.get('auto_send'), hook.get('send')
+    if not (hook.get('mode') == 'on' and hook.get('action') == 'sent'
+            and isinstance(sent, dict) and isinstance(send, dict)
+            and send.get('ok') is True and type(send.get('exit')) is int and send['exit'] == 0
+            and sent.get('home') == os.path.realpath(HOME_DIR)
+            and isinstance(sent.get('task'), str) and sent['task'] == hook.get('secondmate')
+            and isinstance(sent.get('delivery_corr'), str) and CORR.fullmatch(sent['delivery_corr'])
+            and sent['delivery_corr'] == send.get('delivery_corr')
+            and isinstance(sent.get('decisions'), list) and isinstance(send.get('openings'), list)
+            and all(linked_decision(decision, send['openings']) for decision in sent['decisions'])):
+        return None
+    return sent
+
+
+def count_human_reversals(rows, since, receipt_path):
+    deliveries, events = {}, {}
+    for row, hook in rows:
+        sent = confirmed_auto_send(hook)
+        if sent is not None:
+            deliveries.setdefault(sent['delivery_corr'], []).append((row, sent))
+    if receipt_path is None:
+        return 0
+    with open(receipt_path, encoding='utf-8') as receipts:
+        for line in receipts:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(record, dict) and isinstance(record.get('event_id'), str) and record['event_id'].strip():
+                events.setdefault(record['event_id'], []).append(record)
+    reversed_sends = set()
+    for same_event in events.values():
+        receipt = same_event[0]
+        if (any(record != receipt for record in same_event[1:])
+                or receipt.get('schema') != 'fm-judge-reversal.v1' or receipt.get('actor') != 'captain'
+                or receipt.get('outcome') != 'reversed' or receipt.get('unchanged_premises') is not True):
+            continue
+        identity = receipt.get('auto_send')
+        if not isinstance(identity, dict) or not isinstance(identity.get('delivery_corr'), str):
+            continue
+        matches = deliveries.get(identity['delivery_corr'], [])
+        if len(matches) != 1:
+            continue
+        row, sent = matches[0]
+        decisions = sent.get('decisions')
+        if (row['at'] < since or type(receipt.get('at')) is not int or receipt['at'] < row['at']
+                or identity.get('home') != sent['home'] or identity.get('task') != sent['task']
+                or not isinstance(decisions, list) or not isinstance(identity.get('decision'), dict)
+                or decisions.count(identity['decision']) != 1):
+            continue
+        reversed_sends.add(sent['delivery_corr'])
+    return len(reversed_sends)
+
+
+def summarize(since, receipt_path=None):
     counts, autos = {}, []
+    rows = []
+    unlinked = 0
     for row in read_log():
         hook = row.get('hook')
-        if not isinstance(hook, dict) or hook.get('name') != 'judge-first' or row.get('at', 0) < since:
+        if (not isinstance(hook, dict) or hook.get('name') != 'judge-first'
+                or not isinstance(hook.get('action'), str) or type(row.get('at')) is not int):
+            continue
+        rows.append((row, hook))
+        if row['at'] < since:
             continue
         counts[hook['action']] = counts.get(hook['action'], 0) + 1
+        sent = confirmed_auto_send(hook)
+        if hook['action'] == 'sent' and (sent is None or not sent.get('decisions')):
+            unlinked += 1
         if hook['action'] in ('would-auto', 'sent'):
-            autos.append('%s\t%s\t%s' % (row['at'], hook.get('key') or hook['identity'], hook.get('answer') or ''))
-    print(json.dumps({'counts': counts}, sort_keys=True))
+            autos.append('%s\t%s\t%s' % (row['at'], hook.get('key') or hook.get('identity', ''), hook.get('answer') or ''))
+    try:
+        reversals = count_human_reversals(rows, since, receipt_path)
+    except (OSError, UnicodeError):
+        print('judge-first: cannot read the supplied answer receipts', file=sys.stderr)
+        return 2
+    print(json.dumps({'counts': counts, 'confirmed_human_reversals': reversals,
+                      'live_sends_without_reversal_linkage': unlinked}, sort_keys=True))
     for line in autos:
         print(line)
+    return 0
 
 
 def main(argv):
@@ -474,12 +592,15 @@ def main(argv):
             return 0
         print('judge-first: ' + ' '.join('%s=%s' % kv for kv in summary.items()))
         return 0
-    if len(argv) in (2, 4) and argv[1] == 'summary':
-        since = int(argv[3]) if len(argv) == 4 and argv[2] == '--since' and argv[3].isdigit() else 0
-        summarize(since)
-        return 0
+    if len(argv) >= 2 and argv[1] == 'summary':
+        import argparse
+        parser = argparse.ArgumentParser(prog='fm-judge-first.sh summary')
+        parser.add_argument('--since', type=int, default=0, metavar='EPOCH')
+        parser.add_argument('--reversals', metavar='VERIFIED-ANSWER-RECEIPTS.jsonl')
+        args = parser.parse_args(argv[2:])
+        return summarize(args.since, args.reversals)
     print('usage: fm-judge-first.sh ingest <secondmate-id> <status-lines-file|->\n'
-          '       fm-judge-first.sh summary [--since <epoch>]', file=sys.stderr)
+          '       fm-judge-first.sh summary [--since <epoch>] [--reversals <receipts.jsonl>]', file=sys.stderr)
     return 2
 
 

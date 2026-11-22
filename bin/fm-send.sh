@@ -853,6 +853,7 @@ fi
 # path untouched.
 fm_send_close_resolved_keys() { # <answer-text>
   local note=$1 k close_note append_rc still manual_close_cmd close_lines=() i=0
+  local opening_size='' opening_file='' openings=''
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_STATUS_KEYS; do
     close_note=$(fm_send_resolve_close_note "$k" "$note")
@@ -860,6 +861,11 @@ fm_send_close_resolved_keys() { # <answer-text>
     close_lines+=("$FM_LINE_CAP_LINE")
   done
   [ "${#close_lines[@]}" -gt 0 ] || return 0
+  if [ "${FM_SEND_REPORT_DELIVERY:-0}" = 1 ] && [ "$PENDING_REPLY_CREATED" = 1 ]; then
+    opening_size=$(_fm_status_file_size "$RESOLVE_STATUS_FILE") || opening_size=''
+    opening_file=$(_fm_open_decisions_file_ident "$RESOLVE_STATUS_FILE") || opening_file=''
+    openings=$(status_open_decisions "$RESOLVE_STATUS_FILE" '' raw)
+  fi
   append_rc=0
   fm_wake_status_append_self_announced "$STATE" "$RESOLVE_STATUS_FILE" "${close_lines[@]}" || append_rc=$?
   if [ "$append_rc" -eq 2 ]; then
@@ -879,6 +885,10 @@ fm_send_close_resolved_keys() { # <answer-text>
     esac
     i=$((i + 1))
   done
+  if [ -n "$opening_size" ] && [ "$opening_size" = "$FM_WAKE_SELF_APPEND_START" ] \
+    && [ -n "$opening_file" ] && [ "$opening_file" = "$FM_WAKE_SELF_APPEND_IDENT" ]; then
+    fm_send_report_confirmed_delivery "$openings"
+  fi
 }
 
 # Feed the answered captain-held tasks to the ONE keyed-answer intake, as keyed
@@ -897,6 +907,34 @@ fm_send_feed_resolved_holds() { # <answer-text>
     echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer - do not resend the answer." >&2
     return 1
   fi
+}
+
+# Optional report-only receipt used by judge-first's journal. The send and
+# keyed close have already succeeded. A reused or unconfirmed correlation
+# supplies no receipt, and reporting cannot affect the send's outcome.
+fm_send_report_confirmed_delivery() {
+  local openings=$1 record delivered k row opening digest
+  [ -n "$PENDING_REPLY_CORR" ] || return 0
+  record=$(fm_pending_reply_path "$STATE" "$PENDING_REPLY_CORR")
+  [ "$(fm_pending_reply_get "$record" task_id)" = "$RESOLVE_TASK_ID" ] || return 0
+  delivered=$(fm_pending_reply_get "$record" delivered_epoch)
+  case "$delivered" in ''|*[!0-9]*) return 0 ;; esac
+  for k in $RESOLVE_STATUS_KEYS; do
+    while IFS= read -r row; do
+      case "$row" in "$k"$'\t'*) ;; *) continue ;; esac
+      opening=${row#*$'\t'}
+      opening=${opening#*$'\t'}
+      [ "$(grep -Fxc -- "$opening" "$RESOLVE_STATUS_FILE")" = 1 ] || break
+      if command -v shasum >/dev/null 2>&1; then
+        digest=$(printf '%s' "$opening" | shasum -a 256) || continue
+      else
+        digest=$(printf '%s' "$opening" | sha256sum) || continue
+      fi
+      printf 'fm-send: confirmed decision delivery corr=%s key=%s opening-sha256=%s\n' \
+        "$PENDING_REPLY_CORR" "$k" "${digest%% *}" || true
+      break
+    done <<< "$openings"
+  done
 }
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used to

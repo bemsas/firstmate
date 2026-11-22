@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Record a second-model review for one exact GitHub pull request head.
 # Usage: fm-review-verdict.sh <pr-url> <40-hex-head> merge|fix [reviewer]
+#        fm-review-verdict.sh passing <pr-url> <exact-head>
+# 'passing' is a read-only check for an exact merge verdict in this home's
+# journal. Missing, malformed, or latest non-passing evidence fails closed.
 # The reviewer/supervisor calls this after the independent review; this helper
 # records the verdict, it does not perform or infer a review. No forge calls.
 # Firstmate runs this when accepting the report, with its exact reviewed head;
@@ -18,8 +21,28 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-usage() { echo 'usage: fm-review-verdict.sh <pr-url> <40-hex-head> merge|fix [reviewer]'; }
+usage() {
+  printf '%s\n' 'usage: fm-review-verdict.sh <pr-url> <exact-head> merge|fix [reviewer]' \
+    '       fm-review-verdict.sh passing <pr-url> <exact-head>'
+}
 if [ "${1:-}" = --help ]; then usage; exit 0; fi
+FILE="$STATE/review-verdicts.jsonl"
+if [ "${1:-}" = passing ]; then
+  if [ "$#" -ne 3 ] || ! fm_pr_url_parse "$2" || [ "$FM_PR_PROVIDER" != github ] \
+    || ! fm_pr_head_valid "$3"; then
+    usage >&2
+    exit 2
+  fi
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] && [ -f "$FILE" ] && [ ! -L "$FILE" ] || exit 1
+  exec jq -Res --arg pr "$FM_PR_URL" --arg head "$3" '
+    def receipt:
+      if type == "object" and (.pr | type == "string") and (.head | type == "string")
+         and (.reviewer | type == "string") and (.verdict == "merge" or .verdict == "fix")
+      then . else error("invalid verdict receipt") end;
+    [split("\n")[] | select(length > 0) | fromjson | receipt | select(.pr == $pr and .head == $head)]
+    | last | .verdict == "merge"
+  ' "$FILE" >/dev/null 2>&1
+fi
 if { [ "$#" -ne 3 ] && [ "$#" -ne 4 ]; } || ! fm_pr_url_parse "$1" || [ "$FM_PR_PROVIDER" != github ] \
   || ! fm_pr_head_valid "$2"; then
   usage >&2
@@ -27,7 +50,6 @@ if { [ "$#" -ne 3 ] && [ "$#" -ne 4 ]; } || ! fm_pr_url_parse "$1" || [ "$FM_PR_
 fi
 case "$3" in merge|fix) ;; *) echo 'error: verdict must be merge or fix' >&2; exit 2 ;; esac
 [ -d "$STATE" ] && [ ! -L "$STATE" ] || exit 1
-FILE="$STATE/review-verdicts.jsonl"
 LOCK="$STATE/.review-verdicts.lock"
 fm_lock_acquire_wait "$LOCK" || exit 1
 trap 'fm_lock_release "$LOCK"' EXIT

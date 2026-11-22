@@ -237,6 +237,13 @@ def verify_delivery(root, request, fixed, closed_review):
     compact = [block for block in blocks if "SessionStart:compact hook success:" in block]
     assert not request.get("tools"), "tools reached the offline provider"
     if fixed:
+        transcript, = (root / "claude-config" / "projects").glob("*/*.jsonl")
+        observer = Path(__file__).resolve().parents[2] / "bin/fm-precompact-handoff.py"
+        observed = run([observer, "observe-compact", "--home", root, "--transcript", transcript],
+                       env={**os.environ, "CLAUDE_CONFIG_DIR": str(root / "claude-config"),
+                            "FM_STATE_OVERRIDE": str(root / "state")}, capture_output=True)
+        print(observed.stdout.strip())
+        assert json.loads(observed.stdout)["delivery"] == "observed", "native compact attachment was not verified"
         assert len(compact) == 1 and hook.strip() in compact[0], "the complete page did not arrive exactly once"
         assert len(hook.encode("utf-8")) <= 1660, "page exceeded the byte budget"
         assert "persisted-output" not in compact[0], "Claude spilled the compact page"

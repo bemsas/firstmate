@@ -47,6 +47,8 @@
 #   links to both and the requested change. Reopen an accepted choice only
 #   when the current request reopens it. Omit the flag for genuinely new
 #   design or discovery with no agreed design to carry forward.
+#   For a structured local approval, use fm-captain-hold.sh design-decision
+#   and include its work's Origin line as specified by bin/fm-dod-lib.sh.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:

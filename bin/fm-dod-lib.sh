@@ -464,18 +464,38 @@ fm_brief_task_content_valid() {  # <file>
   [ -n "$(printf '%s' "$task" | tr -d '[:space:]')" ]
 }
 
-# Shape check for the opt-in rework section scaffolded by fm-brief.sh.
-# The intake author verifies that the linked sources are the agreed ones.
+# Rework intake contract for spawn and promotion. A Decisions link using the
+# local tasks-axi: scheme needs the current resolved pointer printed by
+# fm-captain-hold.sh design-decision, plus an Origin: tasks-axi:<id> line
+# identifying the prior work. Ordinary links remain author-verified context.
 fm_brief_agreed_design_valid() {  # <brief>
+  local parsed artifact origin decision id occurrence digest script_dir
   fm_brief_task_heading_present "$1" "## Agreed design" || return 0
-  fm_brief_task_heading_body "$1" "## Agreed design" | awk '
+  parsed=$(fm_brief_task_heading_body "$1" "## Agreed design" | awk '
+    function target(line) { sub(/^[^]]*\]\(/, "", line); sub(/\)$/, "", line); return line }
     /^[[:space:]]*$/ { next }
-    /^Artifact: \[[^]]+\]\((https?:\/\/|\/|\.\.?\/|[[:alnum:]_-]+\/)[^[:space:]<>()]+\)$/ { artifact++; next }
+    /^Artifact: \[[^]]+\]\((https?:\/\/|\/|\.\.?\/|[[:alnum:]_-]+\/)[^[:space:]<>()]+\)$/ {
+      artifact++; href = target($0); next
+    }
     /^Decisions: \[[^]]+\]\((https?:\/\/|\/|\.\.?\/|[[:alnum:]_-]+\/)[^[:space:]<>()]+\)$/ { decisions++; next }
+    /^Decisions: \[[^]]+\]\(tasks-axi:[^[:space:]<>()]+\)$/ {
+      decisions++; pointer = target($0); next
+    }
+    /^Origin: tasks-axi:[A-Za-z0-9][A-Za-z0-9._-]*$/ { origins++; origin = $2; next }
     /^Change: [^[:space:]{}].*$/ { change++; next }
     { invalid = 1 }
-    END { exit (invalid || artifact != 1 || decisions != 1 || change != 1) }
-  '
+    END {
+      if (invalid || artifact != 1 || decisions != 1 || change != 1 || origins != (pointer != "")) exit 1
+      if (pointer != "") print href, origin, pointer
+    }
+  ') || return 1
+  [ -n "$parsed" ] || return 0
+  read -r artifact origin decision <<< "$parsed"
+  [[ "$decision" =~ ^tasks-axi:([A-Za-z0-9][A-Za-z0-9._-]*)#([1-9][0-9]*)-([0-9a-f]{64})$ ]] || return 1
+  id=${BASH_REMATCH[1]} occurrence=${BASH_REMATCH[2]} digest=${BASH_REMATCH[3]}
+  script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-${script_dir%/*}}}" \
+    "$script_dir/fm-captain-hold.sh" design-decision "$id" "${origin#tasks-axi:}" "$occurrence" "$digest" "$artifact"
 }
 
 # Print the first `## Captain's intent` body line that opens with an operator
