@@ -210,6 +210,29 @@ EOF
   pass "each backtest gap has a regression line that escalates: force-with-lease, revocation, shared staging, abort, bot protection, bundle, conditional, step skip"
 }
 
+test_unheld_destructive_decisions() {
+  new_home destructive
+  printf 'on\n' > "$HOME_DIR/config/judge-first"
+  local out
+  cat > "$HOME_DIR/in" <<'EOF'
+needs-decision [key=ce-polish-1639-discard] [at=1000]: Options: (A, recommended) proceed; (B) wait.
+needs-decision [key=context-only] [at=1001]: DiScArDiNg abandoned edits is on the table. Options: (A, recommended) proceed; (B) wait.
+needs-decision [key=confirm-flag] [at=1002]: Options: (A, recommended) apply --force; (B) wait.
+needs-decision [key=cleanup-choice] [at=1003]: Options: (A, recommended) wait; (B) start Teardown.
+needs-decision [key=cleanup_FORCE] [at=1004]: Options: (A, recommended) proceed; (B) wait.
+needs-decision [key=ordinary-forceful-wording] [at=1005]: Options: (A, recommended) keep the discardable label; (B) omit it.
+EOF
+  out=$(run_hook "$HOME_DIR/in")
+  assert_contains "$out" 'auto=1 escalate=5' "only the ordinary unheld decision may be auto-answered"
+  assert_equals 1 "$(calls)" "only the ordinary unheld decision may reach the judge"
+  assert_equals 'mate:ordinary-forceful-wording' "$(cat "$HOME_DIR/calls")" "the judge must only see the control"
+  assert_equals 1 "$(sends)" "only the ordinary unheld decision may be sent"
+  assert_contains "$(cat "$HOME_DIR/sends")" '--resolve-key ordinary-forceful-wording' "the sender must only close the control"
+  assert_equals 5 "$(journal "sum(r['hook']['action'] == 'escalate' and r['verdict']['rules_hit'] == ['irreversible_destructive'] for r in rows)")" \
+    "every destructive case must journal the existing escalation reason"
+  pass "unheld destructive decisions escalate before a judge opinion or send; ordinary wording still auto-answers"
+}
+
 test_guard_rule_variants() {
   new_home variants
   printf 'on\n' > "$HOME_DIR/config/judge-first"
@@ -496,6 +519,7 @@ test_mode_gate
 test_live_answer
 test_escalations_do_not_ask_the_judge
 test_guard_rules_from_real_lines
+test_unheld_destructive_decisions
 test_guard_rule_variants
 test_judge_findings_and_failures_escalate
 test_dedupe_by_decision_identity

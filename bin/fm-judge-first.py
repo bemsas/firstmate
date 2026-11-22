@@ -183,8 +183,10 @@ def synthesize(parsed, secondmate):
 
 # (rule, pattern, scope): "both" scans the selected option and its context,
 # "selected" only scans the recommended action; "action" adds the card title.
+# "decision" scans the key and the entire status body, including alternatives.
 # A past-tense abort in the context is the situation, not the ask.
 GUARD = [
+    ('irreversible_destructive', r'\b(?:discard(?:s|ed|ing)?|forc(?:e[ds]?|ing)|tear[ -]?downs?)\b', 'decision'),
     ('irreversible_destructive', r"force[- ]with[- ]lease|\brewrit\w*\s+(?:the\s+|this\s+)?(?:branch(?:'s)?\s+)?history|history\s+rewrite|\breset\s+--hard", 'both'),
     ('irreversible_destructive', r'\babort(?:s|ing)?\b', 'selected'),
     ('pipeline_bypass', r'\b(?:bypass|skip\w*)\s+(?:the\s+)?(?:\w+\s+)?(?:pipeline|validation|no-mistakes|document|review|rebase|gate|tests?|checks?|ci)\b|--skip\b|--no-verify\b', 'action'),
@@ -199,17 +201,23 @@ BUNDLE_RANGE = re.compile(r'\b[DQ]\d{1,2}\s*[-–]\s*[DQ]?\d{1,2}\b')
 
 def guard_rules(synth):
     hits = []
+    body = synth['body']
+    key = synth['card'].get('title', '')
     selected = synth['selected'].lower()
     both = (synth['selected'] + ' ' + synth['preamble']).lower()
-    action = (synth['selected'] + ' ' + synth['card'].get('title', '')).lower()
+    targets = {
+        'selected': selected,
+        'both': both,
+        'action': (synth['selected'] + ' ' + key).lower(),
+        'decision': (key.replace('_', ' ') + '\n' + body).lower(),
+    }
     for name, pattern, scope in GUARD:
-        target = {'selected': selected, 'both': both, 'action': action}[scope]
+        target = targets[scope]
         # A generic refresh authorization names its target only in the context.
         if name == 'shared_state' and re.search(r'\b(?:authori[sz]e|perform|run)\s+(?:the\s+)?(?:documented\s+)?refresh\b', selected):
             target = both
         if re.search(pattern, target) and name not in hits:
             hits.append(name)
-    body = synth['body']
     if BUNDLE_RANGE.search(body) or len(set(BUNDLE_ID.findall(body))) > 2:
         hits.append('bundle_card')
     if synth['rec_sentence'] and CONDITIONAL.search(synth['rec_sentence']):
