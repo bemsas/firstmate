@@ -372,6 +372,13 @@ test_captain_holds_are_never_answered() {
   assert_equals 0 "$(sends)" "a later plain twin of a captain hold is never answered"
   run_hook "$(line_file in3 'needs-decision [key=plain-ask] [at=3000]: captain call: Options: (A, recommended) keep the field; (B) omit it.')" >/dev/null
   assert_equals 0 "$(sends)" "captain call wording is never answered"
+  run_hook "$(line_file embedded-holds \
+    'needs-decision [key=wording-choice] [at=3100]: Options: (A, recommended) keep the captain-only wording; (B) omit it.' \
+    'needs-decision [at=3200]: This choice is held for the captain. Options: (A, recommended) keep the field; (B) omit it.')" >/dev/null
+  assert_equals 0 "$(sends)" "embedded hold wording must never be answered"
+  assert_equals 0 "$(calls)" "embedded hold wording must never reach the judge"
+  assert_equals 2 "$(journal "sum(r['hook']['action'] == 'escalate' and r['verdict']['rules_hit'] == ['captain_hold'] for r in rows[-2:])")" \
+    "both embedded holds must journal a captain hold escalation"
   run_hook "$(line_file in4 'needs-decision [key=plain-ask-2] [at=4000]: Options: (A, recommended) keep the field; (B) omit it.')" >/dev/null
   assert_equals 1 "$(sends)" "an ordinary unheld decision is still answered"
   ans="$HOME_DIR/answer.txt"; printf 'a\n' > "$ans"
