@@ -507,8 +507,13 @@ It is opt-in per home: register it in that home's private `.claude/settings.loca
 
 `state/turn-context.alerts` is the home's cached-alert channel: any home check that has already run its own probes may rewrite it with one plain alert per line, and the digest only reads it, so a prompt never waits on a network check.
 A cache older than two hours is reported as stale instead of being repeated.
-Transcript text is untrusted: it fills only the handoff block and never changes the obligations ledger or any other record.
+Transcript text never changes task, decision, or obligation records.
 Register both commands by absolute path; the script header owns the exact payloads, limits, tunables, and output.
+
+An empty regular `config/claude-compact-resume` file enables [the native Claude read-first page](sessionstart-nudge.md#claude) for this home.
+Use the opt-in on a Markdown-backlog primary.
+When that page supplies compact recovery, exclude existing bulk progress and fleet replay hooks from `SessionStart:compact` in this home's private settings.
+Keep the `PreCompact` handoff and prompt-time alerts available for their separate purposes.
 
 ### Obligations ledger (data/obligations.json)
 
@@ -1195,8 +1200,12 @@ The optional local, gitignored `config/judge-first` file opts this home into run
 Absent means the hook does nothing.
 Present and empty, or holding any value other than `on`, means shadow: the hook computes each verdict, appends it to `judge-log.jsonl` beside `judge.py`, and sends nothing.
 Only the exact word `on` answers an auto verdict, through `bin/fm-send.sh` with `--resolve-key`, journaled before the send and never retried.
+Captain holds go through their own [answer path](captain-hold-lifecycle.md).
 Deleting the file is the kill switch.
 `bin/fm-judge-first.sh summary [--since <epoch>]` lists the shadow verdicts so a day of them can be compared with the supervisor's own answers.
+Its optional `--reversals` input reports operator-attested human reversals tied to confirmed live deliveries.
+The summary reports a null reversal count when the receipt file is omitted.
+`bin/fm-judge-first.py` owns the receipt format and the report's handling of unlinked historical sends.
 A line with no recommendation, a recommendation the guard rules reject, a judge failure or timeout, an unknown judge policy, or (in `on` mode) a missing second opinion always keeps the ordinary wake.
 `bin/fm-judge-first.py`'s header owns the decision order, guard rules, and dedupe by decision identity; `bin/fm-procevent-remote-reply.sh` owns the call site.
 The file is not inherited by secondmate homes.

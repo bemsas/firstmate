@@ -49,3 +49,7 @@ Before acting on the report, verify that its claimed cause explains the end-user
 If a load-bearing element is missing, route a focused follow-up investigation instead of treating confidence or implementation detail as proof.
 A diagnosis or implementation-ready recommendation is evidence, not authorization to change code.
 Implementation still requires the captain's request or another existing lifecycle authority, and the reproduction should become the regression test when a fix is authorized.
+
+## Trigger
+
+- Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.

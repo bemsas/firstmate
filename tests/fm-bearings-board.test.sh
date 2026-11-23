@@ -769,7 +769,35 @@ test_build_refuses_a_nondecision_reconcile_value() {
   pass "build reserves reconcile across non-decision cards"
 }
 
+test_board_rechecks_pending_signoff_on_rebuild() {
+  command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found (pending board hold)"; return 0; }
+  local home data out board key
+  home=$(make_home pending-signoff)
+  key=sample-instruction-layer-refinement-review-decision-perishable-first-admission-choice
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  board="$home/.lavish/bearings-board.html"
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" add review-fix 'Finish review fixes' >/dev/null \
+    || fail "could not create the board prerequisite"
+  FM_HOME="$home" "$ROOT/bin/fm-captain-hold.sh" hold "$key" --title 'Sign off design' --reason 'Approve design?' >/dev/null \
+    || fail "could not create the board sign-off"
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" block "$key" --by review-fix >/dev/null \
+    || fail "could not block the sign-off"
+
+  out=$(run_board "$home" build "$data" 2>&1) || fail "the pending board did not build: $out"
+  assert_contains "$out" "dropped-pending-card: $key" "the stale board did not disclose the pending card"
+  extract_payload "$board" | jq -e --arg key "$key" '.captains_call | all(.key != $key)' >/dev/null \
+    || fail "the board presented actions for a pending sign-off"
+
+  FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" "done" review-fix >/dev/null || fail "could not complete the review"
+  out=$(run_board "$home" build "$data" 2>&1) || fail "the ready board did not build: $out"
+  extract_payload "$board" | jq -e --arg key "$key" '[.captains_call[] | select(.key == $key)] | length == 1' >/dev/null \
+    || fail "the board did not return exactly one sign-off when ready"
+  pass "board rebuilds suppress stale sign-off actions until review completes"
+}
+
 test_path_is_stable_and_home_scoped
+test_board_rechecks_pending_signoff_on_rebuild
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
 test_build_injects_binds_then_arms

@@ -21,18 +21,25 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
-#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
-#   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
+#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD] \
+#     [--require-review <GitHub-PR-url> <exact-head>]
+#   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release] [--approve-design <artifact-link>]
+#   fm-captain-hold.sh design-decision <task-id> [<origin-id> <occurrence> <approval-digest> <artifact-link>]
+#   fm-captain-hold.sh review-ready <task-id> <projected-review-spec>
 #   fm-captain-hold.sh pr-policy <task-id> <PR-url> <merged|closed|terminal> <close|release>
 #   fm-captain-hold.sh settle-pr <task-id> <PR-url>
-#   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
+#   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (human answers on stdin)
+#   fm-captain-hold.sh select <origin-id> <key>
+#     Prints the exact or legacy open hold id. Exit 0 means ready for an answer,
+#     4 means a prerequisite is pending, 1 means no matching hold, and 2 means unknown.
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
 #   fm-captain-hold.sh unbind <source-id>
 #   fm-captain-hold.sh binding <source-id>
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
-#   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
+#   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent] [--ready]
+#     --ready returns 4 for an open hold still waiting on a prerequisite.
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
@@ -58,6 +65,12 @@
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
+# `--require-review` records a GitHub PR and exact immutable head in the active
+# hold header. Re-holding an active call preserves this requirement unless an
+# explicit replacement is supplied. In addition to Done prerequisites it
+# needs an exact passing result from fm-review-verdict.sh. This pilot only
+# admits existing human answer intake. Review never answers the held question.
+# `review-ready` is the snapshot's read-only check of the projected spec.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -234,6 +247,11 @@
 # Records written by the retired fm-decision-hold.sh (routed,
 # declined, answered, repaired) are recognized everywhere a record is read, so
 # nothing already closed needs rewriting.
+# For an actual human approval of a design artifact, --approve-design binds
+# the exact artifact link to a hold with a registered --origin. The current
+# resolved approval can be cited as tasks-axi:<hold>#<occurrence>-<approval-digest>.
+# design-decision prints that pointer or checks all supplied bindings. A newer
+# open or resolved occurrence supersedes the earlier approval.
 #
 # Parent channel: inside a secondmate home a task held for the captain, and its
 # answer, are captain-facing facts the moment they are recorded, so `hold`
@@ -478,9 +496,47 @@ decode_shown_value() {  # <shown-field>
 # Decode show-encoded scalar fields and normalize the empty marker.
 show_field_value() {  # <show-output> <field>
   local value
-  value=$(decode_shown_value "$(show_field "$1" "$2")")
+  value=$(decode_shown_value "$(show_field "$1" "$2")") || return 1
   [ "$value" != '-' ] || value=''
   printf '%s' "$value"
+}
+
+# tasks-axi reports known open prerequisites in blocked/blocked_by. A missing
+# prerequisite can still appear in deps with blocked=no, so require positive
+# Done records for every declared edge, just as the fleet view does.
+hold_dependencies_ready() {  # <show-output>
+  local show=$1 deps dep id
+  case "$(show_field "$show" blocked)" in
+    yes) return 1 ;;
+    no|'') ;;
+    *) return 1 ;;
+  esac
+  deps=$(show_field_value "$show" deps) || return 1
+  while IFS= read -r dep; do
+    case "$dep" in blocked-by:*) id=${dep#blocked-by:} ;; *) continue ;; esac
+    case "$id" in ''|*[!A-Za-z0-9._-]*|.*) return 1 ;; esac
+    task_show "$id" && [ "$(show_field "$TASK_SHOW_OUTPUT" state)" = "done" ] || return 1
+  done <<EOF
+$(printf '%s\n' "$deps" | tr ',' '\n')
+EOF
+  hold_review_ready "$show"
+}
+
+hold_review_required() {
+  local body
+  body=$(show_field_value "$1" body) || return 0
+  split_hold_body "$body"
+  [ -n "$HOLD_REVIEW" ]
+}
+
+hold_review_ready() {
+  local show=$1 body pr head
+  body=$(show_field_value "$show" body) || return 1
+  split_hold_body "$body"
+  [ -n "$HOLD_REVIEW" ] || return 0
+  [[ "$HOLD_REVIEW" =~ ^Captain\ hold\ review:\ ([^[:space:]]+)\ ([0-9a-f]{40}|[0-9a-f]{64})$ ]] || return 1
+  pr=${BASH_REMATCH[1]} head=${BASH_REMATCH[2]}
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-review-verdict.sh" passing "$pr" "$head"
 }
 
 origin_exists_here() {  # <origin-id>
@@ -566,8 +622,21 @@ closed_answer_replay_mode_compatible() {  # <mode> <task-body>
 resolution_block() {  # <mode>
   local label='Captain decision:'
   case "$1" in reconciled|forge-closed|forge-released) label='Reconciliation evidence:' ;; esac
-  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n\n%s\n%s\n' \
-    "$DECISION_DIGEST" "$1" "$label" "$DECISION_TEXT"
+  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n' "$DECISION_DIGEST" "$1"
+  [ -z "${2:-}" ] || printf 'Design approval: %s\n' "$2"
+  printf '\n%s\n%s\n' "$label" "$DECISION_TEXT"
+}
+
+recorded_design_approval() {  # <decoded body without the active hold header>
+  printf '%s\n' "$1" | sed -n '1,4p' | awk '
+    NR == 1 && $0 != "Resolution recorded by fm-captain-hold." { exit }
+    NR == 4 && /^Design approval: / { sub(/^Design approval: /, ""); print }
+  '
+}
+
+design_artifact_valid() {
+  local link='^(https?://|/|\.\.?/|[[:alnum:]_-]+/)[^[:space:]<>()]+$'
+  [[ "$1" =~ $link ]]
 }
 
 # Durable state of one captain call: an active captain hold (annotations
@@ -839,24 +908,39 @@ body_hold_set_timestamp() {  # <decoded-task-body>
     | head -1
 }
 
-write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existing-0-or-1>
-  local id=$1 body=$2 hold_set=$3 preserve=$4 existing new_body tmp
+split_hold_body() {  # <decoded-body>; sets the active header, review line and remaining body
+  local body=$1 stamp first
+  stamp=$(body_hold_set_timestamp "$body")
+  HOLD_HEADER='' HOLD_REVIEW='' HOLD_BODY=$body
+  [ -n "$stamp" ] || return 0
+  HOLD_HEADER="Captain hold set: $stamp"
+  body=${body#"$HOLD_HEADER"}
+  body=${body#$'\n'}
+  first=${body%%$'\n'*}
+  case "$first" in
+    "Captain hold review:"*)
+      HOLD_REVIEW=$first
+      HOLD_HEADER="$HOLD_HEADER"$'\n'"$first"
+      body=${body#"$first"}
+      body=${body#$'\n'}
+      ;;
+  esac
+  HOLD_BODY=${body#$'\n'}
+}
+
+write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-0-or-1> [review-header]
+  local id=$1 body=$2 hold_set=$3 preserve=$4 review=${5:-} new_body tmp
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
-  existing=$(body_hold_set_timestamp "$body")
-  if [ "$preserve" = 1 ] && [ -n "$existing" ]; then
-    return 0
-  fi
-  if [ -n "$existing" ]; then
-    body=${body#"Captain hold set: $existing"}
-    case "$body" in
-      $'\n\n'*) body=${body#$'\n\n'} ;;
-      $'\n'*) body=${body#$'\n'} ;;
-    esac
+  split_hold_body "$body"
+  if [ "$preserve" = 1 ] && [ -n "$HOLD_HEADER" ]; then
+    [ -n "$review" ] || return 0
+    hold_set=$(body_hold_set_timestamp "$body")
   fi
   new_body=$(printf 'Captain hold set: %s' "$hold_set")
-  if [ -n "$body" ]; then
-    new_body=$(printf '%s\n\n%s' "$new_body" "$body")
+  [ -z "$review" ] || new_body="$new_body"$'\n'"$review"
+  if [ -n "$HOLD_BODY" ]; then
+    new_body=$(printf '%s\n\n%s' "$new_body" "$HOLD_BODY")
   fi
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-stamp.XXXXXX") \
     || fail "cannot stage the hold-set stamp"
@@ -890,15 +974,15 @@ task_identity() {
 }
 
 write_hold_origin() {  # <task-id> <shown-body> <origin>
-  local id=$1 body=$2 origin=$3 stamp rest new_body tmp
+  local id=$1 body=$2 origin=$3 rest new_body tmp
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
-  stamp=$(printf '%s\n' "$body" | sed -n 1p)
-  [ -n "$(body_hold_set_timestamp "$body")" ] \
+  split_hold_body "$body"
+  [ -n "$HOLD_HEADER" ] \
     || fail "task $id lost its hold-set stamp before its origin was recorded"
-  rest=$(printf '%s\n' "$body" | sed 1d | awk '!/^Captain hold origin: /' \
+  rest=$(printf '%s\n' "$HOLD_BODY" | awk '!/^Captain hold origin: /' \
     | awk 'NF || started { started = 1; print }')
-  new_body=$(printf '%s\nCaptain hold origin: %s' "$stamp" "$origin")
+  new_body=$(printf '%s\n%sCaptain hold origin: %s' "$HOLD_HEADER" "${HOLD_REVIEW:+$'\n'}" "$origin")
   if [ -n "$rest" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$rest")
   fi
@@ -1119,6 +1203,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
   local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason original_body='' hold_status=0
+  local review=''
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -1128,6 +1213,16 @@ command_hold() {
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
+      --require-review)
+        [ "$#" -ge 3 ] || fail "--require-review needs a PR URL and exact head"
+        # shellcheck source=bin/fm-pr-lib.sh
+        . "$SCRIPT_DIR/fm-pr-lib.sh"
+        if ! fm_pr_url_parse "$2" || [ "$FM_PR_PROVIDER" != github ] || ! fm_pr_head_valid "$3"; then
+          fail "--require-review needs a canonical GitHub PR URL and exact head"
+        fi
+        review="Captain hold review: $FM_PR_URL $3"
+        shift 2
+        ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -1161,6 +1256,13 @@ command_hold() {
     existing_held=$(show_field_value "$show" held)
     if [ "$existing_hold_kind" = captain ] && [ "$existing_held" = yes ]; then
       preserve_hold_set=1
+    fi
+    if [ "$preserve_hold_set" = 0 ] && [ -z "$origin" ]; then
+      local prior_approval
+      prior_approval=$(recorded_design_approval "$(show_field_value "$show" body)")
+      if [ -n "$prior_approval" ]; then
+        origin=$(body_hold_origin "$(show_field_value "$show" body)")
+      fi
     fi
     if [ -n "$title" ]; then
       existing_title=$(show_field_value "$show" title)
@@ -1200,7 +1302,14 @@ command_hold() {
   fi
   task_show_or_fail "$id" "task $id disappeared before recording its hold-set stamp"
   original_body=$(show_field "$show" body)
-  write_hold_set_stamp "$id" "$(show_field "$show" body)" "$hold_set" "$preserve_hold_set"
+  # Date expiry lifts the backend's live bit while the captain still owns the call.
+  # Keep its review requirement even though re-holding starts a new age stamp.
+  if [ -z "$review" ] && [ "$existing_hold_kind" = captain ] && [ "$preserve_hold_set" = 0 ]; then
+    body=$(decode_shown_value "$original_body") || fail "could not read $id's existing review requirement"
+    split_hold_body "$body"
+    review=$HOLD_REVIEW
+  fi
+  write_hold_set_stamp "$id" "$(show_field "$show" body)" "$hold_set" "$preserve_hold_set" "$review"
   task_show_or_fail "$id" "task $id disappeared while recording its hold-set stamp"
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id did not retain its hold-set stamp"
@@ -1224,7 +1333,9 @@ command_hold() {
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id lost its hold-set stamp while being held"
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
-  publish_parent_hold "$id" "$occurrence" needs-decision "$reason" "$until"
+  if hold_dependencies_ready "$show"; then
+    publish_parent_hold "$id" "$occurrence" needs-decision "$reason" "$until"
+  fi
   if [ -n "$origin" ]; then
     write_hold_origin "$id" "$(show_field "$show" body)" "$origin" || exit $?
   fi
@@ -1234,22 +1345,17 @@ command_hold() {
 # Record a resolution block beneath any leading active hold-set stamp,
 # preserving the previous body below it and archiving the pristine original.
 # Successful closure removes the stamp to restore resolution-first ordering.
-write_resolution_record() {  # <task-id> <mode> <shown-body>
-  local id=$1 mode=$2 body=$3 new_body tmp hold_set
-  new_body=$(resolution_block "$mode")
+write_resolution_record() {  # <task-id> <mode> <shown-body> [design-approval]
+  local id=$1 mode=$2 body=$3 new_body tmp
+  new_body=$(resolution_block "$mode" "${4:-}")
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
-  hold_set=$(body_hold_set_timestamp "$body")
-  if [ -n "$hold_set" ]; then
-    body=${body#"Captain hold set: $hold_set"}
-    case "$body" in
-      $'\n\n'*) body=${body#$'\n\n'} ;;
-      $'\n'*) body=${body#$'\n'} ;;
-    esac
-    new_body=$(printf 'Captain hold set: %s\n\n%s' "$hold_set" "$new_body")
+  split_hold_body "$body"
+  if [ -n "$HOLD_HEADER" ]; then
+    new_body=$(printf '%s\n\n%s' "$HOLD_HEADER" "$new_body")
   fi
-  if [ -n "$body" ]; then
-    new_body=$(printf '%s\n\n%s' "$new_body" "$body")
+  if [ -n "$HOLD_BODY" ]; then
+    new_body=$(printf '%s\n\n%s' "$new_body" "$HOLD_BODY")
   fi
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-body.XXXXXX") \
     || fail "cannot stage the resolution record"
@@ -1316,20 +1422,15 @@ close_answered() {  # <task-id> <release-0-or-1>
 }
 
 remove_interrupted_answer_stamp() {  # <task-id>
-  local id=$1 show body existing tmp
+  local id=$1 show body tmp
   task_show_or_fail "$id" "task $id disappeared after closing"
   body=$(decode_shown_value "$(show_field "$show" body)") \
     || fail "could not decode the closed body for $id"
-  existing=$(body_hold_set_timestamp "$body")
-  [ -n "$existing" ] || return 0
-  body=${body#"Captain hold set: $existing"}
-  case "$body" in
-    $'\n\n'*) body=${body#$'\n\n'} ;;
-    $'\n'*) body=${body#$'\n'} ;;
-  esac
+  split_hold_body "$body"
+  [ -n "$HOLD_HEADER" ] || return 0
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-normalize.XXXXXX") \
     || fail "cannot stage the closed body for $id"
-  if ! printf '%s\n' "$body" > "$tmp" \
+  if ! printf '%s\n' "$HOLD_BODY" > "$tmp" \
     || ! tasks_axi update "$id" --body-file "$tmp" >/dev/null; then
     rm -f -- "$tmp"
     fail "could not restore the resolution record ordering for $id"
@@ -1339,12 +1440,15 @@ remove_interrupted_answer_stamp() {  # <task-id>
 
 command_answer() {
   local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence
+  local artifact='' prior_approval='' approval_origin='' approval_digest='' may_replay=1
+  local design_approval=''
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --decision-file) shift; decision_file=${1:-} ;;
       --release) release=1 ;;
+      --approve-design) shift; artifact=${1:-}; design_artifact_valid "$artifact" || fail "invalid design artifact link" ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -1369,6 +1473,34 @@ command_answer() {
   # The occurrence the parent line names: the record about to be written is
   # one past those already in the body, and a retry names the newest one.
   occurrence=$(( $(resolution_record_count "$body") + 1 ))
+  if [ -n "$artifact" ] || [[ "$body" == *"Design approval: "* ]]; then
+    split_hold_body "$(show_field_value "$show" body)"
+    prior_approval=$(recorded_design_approval "$HOLD_BODY")
+  fi
+  if [ -n "$artifact" ]; then
+    if [ -n "$prior_approval" ] && [ "${prior_approval##* }" = "$artifact" ] \
+      && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ]; then
+      : # The exact structured answer already exists.
+    else
+      if [ "$state" = "done" ] || [ "$hold_kind" != captain ] || [ -z "$HOLD_HEADER" ]; then
+        fail "design approval needs an active hold with a registered origin"
+      fi
+      case "${HOLD_BODY%%$'\n'*}" in
+        "Captain hold origin: "*) approval_origin=${HOLD_BODY%%$'\n'*}; approval_origin=${approval_origin#Captain hold origin: } ;;
+        *) fail "design approval needs an active hold with a registered origin" ;;
+      esac
+      if [[ ! "$approval_origin" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || ! origin_exists_here "$approval_origin"; then
+        fail "design approval origin is not present in this home"
+      fi
+      approval_digest=$(sha256_text "$DECISION_DIGEST $occurrence $approval_origin $artifact")
+      design_approval="$approval_digest $occurrence $approval_origin $artifact"
+      may_replay=0
+    fi
+  elif [[ "$body" == *"Design approval: "* ]] && [ -z "$prior_approval" ]; then
+    # A previous design answer below the new origin header is superseded,
+    # even when the human uses the same words in the new occurrence.
+    may_replay=0
+  fi
 
   if [ "$state" = "done" ]; then
     if body_has_resolution_record "$body"; then
@@ -1395,6 +1527,7 @@ command_answer() {
     # this really was the captain's item rather than ordinary finished work.
     [ "$hold_kind" = captain ] \
       || fail "task $id was never held for the captain; nothing to record an answer on"
+    hold_dependencies_ready "$show" || fail "task $id has an unresolved prerequisite"
     write_resolution_record "$id" repaired "$body"
     remove_interrupted_answer_stamp "$id"
     task_show "$id" || fail "task $id disappeared while recording the answer"
@@ -1408,6 +1541,7 @@ command_answer() {
   fi
 
   if [ "$hold_kind" = captain ]; then
+    hold_dependencies_ready "$show" || fail "task $id has an unresolved prerequisite"
     # Actively the captain's item (a date-expired hold keeps its annotations
     # and stays answerable). A matching record means an interrupted close to
     # finish; a different digest is a NEW answer on a re-held task and gets
@@ -1415,6 +1549,7 @@ command_answer() {
     # checked against an interrupted close's recorded mode so a retry cannot
     # silently flip a release into a close.
     if body_has_resolution_record "$body" \
+      && [ "$may_replay" = 1 ] \
       && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ]; then
       recorded_mode=$(recorded_resolution_mode "$body" || true)
       case "$recorded_mode" in
@@ -1430,7 +1565,7 @@ command_answer() {
       printf '%s: %s\n' "$outcome" "$id"
       return 0
     fi
-    write_resolution_record "$id" "$outcome" "$body"
+    write_resolution_record "$id" "$outcome" "$body" "$design_approval"
     if ! close_answered "$id" "$release"; then
       fail "could not close answered captain-held task $id"
     fi
@@ -1852,6 +1987,8 @@ command_pr_policy() {
   acquire_task_control_lock "$id"
   require_tasks_axi
   command_open "$id" || fail "task $id is not an open captain hold"
+  task_show_or_fail "$id" "task $id is absent while declaring its PR policy"
+  ! hold_review_required "$show" || fail "task $id requires a human sign-off"
   tasks_axi update "$id" --pr "$url" >/dev/null || fail "could not link the PR on $id"
   task_show_or_fail "$id" "task $id disappeared while declaring its PR policy"
   fingerprint=$(pr_hold_fingerprint "$show")
@@ -1918,7 +2055,11 @@ Settlement policy: $(jq -r .on "$policy") -> $action"
   DECISION_DIGEST=$(sha256_text "$DECISION_TEXT")
   require_tasks_axi
   task_show_or_fail "$id" "task $id is absent while settling its PR hold"
+  ! hold_review_required "$show" || fail "task $id requires a human sign-off"
   body=$(show_field "$show" body)
+  if [ "$(show_field "$show" state)" != "done" ] && [ "$(show_field_value "$show" hold_kind)" = captain ]; then
+    hold_dependencies_ready "$show" || return 0
+  fi
   if [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
     && [ "$(recorded_resolution_mode "$body" || true)" = "$mode" ] \
     && [ "$(resolution_record_count "$body")" = "$occurrence" ]; then
@@ -1993,6 +2134,7 @@ reconcile_close() {
     || fail "task $id has no pending board-created reconcile request"
   require_tasks_axi
   task_show_or_fail "$id" "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
+  ! hold_review_required "$show" || fail "task $id requires a human sign-off"
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
@@ -2349,12 +2491,13 @@ EOF
 # exist holds nothing. Every read failure over a record that DOES exist is a 2,
 # printed to stderr, because a mechanical closer must never read "cannot tell"
 # as permission to close.
-command_open() {  # <task-id> [--identity] [--distinguish-absent]
-  local id='' identity=0 distinguish_absent=0 data state root file backend show shown_body
+command_open() {  # <task-id> [--identity] [--distinguish-absent] [--ready]
+  local id='' identity=0 distinguish_absent=0 ready=0 data state root file backend show shown_body
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --identity) identity=1 ;;
       --distinguish-absent) distinguish_absent=1 ;;
+      --ready) ready=1 ;;
       -*) usage >&2; exit 2 ;;
       *)
         [ -z "$id" ] || { usage >&2; exit 2; }
@@ -2392,12 +2535,17 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   if fm_backlog_row_probe "$data" "$id"; then
     state=${FM_BACKLOG_ROW_STATE%% *}
     if [ "$state" != "done" ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
-      if [ "$identity" -eq 1 ]; then
+      if [ "$identity" -eq 1 ] || [ "$ready" -eq 1 ]; then
         task_show "$id" || {
           printf 'fm-captain-hold: captain call %s is open but its record could not be read\n' "$id" >&2
           exit 2
         }
         show=$TASK_SHOW_OUTPUT
+      fi
+      if [ "$ready" -eq 1 ]; then
+        hold_dependencies_ready "$show" || return 4
+      fi
+      if [ "$identity" -eq 1 ]; then
         shown_body=$(show_field "$show" body)
         printf '%s#%s\n' \
           "$(body_hold_set_timestamp "$(decode_shown_value "$shown_body")")" \
@@ -2415,6 +2563,90 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   exit 2
 }
 
+command_select() {  # <origin-id> <decision-key>
+  local origin=${1:-} key=${2:-} id rc
+  [ "$#" -eq 2 ] || return 2
+  validate_slug origin-id "$origin"
+  validate_slug decision-key "$key"
+  [ -e "$DATA" ] || [ -L "$DATA" ] || return 1
+  for id in "$key" "$(legacy_hold_id "$origin" "$key")"; do
+    rc=0
+    command_open "$id" --ready || rc=$?
+    case "$rc" in
+      0|4) printf '%s\n' "$id"; return "$rc" ;;
+      1) ;;
+      *) return 2 ;;
+    esac
+  done
+  return 1
+}
+
+command_review_ready() {
+  local id=${1:-} show body
+  [ "$#" -eq 2 ] || return 2
+  validate_slug task-id "$id"
+  task_show "$id" || return 1
+  show=$TASK_SHOW_OUTPUT
+  [ "$(show_field_value "$show" id)" = "$id" ] &&
+    [ "$(show_field_value "$show" hold_kind)" = captain ] &&
+    [ "$(show_field "$show" state)" != "done" ] || return 1
+  body=$(show_field_value "$show" body) || return 1
+  split_hold_body "$body"
+  [ -n "$HOLD_REVIEW" ] && [ "$HOLD_REVIEW" = "$2" ] && hold_review_ready "$show"
+}
+
+design_read_archived_if_absent() {
+  printf '%s\n' "$TASK_SHOW_OUTPUT" | grep -qxF 'code: NOT_FOUND' || return 1
+  task_show_archived "$1"
+}
+
+command_design_decision() {
+  local id=${1:-} show body origin occurrence approval digest
+  [ "$#" -eq 1 ] || [ "$#" -eq 5 ] || return 2
+  [[ "$id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 2
+  task_show "$id" || design_read_archived_if_absent "$id" || return 1
+  show=$TASK_SHOW_OUTPUT
+  [ "$(show_field_value "$show" id)" = "$id" ] && [ "$(show_field "$show" held)" = no ] || return 1
+  body=$(show_field_value "$show" body) || return 1
+  occurrence=$(resolution_record_count "$(show_field "$show" body)")
+  approval=$(printf '%s' "$body" | python3 -c '
+import hashlib, re, sys
+
+body = sys.stdin.buffer.read()
+record = re.match(
+    rb"Resolution recorded by fm-captain-hold\.\nDecision digest: ([0-9a-f]{64})\n"
+    rb"Resolution mode: (answered|released)\n"
+    rb"Design approval: ([0-9a-f]{64}) ([1-9][0-9]*) ([A-Za-z0-9][A-Za-z0-9._-]*) ([^\s]+)"
+    rb"\n\nCaptain decision:\n",
+    body,
+)
+if not record or record[4].decode() != sys.argv[2]:
+    sys.exit(1)
+if sys.argv[1] != "done" and record[2] != b"released":
+    sys.exit(1)
+if hashlib.sha256(b" ".join((record[1], record[4], record[5], record[6]))).hexdigest().encode() != record[3]:
+    sys.exit(1)
+answer = body[record.end():]
+ends = [m.start() for m in re.finditer(rb"\n\n", answer[:8194])]
+if len(answer) <= 8192:
+    ends.append(len(answer))
+if not any(end and hashlib.sha256(answer[:end]).hexdigest().encode() == record[1] for end in ends):
+    sys.exit(1)
+print(b" ".join((record[3], record[5], record[6])).decode())
+' "$(show_field "$show" state)" "$occurrence") || return 1
+  digest=${approval%% *}
+  approval=${approval#* }
+  origin=${approval%% *}
+  [ "$(body_hold_origin "$body")" = "$origin" ] || return 1
+  origin_exists_here "$origin" || design_read_archived_if_absent "$origin" || return 1
+  design_artifact_valid "${approval#* }" || return 1
+  if [ "$#" -eq 5 ]; then
+    [ "$2" = "$origin" ] && [ "$3" = "$occurrence" ] && [ "$4" = "$digest" ] && [ "$5" = "${approval#* }" ]
+  else
+    printf 'tasks-axi:%s#%s-%s\n' "$id" "$occurrence" "$digest"
+  fi
+}
+
 case "${1:-}" in
   hold) shift; command_hold "$@" ;;
   answer) shift; command_answer "$@" ;;
@@ -2426,6 +2658,9 @@ case "${1:-}" in
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
+  review-ready) shift; command_review_ready "$@" ;;
+  design-decision) shift; command_design_decision "$@" ;;
+  select) shift; command_select "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   reconcile) shift; command_reconcile "$@" ;;
   pr-policy) shift; command_pr_policy "$@" ;;

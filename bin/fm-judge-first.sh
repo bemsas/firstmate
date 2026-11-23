@@ -3,7 +3,7 @@
 # through the private decision judge before the supervisor spends a turn on them.
 # Usage:
 #   fm-judge-first.sh ingest <secondmate-id> <status-lines-file|->
-#   fm-judge-first.sh summary [--since <epoch>]
+#   fm-judge-first.sh summary [--since <epoch>] [--reversals <verified-answer-receipts.jsonl>]
 # Called by bin/fm-procevent-remote-reply.sh right after it mirrors new remote
 # status lines; also runnable by hand on any lines file. Always exits 0 from
 # `ingest`: an error leaves today's ordinary wake. bin/fm-judge-first.py owns the

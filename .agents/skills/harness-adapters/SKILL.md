@@ -103,3 +103,8 @@ A new tool remains undispatchable until the `verify` plan, its harness entry, ev
   }
 }
 ```
+
+## Generic effort fallback
+
+The generic effort fallback and its precedence are owned by `harness-adapters`: explicit captain and standing configured effort win; otherwise use low for well-understood explicit work, xhigh for ambiguous investigation or design, intermediate levels proportionally, and never max without explicit captain preference.
+Do not add model-specific versions of that policy.

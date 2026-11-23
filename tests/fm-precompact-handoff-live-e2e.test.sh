@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# Live guard for bin/fm-precompact-handoff.py against the INSTALLED Claude Code:
+# Live guards for bin/fm-precompact-handoff.py against installed Claude Code.
+# The default loopback-only guard drives an already-started interactive
+# /compact and checks the first model request for the entire bounded page.
+# FM_CLAUDE_COMPACT_RESUME_LIVE_E2E=1 requires it wherever invoked.
+#
+# The legacy credentialed guard is separately opt-in:
 # the handoff reads Claude's own PreCompact payload and transcript schema
 # (transcript_path, origin.kind human), and the digest relies on Claude adding
 # UserPromptSubmit additionalContext to model context, so only the real harness
@@ -18,6 +23,24 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+if [ "${FM_CLAUDE_COMPACT_RESUME_LIVE_E2E:-}" = 1 ] || {
+  [ -z "${FM_PRECOMPACT_HANDOFF_LIVE_E2E:-}" ] && [ "${FM_LIVE:-}" != 1 ];
+}; then
+  fm_live_gate default-on FM_CLAUDE_COMPACT_RESUME_LIVE_E2E claude python3 tmux tasks-axi jq
+  LAB=$(fm_test_tmproot fm-claude-compact-replay)
+  VERSION=$(claude --version 2>/dev/null | head -1)
+  CLAUDE_BIN=$(command -v claude)
+  # A mise command wrapper requires the operator's home to resolve its binary.
+  # Resolve it before giving the real process the isolated fixture home.
+  if command -v mise >/dev/null 2>&1; then
+    CLAUDE_BIN=$(mise which claude 2>/dev/null || printf '%s' "$CLAUDE_BIN")
+  fi
+  python3 -I "$ROOT/tests/fixtures/fm-claude-compact-replay.py" live "$ROOT" "$LAB/after" \
+    --fixed --claude "$CLAUDE_BIN" || fail "Claude Code $VERSION: compact page did not reach the post-compact model request"
+  pass "Claude Code $VERSION: the complete compact page reached the first post-compact model request once"
+  exit 0
+fi
 
 fm_live_gate opt-in FM_PRECOMPACT_HANDOFF_LIVE_E2E claude python3
 

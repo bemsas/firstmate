@@ -41,6 +41,14 @@
 #   after scaffolding and the caller-supplied repo string cannot reliably
 #   identify this repo. Briefs made without it carry a loud declaration so an
 #   omitted contract cannot be silent.
+#   --design-rework applies to ship or scout requests for alternatives or
+#   revisions to an agreed design. At intake read the agreed artifact and the
+#   captain's recorded decisions, then fill the Agreed design section with
+#   links to both and the requested change. Reopen an accepted choice only
+#   when the current request reopens it. Omit the flag for genuinely new
+#   design or discovery with no agreed design to carry forward.
+#   For a structured local approval, use fm-captain-hold.sh design-decision
+#   and include its work's Origin line as specified by bin/fm-dod-lib.sh.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
@@ -220,6 +228,7 @@ fi
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 case "$CONFIG" in /*) ;; *) CONFIG="$PWD/$CONFIG" ;; esac
 KIND=ship
+DESIGN_REWORK=0
 HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
@@ -263,6 +272,7 @@ for a in "$@"; do
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
+    --design-rework) DESIGN_REWORK=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
@@ -288,6 +298,10 @@ for a in "$@"; do
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+if [ "$DESIGN_REWORK" = 1 ] && [ "$KIND" = secondmate ]; then
+  echo "error: --design-rework applies only to ship and scout briefs" >&2
+  exit 1
+fi
 
 # Ship delivery mode is an explicit per-task decision (AGENTS.md section 7). A
 # missing or invalid value stops the scaffold rather than silently defaulting.
@@ -652,6 +666,14 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 {FIRSTMATE_SPEC}
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
+if [ "$DESIGN_REWORK" = 1 ]; then
+  TASK_SECTION="$TASK_SECTION
+
+## Agreed design
+Artifact: [agreed artifact](<artifact-link>)
+Decisions: [recorded captain decisions](<decision-link>)
+Change: {DESIGN_CHANGE}"
+fi
 
 # One shared string keeps the ship and scout infrastructure rule identical.
 # Rule 2 governs file edits, so it does not prohibit pool administration.

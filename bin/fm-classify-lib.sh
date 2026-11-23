@@ -876,9 +876,22 @@ EOF
 # writer-side rejection would.
 FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT='pending-reply-'
 
+_fm_captain_hold_relay_id() {  # <key> [<out-var>]
+  local __fm_relay_re='^captain-hold-([A-Za-z0-9._-]+)-[1-9][0-9]*$'
+  [[ "$1" =~ $__fm_relay_re ]] || return 1
+  if [ "$#" -gt 1 ]; then
+    printf -v "$2" '%s' "${BASH_REMATCH[1]}"
+  else
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  fi
+}
+
 # 0 when <key> is not reserved, or is reserved and <note> speaks its vocabulary.
 _fm_decision_key_transition_allowed() {  # <key> <note>
-  local key=$1 note=$2 prefix
+  local key=$1 note=$2 prefix relay_id
+  if _fm_captain_hold_relay_id "$key" relay_id; then
+    case "$note" in "captain hold $relay_id: "*) return 0 ;; *) return 1 ;; esac
+  fi
   for prefix in ${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT}; do
     case "$key" in
       "$prefix"*)
@@ -991,6 +1004,8 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 $open
 EOF
         note="$epoch"$'\t'"$until"$'\t'"$note"
+      elif [ "$timed" = raw ]; then
+        note=$line
       fi
       _fm_decision_drop "$open" "$key" open
       [ -n "$open" ] && open="${open}"$'\n'
@@ -1006,8 +1021,9 @@ EOF
 
 # Fold the WHOLE status stream into the set of decisions still open. Prints one
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
-# most-recently-opened-last order; prints nothing when none are open. Reads the
-# status file, plus its sibling `.meta` for the task kind the terminal rule needs
+# most-recently-opened-last order; prints nothing when none are open.
+# The optional raw view returns the full opening line in the third column.
+# Reads the status file, plus its sibling `.meta` for the task kind the terminal rule needs
 # when the caller passes no <kind>; no globals beyond the optional
 # FM_CLASSIFY_RESOLVE_VERB override. This is the durable open-set the fleet
 # snapshot and any point-in-time consumer must use instead of trusting the last
@@ -1018,8 +1034,8 @@ EOF
 # before any read - a cheap builtin, unlike fm_wake_latest_event's O_NOFOLLOW
 # subprocess read, which exists for that function's much narrower payload-driven
 # path resolution rather than this directory-local glob.
-status_open_decisions() {  # <status-file> [<kind>]
-  local f=$1 kind=${2:-} line resolve held open='' folded verb
+status_open_decisions() {  # <status-file> [<kind>] [raw]
+  local f=$1 kind=${2:-} view=${3:-} line resolve held open='' folded verb
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   kind=$(_fm_status_kind "$f" "$kind")
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
@@ -1028,7 +1044,7 @@ status_open_decisions() {  # <status-file> [<kind>]
     status_line_verb "$line" verb
     case "$verb" in
       needs-decision|blocked|done|failed|"$resolve"|"$held")
-        _fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind" '' folded
+        _fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind" "$view" folded
         open=$folded
         ;;
     esac

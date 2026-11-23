@@ -29,7 +29,8 @@
 #     primitive, whatever kind its row carries.
 #     hold_bucket is the single classification for every captain hold, decided
 #     only from structured fields - state, hold_kind, hold_until,
-#     unresolved_blocker_ids, and the machine-written hold-set timestamp. No
+#     unresolved_blocker_ids, the machine-written hold-set timestamp and
+#     review_pending when the hold owner requires an exact passing review. No
 #     hold reason or body prose is ever matched. The buckets are total and
 #     mutually exclusive, so every captain hold lands in exactly one and none
 #     can fall through: "blocked" when any blocker is unresolved, else "dated"
@@ -44,7 +45,7 @@
 #     re-holding with --until.
 #     Renderers keep every non-live bucket out of the default Captain's Call,
 #     project it as a Charted Next gate stating why, and disclose it in
-#     omitted[]; --all-decisions reveals every captain hold available within the
+#     omitted[]; Bearings' --all-decisions expands dated and aged holds within the
 #     bounded snapshot.
 #   tasks[]: one row per task metadata record captured at snapshot start, sorted
 #     by id. A record removed before capture is omitted. If a captured task's
@@ -586,8 +587,36 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
           | .captain_actionable = (.hold_bucket == "live")
         else . end)
     | del(.section,.order)
-  ' < "$backlog" | fm_hold_reason_decode_stream json
+  ' < "$backlog" | fm_hold_reason_decode_stream json | project_review_holds "$backlog"
 )
+
+project_review_holds() {  # canonical backlog JSON on stdin
+  local snapshot candidates pending='' id spec
+  if ! grep -Eq '^[[:space:]]+Captain hold review:' "$1"; then
+    cat
+    return
+  fi
+  snapshot=$(cat)
+  candidates=$(jq -r '
+    .records[] | select(.structured and .hold_bucket != null and .hold_set != null)
+    | select((.body_lines[1] // "") | startswith("Captain hold review:"))
+    | [.id, .body_lines[1]] | @tsv
+  ' <<< "$snapshot") || return 1
+  while IFS=$'\t' read -r id spec; do
+    [ -n "$id" ] || continue
+    if ! FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-captain-hold.sh" review-ready "$id" "$spec" >/dev/null 2>&1; then
+      pending="$pending$id"$'\n'
+    fi
+  done <<< "$candidates"
+  jq --arg pending "$pending" '
+    ($pending | split("\n")) as $ids
+    | .records |= map(
+        if .hold_bucket != null and (.id as $id | $ids | index($id) != null)
+        then .review_pending = true | .hold_bucket = "blocked" | .captain_actionable = false
+        else . end)
+  ' <<< "$snapshot"
+}
 
 SNAPSHOT_TASK_DIR=
 SNAPSHOT_TASK_METAS=()
@@ -1090,7 +1119,11 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             source:.current_state.source,
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
-       + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
+       + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[] as $decision
+            | select(all($backlog.records[]?;
+                .hold_bucket != "blocked"
+                or (.id != $decision.key and .id != ($t.id + "-decision-" + $decision.key))))
+            | $decision
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
     | ([ $queued_all[]
          | select((.unresolved_blocker_ids | length) > 0 or (.hold_reason != null and .hold_kind != null))
@@ -1098,7 +1131,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             blocked_by:((.unresolved_blocker_ids | join(",")) | if . == "" then null else trunc(120) end),
             blocked_by_ids:(.blocked_by_ids | map(trunc(120))),
             unresolved_blocker_ids:(.unresolved_blocker_ids | map(trunc(120))),
-            reason:((.hold_reason // .blocked_reason // "blocked") | trunc(120)),source:"backlog"} ]
+            reason:((if .review_pending then "passing review for exact revision pending"
+                     else .hold_reason // .blocked_reason // "blocked" end) | trunc(120)),source:"backlog"} ]
        + [ $owned_in_flight[] as $work
            | $tasks[]
            | select(.id == $work.id and (.current_state.state == "parked" or .current_state.state == "paused" or .current_state.state == "blocked"))
@@ -1152,6 +1186,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
           hold_until:((.hold_until // null) | if . == null then null else trunc(40) end),
           hold_bucket:(.hold_bucket // null),
+          review_pending:(.review_pending // false),
           hold_age_days:(.hold_age_days // null),
           captain_actionable:(.captain_actionable // false),
           repo:((.repo // null) | if . == null then null else trunc(120) end),

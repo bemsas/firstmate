@@ -13,7 +13,7 @@
 #      line that slipped past judge.py (force-with-lease, revocation, shared
 #      staging migration, run abort, bot protection, a 19-call bundle, a
 #      conditional recommendation, a pipeline step skip).
-#   4. Dedupe by decision identity: a hold line plus its plain twin get one
+#   4. Dedupe by decision identity: a numbered line plus its plain twin get one
 #      answer closing both keys; a replay and a re-journaled twin get none;
 #      successive rounds stay separate decisions.
 #   5. Live sends go through the real fm-send --resolve-key exactly once and are
@@ -210,6 +210,29 @@ EOF
   pass "each backtest gap has a regression line that escalates: force-with-lease, revocation, shared staging, abort, bot protection, bundle, conditional, step skip"
 }
 
+test_unheld_destructive_decisions() {
+  new_home destructive
+  printf 'on\n' > "$HOME_DIR/config/judge-first"
+  local out
+  cat > "$HOME_DIR/in" <<'EOF'
+needs-decision [key=ce-polish-1639-discard] [at=1000]: Options: (A, recommended) proceed; (B) wait.
+needs-decision [key=context-only] [at=1001]: DiScArDiNg abandoned edits is on the table. Options: (A, recommended) proceed; (B) wait.
+needs-decision [key=confirm-flag] [at=1002]: Options: (A, recommended) apply --force; (B) wait.
+needs-decision [key=cleanup-choice] [at=1003]: Options: (A, recommended) wait; (B) start Teardown.
+needs-decision [key=cleanup_FORCE] [at=1004]: Options: (A, recommended) proceed; (B) wait.
+needs-decision [key=ordinary-forceful-wording] [at=1005]: Options: (A, recommended) keep the discardable label; (B) omit it.
+EOF
+  out=$(run_hook "$HOME_DIR/in")
+  assert_contains "$out" 'auto=1 escalate=5' "only the ordinary unheld decision may be auto-answered"
+  assert_equals 1 "$(calls)" "only the ordinary unheld decision may reach the judge"
+  assert_equals 'mate:ordinary-forceful-wording' "$(cat "$HOME_DIR/calls")" "the judge must only see the control"
+  assert_equals 1 "$(sends)" "only the ordinary unheld decision may be sent"
+  assert_contains "$(cat "$HOME_DIR/sends")" '--resolve-key ordinary-forceful-wording' "the sender must only close the control"
+  assert_equals 5 "$(journal "sum(r['hook']['action'] == 'escalate' and r['verdict']['rules_hit'] == ['irreversible_destructive'] for r in rows)")" \
+    "every destructive case must journal the existing escalation reason"
+  pass "unheld destructive decisions escalate before a judge opinion or send; ordinary wording still auto-answers"
+}
+
 test_guard_rule_variants() {
   new_home variants
   printf 'on\n' > "$HOME_DIR/config/judge-first"
@@ -280,13 +303,13 @@ test_dedupe_by_decision_identity() {
   new_home dedupe
   printf 'on\n' > "$HOME_DIR/config/judge-first"
   local a b lines
-  a='needs-decision [key=captain-hold-ce-policy-1] [at=5000]: captain hold: Options: (A, recommended) keep the field; (B) omit it.'
+  a='needs-decision [key=ce-policy-1] [at=5000]: Options: (A, recommended) keep the field; (B) omit it.'
   b='needs-decision [at=5002] [key=ce-policy]: corr=0123456789abcdef Options: (A, recommended) keep the field as recommended; (B) omit it.'
   lines=$(line_file in "$a" "$b")
   run_hook "$lines" >/dev/null
-  assert_equals 1 "$(sends)" "a hold line and its plain twin are one decision with one answer"
-  assert_contains "$(cat "$HOME_DIR/sends")" "--resolve-key captain-hold-ce-policy-1 --resolve-key ce-policy" "the one answer must close both keys"
-  pass "dedupe: a hold line plus its twin get one answer that closes both keys"
+  assert_equals 1 "$(sends)" "two lines of one decision get one answer"
+  assert_contains "$(cat "$HOME_DIR/sends")" "--resolve-key ce-policy-1 --resolve-key ce-policy" "the one answer must close both keys"
+  pass "dedupe: a numbered line plus its plain twin get one answer that closes both keys"
 
   run_hook "$lines" >/dev/null
   assert_equals 1 "$(sends)" "a replay must not answer again"
@@ -297,10 +320,10 @@ test_dedupe_by_decision_identity() {
 
   new_home dedupe-rounds
   printf 'on\n' > "$HOME_DIR/config/judge-first"
-  a='needs-decision [key=captain-hold-ce-cal-1] [at=5000]: Options: (A, recommended) keep the field; (B) omit it.'
-  b='needs-decision [key=captain-hold-ce-cal-2] [at=5900]: Options: (A, recommended) drop the cache; (B) keep it.'
+  a='needs-decision [key=ce-cal-1] [at=5000]: Options: (A, recommended) keep the field; (B) omit it.'
+  b='needs-decision [key=ce-cal-2] [at=5900]: Options: (A, recommended) drop the cache; (B) keep it.'
   run_hook "$(line_file in "$a" "$b")" >/dev/null
-  assert_equals 2 "$(sends)" "successive rounds of one hold are separate decisions"
+  assert_equals 2 "$(sends)" "successive rounds of one decision family are separate decisions"
   pass "dedupe: successive rounds of a key family stay separate decisions"
 
   new_home dedupe-families
@@ -313,7 +336,7 @@ test_dedupe_by_decision_identity() {
 
   new_home dedupe-risky-twin
   printf 'on\n' > "$HOME_DIR/config/judge-first"
-  a='needs-decision [key=captain-hold-ce-risk-1] [at=5000]: Options: (A, recommended) keep the field; (B) omit it.'
+  a='needs-decision [key=ce-risk-1] [at=5000]: Options: (A, recommended) keep the field; (B) omit it.'
   b='needs-decision [key=ce-risk] [at=5001]: Options: (A, recommended) force-with-lease push the branch; (B) leave it.'
   run_hook "$(line_file in "$a" "$b")" >/dev/null
   assert_equals 0 "$(sends)" "a decision is auto only when every line of it is auto"
@@ -327,6 +350,34 @@ test_dedupe_by_decision_identity() {
   assert_equals 1 "$(sends)" "identical keyless lines are one decision"
   assert_not_contains "$(cat "$HOME_DIR/sends")" "--resolve-key" "a keyless decision has nothing to close"
   pass "dedupe: identical keyless lines are one decision answered without --resolve-key"
+}
+
+test_captain_holds_are_never_answered() {
+  new_home holds
+  printf 'on\n' > "$HOME_DIR/config/judge-first"
+  cp "$ROOT/.tasks.toml" "$HOME_DIR/.tasks.toml"
+  local ans
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-tasks-axi.sh" add held-one "synthetic hold" --kind ship --repo x >/dev/null \
+    || fail "setup: could not create synthetic hold"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-captain-hold.sh" hold held-one --reason "synthetic captain call" >/dev/null 2>&1
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-captain-hold.sh" open held-one || fail "setup: the synthetic task is not an open captain hold"
+  run_hook "$(line_file in 'needs-decision [key=held-one] [at=1000]: Options: (A, recommended) keep the field; (B) omit it.')" >/dev/null
+  assert_equals 0 "$(sends)" "a judge pick must never answer an open captain-held task"
+  assert_equals 0 "$(calls)" "a captain hold is not even put to the judge"
+  assert_contains "$(journal "rows[-1]['verdict']['rules_hit']")" captain_hold "the escalation reason should be journaled"
+  assert_equals escalate "$(journal "rows[-1]['hook']['action']")" "a held decision escalates"
+  run_hook "$(line_file in2 'needs-decision [key=captain-hold-x-1] [at=2000]: Options: (A, recommended) keep the field; (B) omit it.')" >/dev/null
+  assert_equals 0 "$(sends)" "a captain-hold- key is never answered"
+  run_hook "$(line_file in2-twin 'needs-decision [key=x] [at=2010]: Options: (A, recommended) keep the field; (B) omit it.')" >/dev/null
+  assert_equals 0 "$(sends)" "a later plain twin of a captain hold is never answered"
+  run_hook "$(line_file in3 'needs-decision [key=plain-ask] [at=3000]: captain call: Options: (A, recommended) keep the field; (B) omit it.')" >/dev/null
+  assert_equals 0 "$(sends)" "captain call wording is never answered"
+  run_hook "$(line_file in4 'needs-decision [key=plain-ask-2] [at=4000]: Options: (A, recommended) keep the field; (B) omit it.')" >/dev/null
+  assert_equals 1 "$(sends)" "an ordinary unheld decision is still answered"
+  ans="$HOME_DIR/answer.txt"; printf 'a\n' > "$ans"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-captain-hold.sh" answer held-one --decision-file "$ans" >/dev/null 2>&1 || fail "the human answer path was refused"
+  if FM_HOME="$HOME_DIR" "$ROOT/bin/fm-captain-hold.sh" open held-one; then fail "the human answer did not close the hold"; fi
+  pass "captain holds: a judge pick is never sent for a held task, a captain-hold- key or captain-call wording; ordinary decisions and the human answer path still work"
 }
 
 test_send_failure_leaves_ordinary_wake() {
@@ -361,7 +412,104 @@ test_summary() {
   assert_contains "$out" '"escalate": 1' "summary should count escalations"
   assert_contains "$out" '"would-auto": 1' "summary should count would-send verdicts"
   assert_contains "$out" "clause-policy" "summary should list each would-send decision"
+  assert_contains "$out" '"confirmed_human_reversals": null' "omitted answer evidence is unknown"
+  assert_contains "$out" '"reversal_source": null' "omitted answer evidence has no source"
+  printf '\n  \n' > "$HOME_DIR/empty-reversals.jsonl"
+  out=$(env FM_HOME="$HOME_DIR" FM_JUDGE_LOG="$LOG" "$HOOK" summary --reversals "$HOME_DIR/empty-reversals.jsonl")
+  assert_contains "$out" '"confirmed_human_reversals": 0' "supplied empty evidence establishes a reported zero"
+  assert_contains "$out" '"reversal_source": "operator-attested"' "summary must identify the input provenance"
   pass "summary lists a day of shadow verdicts for comparison with the supervisor's answers"
+}
+
+test_summary_human_reversals() {
+  new_home reversals
+  local receipts="$HOME_DIR/reversals.jsonl" out before bad_receipt rc=0
+  python3 - "$HOME_DIR" "$LOG" "$receipts" <<'PY'
+import copy, json, sys
+from pathlib import Path
+
+home, journal, receipts = map(Path, sys.argv[1:])
+rows, answers = [], []
+def fixture(i, *, mode="on", action="sent", proof=True):
+    corr = f"{i:016x}"
+    occurrence = {"key": "reused-key", "at": i * 1000, "corr": f"{i + 20:016x}",
+                  "opening_sha256": f"{i:064x}"}
+    send = {"home": str(home), "task": "mate", "delivery_corr": corr, "decisions": [occurrence]}
+    evidence = {"ok": True, "exit": 0}
+    if proof:
+        evidence.update(delivery_corr=corr, openings=[[occurrence["key"], occurrence["opening_sha256"]]])
+    rows.append({"at": 10000 + i, "hook": {"name": "judge-first", "mode": mode, "action": action,
+                 "secondmate": "mate", "key": "reused-key", "send": evidence, "auto_send": send}})
+    receipt = {"schema": "fm-judge-reversal.v1", "event_id": f"answer:{i}", "actor": "captain",
+               "at": 20000, "outcome": "reversed", "unchanged_premises": True,
+               "auto_send": {**send, "decision": occurrence}}
+    del receipt["auto_send"]["decisions"]
+    answers.append(copy.deepcopy(receipt))
+    return answers[-1]
+
+valid = fixture(1)
+answers.append(copy.deepcopy(valid))
+answers.append(dict(valid, event_id="duplicate-label"))
+different = fixture(2)
+different["auto_send"]["decision"] = valid["auto_send"]["decision"]
+fixture(3, mode="shadow", action="would-auto")
+fixture(4, proof=False)
+fixture(5)["actor"] = "unknown"
+fixture(6)["unchanged_premises"] = False
+fixture(7)["auto_send"]["home"] = "/other/home"
+fixture(8)["auto_send"]["task"] = "other-mate"
+fixture(9)["auto_send"]["decision"]["corr"] = "fedcba9876543210"
+fixture(10)["auto_send"]["decision"]["opening_sha256"] = "a" * 64
+fixture(11)["at"] = 1
+conflicting = fixture(12)
+answers.append(dict(conflicting, actor="agent"))
+fixture(13)
+rows.append(copy.deepcopy(rows[-1]))
+for i, conflict in enumerate(({"outcome": "upheld"}, {"actor": "agent"}, {"unchanged_premises": False}), 14):
+    original = fixture(i)
+    answers.append(dict(original, **conflict, event_id=f"conflict:{i}"))
+cluster = fixture(17)
+answers.append(dict(cluster, event_id="cluster:upheld", outcome="upheld"))
+for i in (1, 2):
+    sibling = copy.deepcopy(cluster)
+    sibling["event_id"] = f"cluster:sibling-{i}"
+    decision = sibling["auto_send"]["decision"]
+    decision.update(key=f"cluster-key-{i}", opening_sha256=f"{i + 70:064x}")
+    rows[-1]["hook"]["auto_send"]["decisions"].append(decision)
+    rows[-1]["hook"]["send"]["openings"].append([decision["key"], decision["opening_sha256"]])
+    answers.extend((sibling, copy.deepcopy(sibling)))
+journal.write_text("".join(json.dumps(r) + "\n" for r in rows))
+receipts.write_text("".join(json.dumps(r) + "\n" for r in answers))
+PY
+  before=$(cksum < "$LOG")$(cksum < "$receipts")
+  out=$(env FM_HOME="$HOME_DIR" FM_JUDGE_LOG="$LOG" "$HOOK" summary --reversals "$receipts")
+  assert_contains "$out" '"confirmed_human_reversals": 3' "only unconflicted exact occurrences may count"
+  assert_contains "$out" '"reversal_source": "operator-attested"' "receipt provenance must be visible"
+  assert_contains "$out" '"live_sends_without_reversal_linkage": 1' "older live sends without evidence must be visible"
+  out=$(env FM_HOME="$HOME_DIR" FM_JUDGE_LOG="$LOG" "$HOOK" summary --since 10017 --reversals "$receipts")
+  assert_contains "$out" '"confirmed_human_reversals": 2' "conflicting evidence for one decision may not suppress its cluster siblings"
+  out=$(env FM_HOME="$HOME_DIR" FM_JUDGE_LOG="$LOG" "$HOOK" summary --since 10018 --reversals "$receipts")
+  assert_contains "$out" '"confirmed_human_reversals": 0' "since must apply to the sent event"
+  assert_equals "$before" "$(cksum < "$LOG")$(cksum < "$receipts")" "summary mutated evidence"
+  assert_equals 0 "$(calls)" "summary called the judge"
+  assert_equals 0 "$(sends)" "summary sent an answer"
+  printf '17\n' >> "$LOG"
+  out=$(env FM_HOME="$HOME_DIR" FM_JUDGE_LOG="$LOG" "$HOOK" summary --reversals "$receipts")
+  assert_contains "$out" '"confirmed_human_reversals": 3' "reporting must tolerate a malformed legacy journal row"
+  printf 'on\n' > "$HOME_DIR/config/judge-first"
+  run_hook "$(line_file malformed "$BENIGN")" >/dev/null
+  assert_equals 0 "$(sends)" "summary tolerance accidentally changed ingest's behavior on the same malformed row"
+  for bad_receipt in 'not-valid-json' '{"event_id":"incomplete"}'; do
+    cp "$receipts" "$HOME_DIR/invalid-reversals.jsonl"
+    printf '\n%s\n' "$bad_receipt" >> "$HOME_DIR/invalid-reversals.jsonl"
+    rc=0
+    out=$(env FM_HOME="$HOME_DIR" FM_JUDGE_LOG="$LOG" "$HOOK" summary \
+      --reversals "$HOME_DIR/invalid-reversals.jsonl" 2>&1) || rc=$?
+    expect_code 2 "$rc" "nonblank malformed receipts must refuse the report"
+    assert_contains "$out" "malformed answer receipt on line" "receipt failure should identify the line"
+    assert_not_contains "$out" "confirmed_human_reversals" "an invalid input produced a partial reversal report"
+  done
+  pass "summary counts exact operator-attested human reversals once and excludes unlinked, shadow and ambiguous events"
 }
 
 # The real fm-send, end to end: the answer reaches the secondmate's durable
@@ -369,7 +517,7 @@ test_summary() {
 test_live_send_through_real_fm_send() {
   new_home e2e
   printf 'on\n' > "$HOME_DIR/config/judge-first"
-  local fb="$HOME_DIR/fakebin" out
+  local fb="$HOME_DIR/fakebin" out corr stale current opening
   mkdir -p "$fb"
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -383,11 +531,12 @@ exit 0
 SH
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/sleep"
   chmod +x "$fb/tmux" "$fb/sleep"
-  fm_write_meta "$HOME_DIR/state/mate.meta" "window=sess:fm-mate" "kind=ship"
-  printf '%s\n' "$BENIGN" > "$HOME_DIR/state/mate.status"
+  fm_write_secondmate_meta "$HOME_DIR/state/mate.meta" "$HOME_DIR" "sess:fm-mate"
+  opening=${BENIGN/corr=0123456789abcdef /}
+  printf '%s\n' "$opening" > "$HOME_DIR/state/mate.status"
   out=$(env PATH="$fb:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$HOME_DIR" FM_SEND_BIN="$ROOT/bin/fm-send.sh" \
     FM_SEND_SETTLE=0 FM_JUDGE_LOG="$LOG" STUB_CALLS="$HOME_DIR/calls" \
-    "$HOOK" ingest mate "$(line_file in "$BENIGN")" 2>&1)
+    "$HOOK" ingest mate "$(line_file in "$opening")" 2>&1)
   assert_contains "$out" "auto=1" "the real send should succeed: $out"
   grep -qF 'judge auto-decided (recommended, Jev agreed): a - ' "$HOME_DIR/state/mate.inbox/001.msg" \
     || fail "the answer did not reach the durable inbox"
@@ -395,7 +544,51 @@ SH
   sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/mate.status" | grep -qF 'resolved [key=clause-policy]: answered: judge auto-decided' \
     || fail "the keyed decision was not closed:"$'\n'"$(cat "$HOME_DIR/state/mate.status")"
   assert_equals sent "$(journal "rows[-1]['hook']['action']")" "the journal should end at sent"
-  pass "live: the real fm-send --resolve-key delivers one answer and closes the decision"
+  corr=$(journal "rows[-1]['hook']['auto_send']['delivery_corr']") || fail "native fm-send supplied no correlation"
+  grep -Eq '^delivered_epoch=[0-9]+$' "$HOME_DIR/state/pending-replies/$corr" \
+    || fail "correlation lacks delivery proof"
+  assert_equals None "$(journal "rows[-1]['hook']['auto_send']['decisions'][0]['corr']")" \
+    "a newly raised decision must join without inventing an original correlation"
+  python3 - "$LOG" "$HOME_DIR/reversal.jsonl" <<'PY'
+import json, sys
+from pathlib import Path
+
+row = json.loads(Path(sys.argv[1]).read_text().splitlines()[-1])
+identity = row["hook"]["auto_send"]
+identity["decision"], = identity.pop("decisions")
+Path(sys.argv[2]).write_text(json.dumps({"schema": "fm-judge-reversal.v1", "event_id": "human:fixture-1",
+    "actor": "captain", "at": row["at"] + 1, "outcome": "reversed", "unchanged_premises": True,
+    "auto_send": identity}) + "\n")
+PY
+  out=$(FM_HOME="$HOME_DIR" FM_JUDGE_LOG="$LOG" "$HOOK" summary --reversals "$HOME_DIR/reversal.jsonl")
+  assert_contains "$out" '"confirmed_human_reversals": 1' "summary failed to join the native fm-send receipt"
+  if command -v tasks-axi >/dev/null 2>&1; then
+    FM_HOME="$HOME_DIR" "$ROOT/bin/fm-captain-hold.sh" hold clause-policy --title "Hold the exact policy choice" \
+      --reason "Wait for the captain's selection" >/dev/null || fail "could not register a same-key captain hold"
+    printf '%s\n' "$BENIGN" > "$HOME_DIR/state/mate.status"
+    out=$(env PATH="$fb:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$HOME_DIR" FM_SEND_SETTLE=0 \
+      "$ROOT/bin/fm-send.sh" mate --resolve-key clause-policy "agent recommends option A" 2>&1) \
+      && fail "a generic same-key send answered a captain hold"
+    assert_contains "$out" "names a captain hold" "same-key send did not explain its refusal"
+    [ ! -e "$HOME_DIR/state/mate.inbox/002.msg" ] || fail "the generic answer reached the worker"
+    env PATH="$fb:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$HOME_DIR" FM_SEND_SETTLE=0 \
+      "$ROOT/bin/fm-send.sh" mate --captain-answer --resolve-key clause-policy "I choose option B." >/dev/null \
+      || fail "the human answer could not use the existing keyed route"
+    out=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-tasks-axi.sh" show clause-policy --full)
+    assert_contains "$out" "state: done" "the authorized answer did not close the same-key hold"
+    assert_contains "$out" "I choose option B." "the authorized answer lost its actual words"
+    assert_not_contains "$out" "agent recommends option A" "an ordinary recommendation was recorded as approval"
+  fi
+  stale=${BENIGN/at=1000/at=2000}
+  current=${BENIGN/at=1000/at=3000}
+  printf '%s\n' "$current" >> "$HOME_DIR/state/mate.status"
+  out=$(env PATH="$fb:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$HOME_DIR" FM_SEND_BIN="$ROOT/bin/fm-send.sh" \
+    FM_SEND_SETTLE=0 FM_JUDGE_LOG="$LOG" STUB_CALLS="$HOME_DIR/calls" \
+    "$HOOK" ingest mate "$(line_file in-stale "$stale")" 2>&1)
+  assert_contains "$out" "auto=1" "the report instrumentation changed existing key-based send behavior"
+  assert_equals "[]" "$(journal "rows[-1]['hook']['auto_send']['decisions']")" \
+    "a key reused by a different open occurrence was linked to the old opening"
+  pass "live: real fm-send links exact delivered occurrences and refuses to report a reused key as proof"
 }
 
 test_adapter_wiring() {
@@ -451,12 +644,15 @@ test_mode_gate
 test_live_answer
 test_escalations_do_not_ask_the_judge
 test_guard_rules_from_real_lines
+test_unheld_destructive_decisions
 test_guard_rule_variants
 test_judge_findings_and_failures_escalate
 test_dedupe_by_decision_identity
+test_captain_holds_are_never_answered
 test_send_failure_leaves_ordinary_wake
 test_non_decision_lines_are_ignored
 test_summary
+test_summary_human_reversals
 test_live_send_through_real_fm_send
 test_adapter_wiring
 
@@ -527,6 +723,7 @@ class HookTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             (home/'config').mkdir()
+            (home/'data').mkdir()  # the hold check needs a readable data dir; no backlog = no holds
             (home/'config/judge-first').write_text('on')
             judge = home/'judge.py'
             judge.write_text('''import json, os, sys

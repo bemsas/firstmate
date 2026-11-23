@@ -243,11 +243,11 @@ An unbound source feeds nothing, so the path is opt-in per source.
 
 Two channels feed that one intake today, and both are ordinary callers rather than special cases.
 
-`bin/fm-send.sh --resolve-key` is the chat channel:
+`bin/fm-send.sh --captain-answer --resolve-key` is the chat channel.
+The hold owner checks backlog prerequisites before recording an answer.
+Matching status keys cannot bypass that check.
 
-- For a key the status log still owns, that script's header owns the status-log close.
-- A key the status log no longer owns is resolved to a still-open captain-held task and fed as one keyed line.
-  The script tries the key as a task id first, then the legacy derived identity.
+The [send command](../bin/fm-send.sh) owns local answer routing and mate relays.
 
 `bin/fm-procevent.sh` is the captured-result channel:
 
@@ -417,7 +417,8 @@ It preserves every captain hold in the bounded queued inventory of the owning ho
 | `live` | A default Captain's Call entry. |
 | `blocked`, `dated`, or `aged` | Leaves the default Captain's Call, renders as a Charted Next gate stating why - the blocking work, the `until <date>`, or the floored age - and contributes to the concrete `omitted[]` disclosure. |
 
-`--all-decisions` reveals every captain hold available within the remote-summary bound and drops its gate.
+`--all-decisions` expands dated and aged holds within the remote-summary bound.
+Holds with unresolved prerequisites stay in Charted Next.
 An available hold is therefore never in both Captain's Call and Charted Next.
 An actively worked held task may also appear in Underway, which reports running work independently of those decision buckets.
 

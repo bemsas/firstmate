@@ -288,6 +288,48 @@ test_flag_off_writes_nothing() {
   pass "flag off: the whole lifecycle leaves no ledger file, offset, or lock"
 }
 
+test_live_handoff_uses_the_keeper_transition() {
+  local keeper candidate previous state revision transition served checked out handoff
+  keeper="$TMP_ROOT/fake-keeper"
+  mkdir -p "$keeper"
+  handoff="$ROOT/.agents/skills/ship-landing/references/live-handoff.sh"
+  candidate=1111111111111111111111111111111111111111
+  previous=2222222222222222222222222222222222222222
+
+  out=$(bash "$handoff" merged "$candidate" 1000)
+  assert_contains "$out" "Merged $candidate" "the merge should remain recorded"
+  assert_contains "$out" "Live verification unknown" "a merge without a served revision implied live"
+
+  # Fake keeper completes health checks, then the endpoint identifies its revision.
+  printf 'deployed %s 1010\n' "$candidate" > "$keeper/latest-transition"
+  printf '%s 1020\n' "$candidate" > "$keeper/served"
+  read -r state revision transition < "$keeper/latest-transition"
+  read -r served checked < "$keeper/served"
+  out=$(bash "$handoff" "$state" "$revision" "$transition" "$served" "$checked" 1015)
+  assert_contains "$out" "Deployed $candidate" "deployment state was lost"
+  assert_contains "$out" "Live revision $candidate" "post-health endpoint proof should verify live"
+  out=$(bash "$handoff" "$state" "$revision" "$transition" "$served" "$checked" 1025)
+  assert_contains "$out" "Live verification stale" "a historical post-health receipt was reused in a new report"
+  assert_not_contains "$out" "Live revision $candidate" "a historical receipt implied the candidate was currently live"
+
+  # Rollback advances the owner's transition while the old probe remains on disk.
+  printf 'rolled-back %s 1030\n' "$candidate" > "$keeper/latest-transition"
+  read -r state revision transition < "$keeper/latest-transition"
+  out=$(bash "$handoff" "$state" "$revision" "$transition" "$served" "$checked" 1035)
+  assert_contains "$out" "Rolled back $candidate" "rollback was hidden by the stale probe"
+  assert_contains "$out" "Live verification stale" "pre-rollback proof was accepted"
+  assert_not_contains "$out" "Live revision $candidate" "a rolled-back candidate was reported live"
+
+  printf '%s 1040\n' "$previous" > "$keeper/served"
+  read -r served checked < "$keeper/served"
+  out=$(bash "$handoff" "$state" "$revision" "$transition" "$served" "$checked" 1035)
+  assert_contains "$out" "Verified served revision $previous" "fresh proof of the rollback target was lost"
+  assert_not_contains "$out" "Live revision $candidate" "the rollback target was confused with the candidate"
+  out=$(bash "$handoff" deployed "$candidate" 1050 "${candidate:0:7}" 1060 1055)
+  assert_contains "$out" "Live verification unknown" "a shortened keeper SHA was accepted as endpoint proof"
+  pass "live handoff preserves merge, deployment and rollback state and requires fresh exact endpoint evidence"
+}
+
 test_flag_on_records_the_task_lifecycle
 test_flag_on_records_a_pr_merge_once
 test_flag_on_records_a_pr_registration
@@ -298,3 +340,4 @@ test_worker_status_command_fails_when_the_append_fails
 test_worker_status_line_lands_when_the_ledger_fails
 test_worker_status_line_with_the_flag_absent
 test_flag_off_writes_nothing
+test_live_handoff_uses_the_keeper_transition

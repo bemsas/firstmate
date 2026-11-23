@@ -2,7 +2,7 @@
 # fm-judge-first.py - the decision engine behind bin/fm-judge-first.sh.
 #
 #   fm-judge-first.py ingest <secondmate-id> <status-lines-file|->
-#   fm-judge-first.py summary [--since <epoch>]
+#   fm-judge-first.py summary [--since <epoch>] [--reversals <verified-answer-receipts.jsonl>]
 #
 # Judge-first runs every new needs-decision: / blocked: line a secondmate
 # mirrors into this home's status stream through the private judge
@@ -16,13 +16,13 @@
 #
 # Order of decisions for each line (every step may only ESCALATE, never answer):
 #   1. parse the line and synthesize a card (a recommendation, or none);
-#   2. no recommendation -> escalate, no guessing;
+#   2. captain holds or no recommendation -> escalate, no guessing;
 #   3. the guard rules below (the gaps the backtest found) -> escalate;
 #   4. judge.py --opinion-only (its own hard rules plus the second opinion);
 #      in `on` mode a missing or disagreeing second opinion escalates;
 #   5. a cluster of lines that are one decision (same secondmate, same key
 #      family, within DEDUPE_SECONDS) is judged together, auto only when every
-#      member is auto, and gets exactly one answer.
+#      member is auto and a final hold lookup still permits the send.
 # Any error (unparseable line, judge failure or timeout, budget spent, log
 # unwritable, send refused) leaves today's ordinary wake: this script never
 # exits nonzero from `ingest`, and never retries a send (the printed
@@ -35,9 +35,21 @@
 # verdict, including local escalations, without another evaluation or journal row.
 # Telemetry failures never prevent the ordinary decision/send path.
 #
+# Summary optionally takes an explicit JSONL export from the operator verifying
+# human answers against the answer source. Each fm-judge-reversal.v1 record
+# has actor, outcome ("reversed" or "upheld"), unchanged_premises, a stable
+# event_id for the original human answer, its epoch at, and the original
+# sent hook's auto_send object with its decisions array replaced by one
+# exact decision object under "decision". The decision's original corr is
+# null if structurally absent from the opening. The send's delivery_corr
+# remains mandatory. Only an unconflicted captain reversal on unchanged
+# premises counts, once per exact delivered decision occurrence. Malformed
+# nonblank receipts refuse the report. Without input the count is null.
+#
 # Environment (tests and relocated homes): FM_HOME, FM_JUDGE_PY, FM_JUDGE_LOG,
 # FM_JUDGE_FIRST_BUDGET (total judge seconds per ingest, default 40),
-# FM_JUDGE_FIRST_TIMEOUT (seconds per judge call, default 20), FM_SEND_BIN.
+# FM_JUDGE_FIRST_TIMEOUT (seconds per judge call, default 20), FM_SEND_BIN,
+# FM_CAPTAIN_HOLD_BIN.
 import fcntl
 import hashlib
 import json
@@ -53,11 +65,15 @@ CONFIG = os.path.join(HOME_DIR, 'config', 'judge-first')
 JUDGE_PY = os.environ.get('FM_JUDGE_PY') or os.path.join(HOME_DIR, 'data', 'fleet-bridge', 'judge.py')
 JUDGE_LOG = os.environ.get('FM_JUDGE_LOG') or os.path.join(os.path.dirname(JUDGE_PY), 'judge-log.jsonl')
 SEND_BIN = os.environ.get('FM_SEND_BIN') or os.path.join(HERE, 'fm-send.sh')
+HOLD_BIN = os.environ.get('FM_CAPTAIN_HOLD_BIN') or os.path.join(HERE, 'fm-captain-hold.sh')
 BUDGET = float(os.environ.get('FM_JUDGE_FIRST_BUDGET', '40'))
 CALL_TIMEOUT = float(os.environ.get('FM_JUDGE_FIRST_TIMEOUT', '20'))
 DEDUPE_SECONDS = 120
 POLICIES = ('recommended-v1',)
 VERBS = ('needs-decision', 'blocked')
+CORR = re.compile(r'[0-9a-f]{16}')
+DELIVERY_RECEIPT = re.compile(
+    r'^fm-send: confirmed decision delivery corr=([0-9a-f]{16}) key=(\S+) opening-sha256=([0-9a-f]{64})$', re.M)
 
 
 def mode():
@@ -83,6 +99,14 @@ def parse_line(line):
     key = re.search(r'\[key=([^\]]+)\]', head)
     at = re.search(r'\[at=(\d+)\]', head)
     corr = re.search(r'corr=([0-9A-Fa-f]{16})', head) or re.match(r'corr=([0-9A-Fa-f]{16})\s*', body)
+    # Opening correlations are metadata, so a correlation mentioned later in
+    # question prose does not make an otherwise uncorrelated opening ambiguous.
+    corr_tokens = re.findall(r'(?:^|\s|\[)corr=([^\s\]]*)', head.lower())
+    body_header = re.sub(r'^\[key=[^\]]+\]\s*', '', body, count=1)
+    body_corr = re.match(r'^\[?corr=([^\s\]]*)', body_header.lower())
+    if body_corr:
+        corr_tokens.append(body_corr[1])
+    correlation = corr[1].lower() if corr else None
     if re.match(r'corr=[0-9A-Fa-f]{16}\s*', body):
         body = re.sub(r'^corr=[0-9A-Fa-f]{16}\s*', '', body)
     key = key.group(1) if key else None
@@ -92,7 +116,8 @@ def parse_line(line):
         key = key or lead.group(1)
         body = body[lead.end():]
     return {'verb': verb, 'key': key, 'at': int(at.group(1)) if at else None,
-            'corr': corr.group(1).lower() if corr else None, 'body': body.strip()}
+            'corr': correlation, 'corr_unambiguous': set(corr_tokens) == ({correlation} if corr else set()),
+            'body': body.strip()}
 
 
 def key_family(key):
@@ -181,8 +206,10 @@ def synthesize(parsed, secondmate):
 
 # (rule, pattern, scope): "both" scans the selected option and its context,
 # "selected" only scans the recommended action; "action" adds the card title.
+# "decision" scans the key and the entire status body, including alternatives.
 # A past-tense abort in the context is the situation, not the ask.
 GUARD = [
+    ('irreversible_destructive', r'\b(?:discard(?:s|ed|ing)?|forc(?:e[ds]?|ing)|tear[ -]?downs?)\b', 'decision'),
     ('irreversible_destructive', r"force[- ]with[- ]lease|\brewrit\w*\s+(?:the\s+|this\s+)?(?:branch(?:'s)?\s+)?history|history\s+rewrite|\breset\s+--hard", 'both'),
     ('irreversible_destructive', r'\babort(?:s|ing)?\b', 'selected'),
     ('pipeline_bypass', r'\b(?:bypass|skip\w*)\s+(?:the\s+)?(?:\w+\s+)?(?:pipeline|validation|no-mistakes|document|review|rebase|gate|tests?|checks?|ci)\b|--skip\b|--no-verify\b', 'action'),
@@ -197,22 +224,51 @@ BUNDLE_RANGE = re.compile(r'\b[DQ]\d{1,2}\s*[-–]\s*[DQ]?\d{1,2}\b')
 
 def guard_rules(synth):
     hits = []
+    body = synth['body']
+    key = synth['card'].get('title', '')
     selected = synth['selected'].lower()
     both = (synth['selected'] + ' ' + synth['preamble']).lower()
-    action = (synth['selected'] + ' ' + synth['card'].get('title', '')).lower()
+    targets = {
+        'selected': selected,
+        'both': both,
+        'action': (synth['selected'] + ' ' + key).lower(),
+        'decision': (key.replace('_', ' ') + '\n' + body).lower(),
+    }
     for name, pattern, scope in GUARD:
-        target = {'selected': selected, 'both': both, 'action': action}[scope]
+        target = targets[scope]
         # A generic refresh authorization names its target only in the context.
         if name == 'shared_state' and re.search(r'\b(?:authori[sz]e|perform|run)\s+(?:the\s+)?(?:documented\s+)?refresh\b', selected):
             target = both
         if re.search(pattern, target) and name not in hits:
             hits.append(name)
-    body = synth['body']
     if BUNDLE_RANGE.search(body) or len(set(BUNDLE_ID.findall(body))) > 2:
         hits.append('bundle_card')
     if synth['rec_sentence'] and CONDITIONAL.search(synth['rec_sentence']):
         hits.append('conditional_recommendation')
     return hits
+
+
+# ---- captain holds: the judge never answers one ---------------------------------
+
+CAPTAIN_CALL = re.compile(r'^(?:captain[- ](?:call|only|hold|held)|held for the captain)\b', re.I)
+
+
+def is_captain_hold(secondmate, key):
+    """True when `key` names a captain-held task. A cannot-tell result counts as held."""
+    if not key:
+        return False
+    if key.startswith('captain-hold-'):
+        return True
+    try:
+        done = subprocess.run([HOLD_BIN, 'select', secondmate, key], capture_output=True, text=True,
+                              timeout=CALL_TIMEOUT, env=dict(os.environ, FM_HOME=HOME_DIR))
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    return done.returncode != 1
+
+
+def held_verdict():
+    return {'auto': False, 'rules_hit': ['captain_hold'], 'chosen': None, 'source': 'hook'}
 
 
 # ---- journal, dedupe, judge, send ----------------------------------------------
@@ -325,11 +381,32 @@ def send_answer(secondmate, keys, text):
         cmd += ['--resolve-key', key]
     cmd.append(text)
     try:
-        done = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=dict(os.environ, FM_HOME=HOME_DIR))
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
+                              env=dict(os.environ, FM_HOME=HOME_DIR, FM_SEND_REPORT_DELIVERY='1'))
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {'ok': False, 'detail': 'send %s' % type(exc).__name__}
     tail = [l for l in (done.stdout + done.stderr).splitlines() if 'FM_PENDING_REPLY_EXISTING_CORR' in l or l.startswith('error')]
-    return {'ok': done.returncode == 0, 'exit': done.returncode, 'detail': ' | '.join(tail[:3])}
+    result = {'ok': done.returncode == 0, 'exit': done.returncode, 'detail': ' | '.join(tail[:3])}
+    receipts = DELIVERY_RECEIPT.findall(done.stdout)
+    correlations = {corr for corr, _, _ in receipts}
+    if result['ok'] and len(correlations) == 1:
+        result['delivery_corr'] = correlations.pop()
+        result['openings'] = [[key, digest] for _, key, digest in receipts]
+    return result
+
+
+def auto_send_identity(secondmate, cluster, result):
+    if 'delivery_corr' not in result:
+        return {}
+    decisions = []
+    for item in cluster:
+        parsed = item['parsed']
+        if (parsed['key'] and parsed['at'] and parsed['corr_unambiguous']
+                and result['openings'].count([parsed['key'], item['opening']]) == 1):
+            decisions.append({'key': parsed['key'], 'at': parsed['at'], 'corr': parsed['corr'],
+                              'opening_sha256': item['opening']})
+    return {'auto_send': {'home': os.path.realpath(HOME_DIR), 'task': secondmate,
+                          'delivery_corr': result['delivery_corr'], 'decisions': decisions}}
 
 
 def cluster_lines(items):
@@ -358,7 +435,8 @@ def ingest(secondmate, lines):
         parsed = parse_line(line)
         if parsed is None:
             continue
-        items.append({'parsed': parsed, 'synth': synthesize(parsed, secondmate)})
+        items.append({'parsed': parsed, 'synth': synthesize(parsed, secondmate),
+                      'opening': hashlib.sha256(line.encode(errors='surrogateescape')).hexdigest()})
     summary['lines'] = len(items)
     items.sort(key=lambda i: i['parsed']['at'] or 0)
     rows = read_log()
@@ -369,10 +447,14 @@ def ingest(secondmate, lines):
         if prior_cluster(rows, secondmate, identity, at):
             summary['deduped'] += len(cluster)
             continue
-        verdicts = [judge_one(i['synth'], current == 'on', started) for i in cluster]
-        auto = all(v.get('auto') is True for v in verdicts)
         keys = [i['parsed']['key'] for i in cluster if i['parsed']['key']]
         keys = list(dict.fromkeys(keys))
+        if any(CAPTAIN_CALL.match(i['parsed']['body']) for i in cluster) or any(
+                is_captain_hold(secondmate, k) for k in keys):
+            verdicts = [held_verdict() for _ in cluster]
+        else:
+            verdicts = [judge_one(i['synth'], current == 'on', started) for i in cluster]
+        auto = all(v.get('auto') is True for v in verdicts)
         action = ('auto' if current == 'on' else 'would-auto') if auto else 'escalate'
         text = answer_text(head['synth'], verdicts[0]) if auto else None
         errored = any('judge_error' in v.get('rules_hit', []) for v in verdicts)
@@ -393,12 +475,19 @@ def ingest(secondmate, lines):
         rows.extend(rows_out)
         for row in rows_out:
             record_langfuse(row)
-        if action == 'auto':
+        if action == 'auto' and any(is_captain_hold(secondmate, k) for k in keys):
+            # A hold placed after the verdict was journaled: never send.
+            append_log({'at': int(time.time()), 'card': head['synth']['card'], 'verdict': held_verdict(),
+                        'hook': dict(row_base['hook'], action='escalate', card_hash=head['synth']['digest'],
+                                     key=head['parsed']['key'])})
+            summary['escalate'] += len(cluster)
+        elif action == 'auto':
             result = send_answer(secondmate, keys, text)
             final = 'sent' if result['ok'] else 'send-failed'
             append_log({'at': int(time.time()), 'card': head['synth']['card'], 'verdict': verdicts[0],
                         'hook': dict(row_base['hook'], action=final, card_hash=head['synth']['digest'],
-                                     key=head['parsed']['key'], send=result)})
+                                     key=head['parsed']['key'], send=result,
+                                     **auto_send_identity(secondmate, cluster, result))})
             summary['auto' if result['ok'] else 'error'] += len(cluster)
         elif action == 'would-auto':
             summary['auto'] += len(cluster)
@@ -407,18 +496,134 @@ def ingest(secondmate, lines):
     return summary
 
 
-def summarize(since):
+def nonblank(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def valid_corr(value):
+    return isinstance(value, str) and CORR.fullmatch(value) is not None
+
+
+def valid_decision(decision):
+    return (isinstance(decision, dict) and nonblank(decision.get('key'))
+            and type(decision.get('at')) is int and decision['at'] > 0
+            and 'corr' in decision and (decision['corr'] is None or valid_corr(decision['corr']))
+            and isinstance(decision.get('opening_sha256'), str)
+            and re.fullmatch(r'[0-9a-f]{64}', decision['opening_sha256']) is not None)
+
+
+def linked_decision(decision, openings):
+    return valid_decision(decision) and openings.count([decision['key'], decision['opening_sha256']]) == 1
+
+
+def confirmed_auto_send(hook):
+    sent, send = hook.get('auto_send'), hook.get('send')
+    if not (hook.get('mode') == 'on' and hook.get('action') == 'sent'
+            and isinstance(sent, dict) and isinstance(send, dict)
+            and send.get('ok') is True and type(send.get('exit')) is int and send['exit'] == 0
+            and sent.get('home') == os.path.realpath(HOME_DIR)
+            and isinstance(sent.get('task'), str) and sent['task'] == hook.get('secondmate')
+            and valid_corr(sent.get('delivery_corr'))
+            and sent['delivery_corr'] == send.get('delivery_corr')
+            and isinstance(sent.get('decisions'), list) and isinstance(send.get('openings'), list)
+            and all(linked_decision(decision, send['openings']) for decision in sent['decisions'])):
+        return None
+    return sent
+
+
+def receipt_object(pairs):
+    record = dict(pairs)
+    if len(record) != len(pairs):
+        raise ValueError('duplicate JSON field')
+    return record
+
+
+def read_answer_receipts(receipt_path):
+    events = {}
+    with open(receipt_path, encoding='utf-8') as receipts:
+        for number, line in enumerate(receipts, 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line, object_pairs_hook=receipt_object)
+                identity = record.get('auto_send') if isinstance(record, dict) else None
+                if not (isinstance(identity, dict) and nonblank(identity.get('home'))
+                        and nonblank(identity.get('task')) and valid_corr(identity.get('delivery_corr'))
+                        and valid_decision(identity.get('decision'))
+                        and record.get('schema') == 'fm-judge-reversal.v1'
+                        and nonblank(record.get('event_id')) and nonblank(record.get('actor'))
+                        and record.get('outcome') in ('reversed', 'upheld')
+                        and type(record.get('unchanged_premises')) is bool
+                        and type(record.get('at')) is int and record['at'] > 0):
+                    raise ValueError
+            except (ValueError, RecursionError):
+                raise ValueError(f'malformed answer receipt on line {number}') from None
+            events.setdefault(record['event_id'], []).append(record)
+    return events
+
+
+def count_human_reversals(rows, since, receipt_path):
+    if receipt_path is None:
+        return None
+    deliveries, occurrences = {}, {}
+    for row, hook in rows:
+        sent = confirmed_auto_send(hook)
+        if sent is not None:
+            deliveries.setdefault(sent['delivery_corr'], []).append((row, sent))
+    for same_event in read_answer_receipts(receipt_path).values():
+        event_unambiguous = all(record == same_event[0] for record in same_event)
+        for receipt in same_event:
+            identity = receipt['auto_send']
+            matches = deliveries.get(identity['delivery_corr'], [])
+            if len(matches) != 1:
+                continue
+            row, sent = matches[0]
+            decision = identity['decision']
+            if (row['at'] < since or receipt['at'] < row['at'] or identity['home'] != sent['home']
+                    or identity['task'] != sent['task'] or sent['decisions'].count(decision) != 1):
+                continue
+            occurrence = (sent['delivery_corr'], decision['key'], decision['at'],
+                          decision['opening_sha256'], decision['corr'])
+            qualifies = (event_unambiguous and receipt['actor'] == 'captain'
+                         and receipt['outcome'] == 'reversed' and receipt['unchanged_premises'])
+            occurrences[occurrence] = occurrences.get(occurrence, True) and qualifies
+    return sum(occurrences.values())
+
+
+def summarize(since, receipt_path=None):
     counts, autos = {}, []
+    rows = []
+    unlinked = 0
     for row in read_log():
+        if not isinstance(row, dict):
+            continue
         hook = row.get('hook')
-        if not isinstance(hook, dict) or hook.get('name') != 'judge-first' or row.get('at', 0) < since:
+        if (not isinstance(hook, dict) or hook.get('name') != 'judge-first'
+                or not isinstance(hook.get('action'), str) or type(row.get('at')) is not int):
+            continue
+        rows.append((row, hook))
+        if row['at'] < since:
             continue
         counts[hook['action']] = counts.get(hook['action'], 0) + 1
+        sent = confirmed_auto_send(hook)
+        if hook['action'] == 'sent' and (sent is None or not sent.get('decisions')):
+            unlinked += 1
         if hook['action'] in ('would-auto', 'sent'):
-            autos.append('%s\t%s\t%s' % (row['at'], hook.get('key') or hook['identity'], hook.get('answer') or ''))
-    print(json.dumps({'counts': counts}, sort_keys=True))
+            autos.append('%s\t%s\t%s' % (row['at'], hook.get('key') or hook.get('identity', ''), hook.get('answer') or ''))
+    try:
+        reversals = count_human_reversals(rows, since, receipt_path)
+    except (OSError, UnicodeError):
+        print('judge-first: cannot read the supplied answer receipts', file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f'judge-first: {exc}', file=sys.stderr)
+        return 2
+    print(json.dumps({'counts': counts, 'confirmed_human_reversals': reversals,
+                      'reversal_source': 'operator-attested' if receipt_path is not None else None,
+                      'live_sends_without_reversal_linkage': unlinked}, sort_keys=True))
     for line in autos:
         print(line)
+    return 0
 
 
 def main(argv):
@@ -431,12 +636,15 @@ def main(argv):
             return 0
         print('judge-first: ' + ' '.join('%s=%s' % kv for kv in summary.items()))
         return 0
-    if len(argv) in (2, 4) and argv[1] == 'summary':
-        since = int(argv[3]) if len(argv) == 4 and argv[2] == '--since' and argv[3].isdigit() else 0
-        summarize(since)
-        return 0
+    if len(argv) >= 2 and argv[1] == 'summary':
+        import argparse
+        parser = argparse.ArgumentParser(prog='fm-judge-first.sh summary')
+        parser.add_argument('--since', type=int, default=0, metavar='EPOCH')
+        parser.add_argument('--reversals', metavar='VERIFIED-ANSWER-RECEIPTS.jsonl')
+        args = parser.parse_args(argv[2:])
+        return summarize(args.since, args.reversals)
     print('usage: fm-judge-first.sh ingest <secondmate-id> <status-lines-file|->\n'
-          '       fm-judge-first.sh summary [--since <epoch>]', file=sys.stderr)
+          '       fm-judge-first.sh summary [--since <epoch>] [--reversals <receipts.jsonl>]', file=sys.stderr)
     return 2
 
 

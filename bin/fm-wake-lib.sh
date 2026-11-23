@@ -3266,6 +3266,8 @@ fm_wake_status_append_self_announced() {  # <state> <status-file> <line>...
   local state=$1 file=$2 line appended=0 pre_size='' pre_ident='' post_size post_ident
   local classified folded lag span_rc=0
   local LC_ALL=C stamped=()
+  # shellcheck disable=SC2034 # fm-send reads these after the function returns.
+  FM_WAKE_SELF_APPEND_START='' FM_WAKE_SELF_APPEND_IDENT=''
   shift 2
   _fm_wake_require_classify || return 1
   for line in "$@"; do
@@ -3284,6 +3286,8 @@ fm_wake_status_append_self_announced() {  # <state> <status-file> <line>...
   for line in "${stamped[@]}"; do appended=$((appended + ${#line} + 1)); done
   [ "$post_size" -eq $((pre_size + appended)) ] || return 1
   status_home_appends_record "$file" "$pre_size" "$post_size" || return 1
+  # shellcheck disable=SC2034 # fm-send reads the verified append start and file identity.
+  FM_WAKE_SELF_APPEND_START=$pre_size FM_WAKE_SELF_APPEND_IDENT=$pre_ident
   classified=$(fm_wake_signal_seen_size "$state" "$file")
   if [ "$classified" != "$pre_size" ]; then
     folded=$(status_open_decisions_cursor_offset "$file") || folded=0
