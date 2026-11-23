@@ -1,0 +1,12 @@
+Product: bin/fm-judge-first.sh ingest (real hook and journal writer)
+Disposable FM_HOME: on mode; judge stub returns auto/agreed if called; send stub records if called.
+Input: five keyless needs-decision lines with explicit captain-call / captain-only / captain hold / captain-held in recommended text, and held for the captain in context.
+
+Observed:
+judge-first: mode=on lines=5 auto=0 escalate=5 deduped=0 error=0
+journal_actions=escalate,escalate,escalate,escalate,escalate
+journal_rules=captain_hold,captain_hold,captain_hold,captain_hold,captain_hold
+judge_calls=False
+send_attempts=False
+
+Oracle: the supplied intent requires these decisions to reach the captain without judge opinion or automatic answer. A mistaken auto path would invoke the configured judge and/or send stub; neither occurred. The journal persisted captain_hold escalations for all five inputs.
