@@ -69,3 +69,12 @@ The boundary covers only traffic that writes to the upstream repository.
 
 Follow the [role inheritance and receipt limits](../../../docs/configuration.md#firstmate-role-configfirstmate-role); supported propagation must never grant a child a role the primary does not resolve.
 Deliberately forged local records are outside this accidental-publication safeguard, not a provenance guarantee.
+
+## Declared role and upstream publication
+
+This home's relationship to this repository is a declared local role, never an inference: absent an explicit grant it runs as a firstmate user/operator, and a firstmate bug found in ordinary use gets private diagnosis, a local workaround, a local issue draft, or a proposed patch - never a push, fork, issue, comment, or pull request opened on its own authority.
+Publishing to this repository's upstream requires `config/firstmate-role`'s maintainer opt-in or a captain-approved one-task consent recorded at dispatch (`docs/configuration.md` "Firstmate role"; the gate is `bin/fm-role-lib.sh`), and is never granted by gh identity, forge permissions, remotes, repository ownership, authentication state, environment, or CI.
+
+## Dispatch flags
+
+For a ship task whose project is this firstmate repository, pass the project directory to the brief as `--project` and record any captain-approved one-task contribution consent as `--upstream-consent <host>/<owner>/<repo>` on the brief, spawn, and promotion; `bin/fm-spawn.sh` refuses a publishing contract this home's role does not authorize.
