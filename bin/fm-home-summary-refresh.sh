@@ -19,6 +19,12 @@
 # (default 60 seconds). No reader can observe temporary output through the
 # ledger path.
 #
+# Watcher calls set FM_HOME_SUMMARY_IF_IDLE=1 to skip when the lock is busy
+# or the ledger was published less than FM_HOME_SUMMARY_INTERVAL seconds ago
+# (default 300). Both the status trigger and the periodic poll use this mode.
+# A missing ledger or unsuccessful refresh remains due for the next poll.
+# Direct and lifecycle calls still wait for the lock and refresh on request.
+#
 # With --best-effort, a failure is appended to the bounded home-local
 # state/.home-summary-refresh.log when available, with stderr as the bounded
 # fallback, and the command exits zero. Session start, watcher, spawn, and
@@ -40,6 +46,7 @@ REFRESH_LOCK="$STATE/.home-summary-refresh.lock"
 ERROR_LOG_MAX_BYTES=${FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES:-65536}
 HOME_SUMMARY_TIMEOUT=${FM_HOME_SUMMARY_TIMEOUT:-60}
 HOME_SUMMARY_IF_IDLE=${FM_HOME_SUMMARY_IF_IDLE:-0}
+HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
 BEST_EFFORT=0
 HOME_SUMMARY_MODE=parent
 HOME_SUMMARY_ERROR=
@@ -77,6 +84,9 @@ case "$HOME_SUMMARY_IF_IDLE" in
   0|1) ;;
   *) HOME_SUMMARY_IF_IDLE=0 ;;
 esac
+case "$HOME_SUMMARY_INTERVAL" in
+  ''|*[!0-9]*|0) HOME_SUMMARY_INTERVAL=300 ;;
+esac
 
 if [ "$HOME_SUMMARY_MODE" != parent ]; then
   # shellcheck source=bin/fm-wake-lib.sh
@@ -99,6 +109,13 @@ home_summary_fail() {
   return 1
 }
 
+home_summary_is_fresh() {
+  local mtime now
+  mtime=$(fm_path_mtime "$LEDGER") || return 1
+  fm_epoch_seconds_to now
+  [ "$mtime" -le "$now" ] && [ "$((now - mtime))" -lt "$HOME_SUMMARY_INTERVAL" ]
+}
+
 home_summary_refresh_once() {
   local producer_rc producer_error
   if ! mkdir -p "$STATE" 2>/dev/null; then
@@ -115,6 +132,9 @@ home_summary_refresh_once() {
     fm_lock_acquire_wait "$REFRESH_LOCK"
   fi
   HOME_SUMMARY_LOCK_HELD=1
+  if [ "$HOME_SUMMARY_IF_IDLE" -eq 1 ] && home_summary_is_fresh; then
+    return 0
+  fi
   HOME_SUMMARY_TMP=$(umask 077; mktemp "$STATE/.home-summary.json.XXXXXX") || {
     home_summary_fail "could not create an atomic publication file in $STATE"
     return 1
