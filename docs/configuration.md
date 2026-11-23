@@ -1204,6 +1204,7 @@ Captain holds go through their own [answer path](captain-hold-lifecycle.md).
 Deleting the file is the kill switch.
 `bin/fm-judge-first.sh summary [--since <epoch>]` lists the shadow verdicts so a day of them can be compared with the supervisor's own answers.
 Its optional `--reversals` input reports operator-attested human reversals tied to confirmed live deliveries.
+The summary reports a null reversal count when the receipt file is omitted.
 `bin/fm-judge-first.py` owns the receipt format and the report's handling of unlinked historical sends.
 A line with no recommendation, a recommendation the guard rules reject, a judge failure or timeout, an unknown judge policy, or (in `on` mode) a missing second opinion always keeps the ordinary wake.
 `bin/fm-judge-first.py`'s header owns the decision order, guard rules, and dedupe by decision identity; `bin/fm-procevent-remote-reply.sh` owns the call site.

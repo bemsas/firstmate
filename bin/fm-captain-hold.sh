@@ -928,7 +928,7 @@ split_hold_body() {  # <decoded-body>; sets the active header, review line and r
   HOLD_BODY=${body#$'\n'}
 }
 
-write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-0-or-1> [review-spec]
+write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-0-or-1> [review-header]
   local id=$1 body=$2 hold_set=$3 preserve=$4 review=${5:-} new_body tmp
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
@@ -938,7 +938,7 @@ write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-0-or-1>
     hold_set=$(body_hold_set_timestamp "$body")
   fi
   new_body=$(printf 'Captain hold set: %s' "$hold_set")
-  [ -z "$review" ] || new_body="$new_body"$'\n'"Captain hold review: $review"
+  [ -z "$review" ] || new_body="$new_body"$'\n'"$review"
   if [ -n "$HOLD_BODY" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$HOLD_BODY")
   fi
@@ -1220,7 +1220,7 @@ command_hold() {
         if ! fm_pr_url_parse "$2" || [ "$FM_PR_PROVIDER" != github ] || ! fm_pr_head_valid "$3"; then
           fail "--require-review needs a canonical GitHub PR URL and exact head"
         fi
-        review="$FM_PR_URL $3"
+        review="Captain hold review: $FM_PR_URL $3"
         shift 2
         ;;
       *) usage >&2; exit 2 ;;
@@ -1302,6 +1302,13 @@ command_hold() {
   fi
   task_show_or_fail "$id" "task $id disappeared before recording its hold-set stamp"
   original_body=$(show_field "$show" body)
+  # Date expiry lifts the backend's live bit while the captain still owns the call.
+  # Keep its review requirement even though re-holding starts a new age stamp.
+  if [ -z "$review" ] && [ "$existing_hold_kind" = captain ] && [ "$preserve_hold_set" = 0 ]; then
+    body=$(decode_shown_value "$original_body") || fail "could not read $id's existing review requirement"
+    split_hold_body "$body"
+    review=$HOLD_REVIEW
+  fi
   write_hold_set_stamp "$id" "$(show_field "$show" body)" "$hold_set" "$preserve_hold_set" "$review"
   task_show_or_fail "$id" "task $id disappeared while recording its hold-set stamp"
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
@@ -2588,14 +2595,16 @@ command_review_ready() {
   [ -n "$HOLD_REVIEW" ] && [ "$HOLD_REVIEW" = "$2" ] && hold_review_ready "$show"
 }
 
+design_read_archived_if_absent() {
+  printf '%s\n' "$TASK_SHOW_OUTPUT" | grep -qxF 'code: NOT_FOUND' || return 1
+  task_show_archived "$1"
+}
+
 command_design_decision() {
   local id=${1:-} show body origin occurrence approval digest
   [ "$#" -eq 1 ] || [ "$#" -eq 5 ] || return 2
   [[ "$id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 2
-  if ! task_show "$id"; then
-    printf '%s\n' "$TASK_SHOW_OUTPUT" | grep -qxF 'code: NOT_FOUND' || return 1
-    task_show_archived "$id" || return 1
-  fi
+  task_show "$id" || design_read_archived_if_absent "$id" || return 1
   show=$TASK_SHOW_OUTPUT
   [ "$(show_field_value "$show" id)" = "$id" ] && [ "$(show_field "$show" held)" = no ] || return 1
   body=$(show_field_value "$show" body) || return 1
@@ -2628,7 +2637,8 @@ print(b" ".join((record[3], record[5], record[6])).decode())
   digest=${approval%% *}
   approval=${approval#* }
   origin=${approval%% *}
-  [ "$(body_hold_origin "$body")" = "$origin" ] && origin_exists_here "$origin" || return 1
+  [ "$(body_hold_origin "$body")" = "$origin" ] || return 1
+  origin_exists_here "$origin" || design_read_archived_if_absent "$origin" || return 1
   design_artifact_valid "${approval#* }" || return 1
   if [ "$#" -eq 5 ]; then
     [ "$2" = "$origin" ] && [ "$3" = "$occurrence" ] && [ "$4" = "$digest" ] && [ "$5" = "${approval#* }" ]

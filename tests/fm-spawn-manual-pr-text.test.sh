@@ -174,6 +174,9 @@ test_structured_rework_requires_the_current_approval() {
   refuse_rework "superseded identical answer"
   pointer=$(FM_HOME="$HOME_DIR" "$holds" design-decision eve-pick) || fail "read latest approval pointer"
   [ "$pointer" != "$old" ] || fail "the same words reused the prior occurrence"
+  FM_HOME="$HOME_DIR" "$tasks" "done" eve-design --keep 0 >/dev/null || fail "archive the completed origin"
+  assert_grep 'eve-design' "$HOME_DIR/data/done-archive.md" "the origin was not retained in the Done archive"
+  assert_no_grep 'eve-design -' "$HOME_DIR/data/backlog.md" "the origin was still in the live backlog"
   rework_brief "$pointer" eve-design
   out=$(run_spawn "$id" --mode no-mistakes --yolo off) || fail "exact approval did not launch: $out"
   assert_grep 'Origin: tasks-axi:eve-design' "$HOME_DIR/data/$id/launch-brief.md" "launch lost the prior-work identity"

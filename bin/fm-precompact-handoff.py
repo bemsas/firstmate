@@ -680,6 +680,31 @@ def cmd_compact(args):
     return 0
 
 
+def compact_hook_source(command):
+    import shlex
+
+    if not isinstance(command, str) or not command.strip():
+        return None
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        words = list(lexer)
+    except ValueError:
+        return None
+    paths = {str(SCRIPT_DIR / 'fm-sessionstart-run.sh'),
+             '$CLAUDE_PROJECT_DIR/bin/fm-sessionstart-run.sh',
+             '${CLAUDE_PROJECT_DIR}/bin/fm-sessionstart-run.sh'}
+    command_start = True
+    for word in words:
+        if word in {';', '|', '||', '&&'}:
+            command_start = True
+        elif command_start and word != 'exec':
+            if word in paths:
+                return True
+            command_start = False
+    return False
+
+
 def inspect_compact(state, transcript, session, boundary, following):
     prior = boundary.get('logicalParentUuid')
     if not is_uuid(prior):
@@ -721,13 +746,21 @@ def inspect_compact(state, transcript, session, boundary, following):
                 and attachment.get('hookName') == 'SessionStart:compact'
                 and attachment.get('hookEvent') == 'SessionStart'
                 and attachment.get('type') == 'hook_success'):
-            attachments.append(attachment.get('content'))
-    if any(isinstance(content, str) and byte_count(content) == expected['bytes']
-           and hashlib.sha256(content.encode()).hexdigest() == expected['sha256']
-           for content in attachments):
-        return 'observed', 'complete native SessionStart attachment matches'
-    if any(not isinstance(content, str) for content in attachments) or not complete:
-        return 'unverifiable', 'native attachment or boundary window incomplete'
+            attachments.append((compact_hook_source(attachment.get('command')), attachment.get('content')))
+    owner = [content for source, content in attachments if source is True]
+    matching = [source for source, content in attachments if isinstance(content, str)
+                and byte_count(content) == expected['bytes']
+                and hashlib.sha256(content.encode()).hexdigest() == expected['sha256']]
+    if len(owner) > 1 or len(matching) > 1:
+        return 'unverifiable', 'ambiguous duplicate compact attachments'
+    if not complete:
+        return 'unverifiable', 'native boundary window still open'
+    if matching == [True]:
+        return 'observed', 'complete native Firstmate SessionStart attachment matches'
+    if matching or any(source is None for source, _ in attachments):
+        return 'unverifiable', 'Firstmate SessionStart attachment source could not be verified'
+    if any(not isinstance(content, str) for content in owner):
+        return 'unverifiable', 'native Firstmate attachment content unavailable'
     return 'absent', 'completed boundary has no matching complete attachment'
 
 

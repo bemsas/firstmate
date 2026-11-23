@@ -17,6 +17,7 @@ REFILL = "OLD-LANE-REFILL: fill 15-20 lanes"
 JUDGE = "JUDGE-RECOMMENDATION: sign off now"
 LINK = "https://design.example.invalid/eve/approved-one-frame"
 NEXT = "POST-COMPACT-PROBE: report the existing target, decision source, blocker and authorized next step."
+UNRELATED_COMPACT = "SYNTHETIC UNRELATED COMPACT CONTEXT"
 
 
 def run(args, **kwargs):
@@ -158,7 +159,9 @@ def live(root, code, env, claude, fixed):
         settings.write_text(json.dumps({"hooks": {
             "SessionStart": [{"hooks": [{"type": "command", "command":
                 f"tee {shlex.quote(str(root))}/payload.last | {hook} | tee {shlex.quote(str(root))}/hook.last", "timeout": 90}]}] +
-            ([] if fixed else [{"matcher": "compact", "hooks": [{"type": "command",
+            ([{"matcher": "compact", "hooks": [{"type": "command",
+                "command": f"printf '%s\\n' {shlex.quote(UNRELATED_COMPACT)}"}]}] if fixed else
+             [{"matcher": "compact", "hooks": [{"type": "command",
                 "command": f"cat {shlex.quote(str(root))}/data/session-progress.md {shlex.quote(str(root))}/state/turn-context.alerts"}]}]),
             "PreCompact": [{"hooks": [{"type": "command", "command": f"{precompact} precompact"}]}],
             "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"{precompact} inject"}]}],
@@ -244,9 +247,11 @@ def verify_delivery(root, request, fixed, closed_review):
                             "FM_STATE_OVERRIDE": str(root / "state")}, capture_output=True)
         print(observed.stdout.strip())
         assert json.loads(observed.stdout)["delivery"] == "observed", "native compact attachment was not verified"
-        assert len(compact) == 1 and hook.strip() in compact[0], "the complete page did not arrive exactly once"
+        page_blocks = [block for block in compact if hook.strip() in block]
+        assert len(page_blocks) == 1, "the complete page did not arrive exactly once"
+        assert sum(UNRELATED_COMPACT in block for block in compact) == 1, "the unrelated hook did not co-fire"
         assert len(hook.encode("utf-8")) <= 1660, "page exceeded the byte budget"
-        assert "persisted-output" not in compact[0], "Claude spilled the compact page"
+        assert "persisted-output" not in page_blocks[0], "Claude spilled the compact page"
         assert TARGET in hook and LINK in hook and "Captain decision tasks-axi:eve-design" in hook
         assert REFILL not in hook and JUDGE not in hook, "untrusted notes entered the page"
         assert "Durable wake records pending." in hook and "bin/fm-wake-drain.sh" in hook

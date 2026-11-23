@@ -412,12 +412,18 @@ test_summary() {
   assert_contains "$out" '"escalate": 1' "summary should count escalations"
   assert_contains "$out" '"would-auto": 1' "summary should count would-send verdicts"
   assert_contains "$out" "clause-policy" "summary should list each would-send decision"
+  assert_contains "$out" '"confirmed_human_reversals": null' "omitted answer evidence is unknown"
+  assert_contains "$out" '"reversal_source": null' "omitted answer evidence has no source"
+  printf '\n  \n' > "$HOME_DIR/empty-reversals.jsonl"
+  out=$(env FM_HOME="$HOME_DIR" FM_JUDGE_LOG="$LOG" "$HOOK" summary --reversals "$HOME_DIR/empty-reversals.jsonl")
+  assert_contains "$out" '"confirmed_human_reversals": 0' "supplied empty evidence establishes a reported zero"
+  assert_contains "$out" '"reversal_source": "operator-attested"' "summary must identify the input provenance"
   pass "summary lists a day of shadow verdicts for comparison with the supervisor's answers"
 }
 
 test_summary_human_reversals() {
   new_home reversals
-  local receipts="$HOME_DIR/reversals.jsonl" out before
+  local receipts="$HOME_DIR/reversals.jsonl" out before bad_receipt rc=0
   python3 - "$HOME_DIR" "$LOG" "$receipts" <<'PY'
 import copy, json, sys
 from pathlib import Path
@@ -459,24 +465,50 @@ conflicting = fixture(12)
 answers.append(dict(conflicting, actor="agent"))
 fixture(13)
 rows.append(copy.deepcopy(rows[-1]))
+for i, conflict in enumerate(({"outcome": "upheld"}, {"actor": "agent"}, {"unchanged_premises": False}), 14):
+    original = fixture(i)
+    answers.append(dict(original, **conflict, event_id=f"conflict:{i}"))
+cluster = fixture(17)
+answers.append(dict(cluster, event_id="cluster:upheld", outcome="upheld"))
+for i in (1, 2):
+    sibling = copy.deepcopy(cluster)
+    sibling["event_id"] = f"cluster:sibling-{i}"
+    decision = sibling["auto_send"]["decision"]
+    decision.update(key=f"cluster-key-{i}", opening_sha256=f"{i + 70:064x}")
+    rows[-1]["hook"]["auto_send"]["decisions"].append(decision)
+    rows[-1]["hook"]["send"]["openings"].append([decision["key"], decision["opening_sha256"]])
+    answers.extend((sibling, copy.deepcopy(sibling)))
 journal.write_text("".join(json.dumps(r) + "\n" for r in rows))
 receipts.write_text("".join(json.dumps(r) + "\n" for r in answers))
 PY
   before=$(cksum < "$LOG")$(cksum < "$receipts")
   out=$(env FM_HOME="$HOME_DIR" FM_JUDGE_LOG="$LOG" "$HOOK" summary --reversals "$receipts")
-  assert_contains "$out" '"confirmed_human_reversals": 1' "only the one exact matched live send may count"
+  assert_contains "$out" '"confirmed_human_reversals": 3' "only unconflicted exact occurrences may count"
+  assert_contains "$out" '"reversal_source": "operator-attested"' "receipt provenance must be visible"
   assert_contains "$out" '"live_sends_without_reversal_linkage": 1' "older live sends without evidence must be visible"
-  out=$(env FM_HOME="$HOME_DIR" FM_JUDGE_LOG="$LOG" "$HOOK" summary --since 10002 --reversals "$receipts")
+  out=$(env FM_HOME="$HOME_DIR" FM_JUDGE_LOG="$LOG" "$HOOK" summary --since 10017 --reversals "$receipts")
+  assert_contains "$out" '"confirmed_human_reversals": 2' "conflicting evidence for one decision may not suppress its cluster siblings"
+  out=$(env FM_HOME="$HOME_DIR" FM_JUDGE_LOG="$LOG" "$HOOK" summary --since 10018 --reversals "$receipts")
   assert_contains "$out" '"confirmed_human_reversals": 0' "since must apply to the sent event"
   assert_equals "$before" "$(cksum < "$LOG")$(cksum < "$receipts")" "summary mutated evidence"
   assert_equals 0 "$(calls)" "summary called the judge"
   assert_equals 0 "$(sends)" "summary sent an answer"
   printf '17\n' >> "$LOG"
   out=$(env FM_HOME="$HOME_DIR" FM_JUDGE_LOG="$LOG" "$HOOK" summary --reversals "$receipts")
-  assert_contains "$out" '"confirmed_human_reversals": 1' "reporting must tolerate a malformed legacy row"
+  assert_contains "$out" '"confirmed_human_reversals": 3' "reporting must tolerate a malformed legacy journal row"
   printf 'on\n' > "$HOME_DIR/config/judge-first"
   run_hook "$(line_file malformed "$BENIGN")" >/dev/null
   assert_equals 0 "$(sends)" "summary tolerance accidentally changed ingest's behavior on the same malformed row"
+  for bad_receipt in 'not-valid-json' '{"event_id":"incomplete"}'; do
+    cp "$receipts" "$HOME_DIR/invalid-reversals.jsonl"
+    printf '\n%s\n' "$bad_receipt" >> "$HOME_DIR/invalid-reversals.jsonl"
+    rc=0
+    out=$(env FM_HOME="$HOME_DIR" FM_JUDGE_LOG="$LOG" "$HOOK" summary \
+      --reversals "$HOME_DIR/invalid-reversals.jsonl" 2>&1) || rc=$?
+    expect_code 2 "$rc" "nonblank malformed receipts must refuse the report"
+    assert_contains "$out" "malformed answer receipt on line" "receipt failure should identify the line"
+    assert_not_contains "$out" "confirmed_human_reversals" "an invalid input produced a partial reversal report"
+  done
   pass "summary counts exact operator-attested human reversals once and excludes unlinked, shadow and ambiguous events"
 }
 
@@ -485,7 +517,7 @@ PY
 test_live_send_through_real_fm_send() {
   new_home e2e
   printf 'on\n' > "$HOME_DIR/config/judge-first"
-  local fb="$HOME_DIR/fakebin" out corr stale current
+  local fb="$HOME_DIR/fakebin" out corr stale current opening
   mkdir -p "$fb"
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -500,10 +532,11 @@ SH
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/sleep"
   chmod +x "$fb/tmux" "$fb/sleep"
   fm_write_secondmate_meta "$HOME_DIR/state/mate.meta" "$HOME_DIR" "sess:fm-mate"
-  printf '%s\n' "$BENIGN" > "$HOME_DIR/state/mate.status"
+  opening=${BENIGN/corr=0123456789abcdef /}
+  printf '%s\n' "$opening" > "$HOME_DIR/state/mate.status"
   out=$(env PATH="$fb:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$HOME_DIR" FM_SEND_BIN="$ROOT/bin/fm-send.sh" \
     FM_SEND_SETTLE=0 FM_JUDGE_LOG="$LOG" STUB_CALLS="$HOME_DIR/calls" \
-    "$HOOK" ingest mate "$(line_file in "$BENIGN")" 2>&1)
+    "$HOOK" ingest mate "$(line_file in "$opening")" 2>&1)
   assert_contains "$out" "auto=1" "the real send should succeed: $out"
   grep -qF 'judge auto-decided (recommended, Jev agreed): a - ' "$HOME_DIR/state/mate.inbox/001.msg" \
     || fail "the answer did not reach the durable inbox"
@@ -514,8 +547,8 @@ SH
   corr=$(journal "rows[-1]['hook']['auto_send']['delivery_corr']") || fail "native fm-send supplied no correlation"
   grep -Eq '^delivered_epoch=[0-9]+$' "$HOME_DIR/state/pending-replies/$corr" \
     || fail "correlation lacks delivery proof"
-  assert_equals 0123456789abcdef "$(journal "rows[-1]['hook']['auto_send']['decisions'][0]['corr']")" \
-    "the native send did not link the exact opening occurrence's own correlation"
+  assert_equals None "$(journal "rows[-1]['hook']['auto_send']['decisions'][0]['corr']")" \
+    "a newly raised decision must join without inventing an original correlation"
   python3 - "$LOG" "$HOME_DIR/reversal.jsonl" <<'PY'
 import json, sys
 from pathlib import Path

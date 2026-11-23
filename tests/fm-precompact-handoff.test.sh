@@ -331,8 +331,10 @@ expected = subprocess.check_output([hook, "compact", "--home", home, "--session"
 assert 0 < len(expected.encode()) < 1660
 after = {"type": "user", "uuid": prompt, "parentUuid": attachment, "origin": {"kind": "human"}}
 native = {"type": "hook_success", "hookEvent": "SessionStart", "hookName": "SessionStart:compact",
+          "command": 'exec "$CLAUDE_PROJECT_DIR"/bin/fm-sessionstart-run.sh',
           "content": expected, "stdout": expected + "\n"}
 row = {"type": "attachment", "uuid": attachment, "parentUuid": boundary, "attachment": native}
+extra = {**row, "uuid": str(uuid.uuid4()), "parentUuid": attachment}
 def observe(expected_status, *, selected=boundary):
     result = subprocess.check_output([hook, "observe-compact", "--home", home, "--transcript", path,
                                       "--boundary", selected], text=True, env=env)
@@ -343,6 +345,22 @@ def observe(expected_status, *, selected=boundary):
 
 write(tip, cut, row, after)
 observe("observed")
+write(tip, cut, row)
+observe("unverifiable")  # More attachments can still co-fire in an open window.
+write(tip, cut, row, extra, {**after, "parentUuid": extra["uuid"]})
+observe("unverifiable")  # Duplicate Firstmate pages at the same boundary.
+write(tip, cut, row, {**extra, "attachment": {**native, "content": "conflicting Firstmate output"}},
+      {**after, "parentUuid": extra["uuid"]})
+observe("unverifiable")
+other_hook = {**native, "command": 'echo exec "$CLAUDE_PROJECT_DIR"/bin/fm-sessionstart-run.sh',
+              "content": "unrelated"}
+write(tip, cut, row, {**extra, "attachment": other_hook}, {**after, "parentUuid": extra["uuid"]})
+observe("observed")  # A legitimate co-firing hook may emit its own context.
+write(tip, cut, {**row, "attachment": {**other_hook, "content": expected}}, after)
+observe("unverifiable")  # Identical bytes from a different source do not prove delivery.
+write(tip, cut, row, {**extra, "attachment": {**other_hook, "content": expected}},
+      {**after, "parentUuid": extra["uuid"]})
+observe("unverifiable")
 write(tip, cut, {**row, "attachment": {**native, "content": expected[:30]}}, after)
 observe("absent")  # The full raw stdout is insufficient.
 write(tip, cut, {**row, "parentUuid": prior}, {**after, "parentUuid": boundary})
@@ -375,13 +393,19 @@ test_review_gated_signoff() (
   unset FM_STATE_OVERRIDE FM_CONFIG_OVERRIDE FM_DATA_OVERRIDE
   "$tasks" add eve-review-fix 'Independent Eve review' >/dev/null || fail "create review task"
   "$holds" hold eve-signoff --title 'Eve sign-off' --reason 'Approve the revised frame' \
-    --origin eve-review-fix --require-review "$pr" "$b" >/dev/null || fail "create review-gated hold"
+    --origin eve-review-fix --until 2000-01-01 --require-review "$pr" "$b" >/dev/null \
+    || fail "create review-gated hold with an expired deferral"
   "$tasks" block eve-signoff --by eve-review-fix >/dev/null || fail "link the review prerequisite"
   "$verdict" "$pr" "$b" merge independent >/dev/null || fail "stage passing B"
   "$holds" open eve-signoff --ready || rc=$?
   expect_code 4 "$rc" "passing B does not waive the ordinary dependency"
   "$tasks" "done" eve-review-fix >/dev/null || fail "complete the review task"
   mv "$home/state/review-verdicts.jsonl" "$home/initial-verdict.jsonl"
+  rc=0
+  "$holds" open eve-signoff --ready || rc=$?
+  expect_code 4 "$rc" "expired deferral leaves the review prerequisite in force"
+  "$holds" hold eve-signoff --reason 'Sign off on the current revised frame' >/dev/null \
+    || fail "re-hold the expired sign-off without specifying the review again"
   printf 'Approve the revised frame.\n' > "$text"
   for stage in missing wrong-revision failed malformed; do
     case "$stage" in

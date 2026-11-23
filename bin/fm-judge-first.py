@@ -37,12 +37,14 @@
 #
 # Summary optionally takes an explicit JSONL export from the operator verifying
 # human answers against the answer source. Each fm-judge-reversal.v1 record
-# has actor="captain", outcome="reversed", unchanged_premises=true, a stable
+# has actor, outcome ("reversed" or "upheld"), unchanged_premises, a stable
 # event_id for the original human answer, its epoch at, and the original
 # sent hook's auto_send object with its decisions array replaced by one
-# exact decision object under "decision". Treat this input as an operator
-# attestation, never as authorization. The summary joins it to confirmed
-# live send evidence, reports once per send, and writes nothing.
+# exact decision object under "decision". The decision's original corr is
+# null if structurally absent from the opening. The send's delivery_corr
+# remains mandatory. Only an unconflicted captain reversal on unchanged
+# premises counts, once per exact delivered decision occurrence. Malformed
+# nonblank receipts refuse the report. Without input the count is null.
 #
 # Environment (tests and relocated homes): FM_HOME, FM_JUDGE_PY, FM_JUDGE_LOG,
 # FM_JUDGE_FIRST_BUDGET (total judge seconds per ingest, default 40),
@@ -97,6 +99,14 @@ def parse_line(line):
     key = re.search(r'\[key=([^\]]+)\]', head)
     at = re.search(r'\[at=(\d+)\]', head)
     corr = re.search(r'corr=([0-9A-Fa-f]{16})', head) or re.match(r'corr=([0-9A-Fa-f]{16})\s*', body)
+    # Opening correlations are metadata, so a correlation mentioned later in
+    # question prose does not make an otherwise uncorrelated opening ambiguous.
+    corr_tokens = re.findall(r'(?:^|\s|\[)corr=([^\s\]]*)', head.lower())
+    body_header = re.sub(r'^\[key=[^\]]+\]\s*', '', body, count=1)
+    body_corr = re.match(r'^\[?corr=([^\s\]]*)', body_header.lower())
+    if body_corr:
+        corr_tokens.append(body_corr[1])
+    correlation = corr[1].lower() if corr else None
     if re.match(r'corr=[0-9A-Fa-f]{16}\s*', body):
         body = re.sub(r'^corr=[0-9A-Fa-f]{16}\s*', '', body)
     key = key.group(1) if key else None
@@ -106,7 +116,8 @@ def parse_line(line):
         key = key or lead.group(1)
         body = body[lead.end():]
     return {'verb': verb, 'key': key, 'at': int(at.group(1)) if at else None,
-            'corr': corr.group(1).lower() if corr else None, 'body': body.strip()}
+            'corr': correlation, 'corr_unambiguous': set(corr_tokens) == ({correlation} if corr else set()),
+            'body': body.strip()}
 
 
 def key_family(key):
@@ -390,7 +401,7 @@ def auto_send_identity(secondmate, cluster, result):
     decisions = []
     for item in cluster:
         parsed = item['parsed']
-        if (parsed['key'] and parsed['at'] and parsed['corr'] and item['one_corr']
+        if (parsed['key'] and parsed['at'] and parsed['corr_unambiguous']
                 and result['openings'].count([parsed['key'], item['opening']]) == 1):
             decisions.append({'key': parsed['key'], 'at': parsed['at'], 'corr': parsed['corr'],
                               'opening_sha256': item['opening']})
@@ -425,8 +436,7 @@ def ingest(secondmate, lines):
         if parsed is None:
             continue
         items.append({'parsed': parsed, 'synth': synthesize(parsed, secondmate),
-                      'opening': hashlib.sha256(line.encode(errors='surrogateescape')).hexdigest(),
-                      'one_corr': len(set(re.findall(r'\bcorr=([0-9a-f]{16})\b', line.lower()))) == 1})
+                      'opening': hashlib.sha256(line.encode(errors='surrogateescape')).hexdigest()})
     summary['lines'] = len(items)
     items.sort(key=lambda i: i['parsed']['at'] or 0)
     rows = read_log()
@@ -486,13 +496,24 @@ def ingest(secondmate, lines):
     return summary
 
 
-def linked_decision(decision, openings):
-    return (isinstance(decision, dict) and isinstance(decision.get('key'), str) and bool(decision['key'])
+def nonblank(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def valid_corr(value):
+    return isinstance(value, str) and CORR.fullmatch(value) is not None
+
+
+def valid_decision(decision):
+    return (isinstance(decision, dict) and nonblank(decision.get('key'))
             and type(decision.get('at')) is int and decision['at'] > 0
-            and isinstance(decision.get('corr'), str) and CORR.fullmatch(decision['corr'])
+            and 'corr' in decision and (decision['corr'] is None or valid_corr(decision['corr']))
             and isinstance(decision.get('opening_sha256'), str)
-            and re.fullmatch(r'[0-9a-f]{64}', decision['opening_sha256'])
-            and openings.count([decision['key'], decision['opening_sha256']]) == 1)
+            and re.fullmatch(r'[0-9a-f]{64}', decision['opening_sha256']) is not None)
+
+
+def linked_decision(decision, openings):
+    return valid_decision(decision) and openings.count([decision['key'], decision['opening_sha256']]) == 1
 
 
 def confirmed_auto_send(hook):
@@ -502,7 +523,7 @@ def confirmed_auto_send(hook):
             and send.get('ok') is True and type(send.get('exit')) is int and send['exit'] == 0
             and sent.get('home') == os.path.realpath(HOME_DIR)
             and isinstance(sent.get('task'), str) and sent['task'] == hook.get('secondmate')
-            and isinstance(sent.get('delivery_corr'), str) and CORR.fullmatch(sent['delivery_corr'])
+            and valid_corr(sent.get('delivery_corr'))
             and sent['delivery_corr'] == send.get('delivery_corr')
             and isinstance(sent.get('decisions'), list) and isinstance(send.get('openings'), list)
             and all(linked_decision(decision, send['openings']) for decision in sent['decisions'])):
@@ -510,44 +531,63 @@ def confirmed_auto_send(hook):
     return sent
 
 
+def receipt_object(pairs):
+    record = dict(pairs)
+    if len(record) != len(pairs):
+        raise ValueError('duplicate JSON field')
+    return record
+
+
+def read_answer_receipts(receipt_path):
+    events = {}
+    with open(receipt_path, encoding='utf-8') as receipts:
+        for number, line in enumerate(receipts, 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line, object_pairs_hook=receipt_object)
+                identity = record.get('auto_send') if isinstance(record, dict) else None
+                if not (isinstance(identity, dict) and nonblank(identity.get('home'))
+                        and nonblank(identity.get('task')) and valid_corr(identity.get('delivery_corr'))
+                        and valid_decision(identity.get('decision'))
+                        and record.get('schema') == 'fm-judge-reversal.v1'
+                        and nonblank(record.get('event_id')) and nonblank(record.get('actor'))
+                        and record.get('outcome') in ('reversed', 'upheld')
+                        and type(record.get('unchanged_premises')) is bool
+                        and type(record.get('at')) is int and record['at'] > 0):
+                    raise ValueError
+            except (ValueError, RecursionError):
+                raise ValueError(f'malformed answer receipt on line {number}') from None
+            events.setdefault(record['event_id'], []).append(record)
+    return events
+
+
 def count_human_reversals(rows, since, receipt_path):
-    deliveries, events = {}, {}
+    if receipt_path is None:
+        return None
+    deliveries, occurrences = {}, {}
     for row, hook in rows:
         sent = confirmed_auto_send(hook)
         if sent is not None:
             deliveries.setdefault(sent['delivery_corr'], []).append((row, sent))
-    if receipt_path is None:
-        return 0
-    with open(receipt_path, encoding='utf-8') as receipts:
-        for line in receipts:
-            try:
-                record = json.loads(line)
-            except ValueError:
+    for same_event in read_answer_receipts(receipt_path).values():
+        event_unambiguous = all(record == same_event[0] for record in same_event)
+        for receipt in same_event:
+            identity = receipt['auto_send']
+            matches = deliveries.get(identity['delivery_corr'], [])
+            if len(matches) != 1:
                 continue
-            if isinstance(record, dict) and isinstance(record.get('event_id'), str) and record['event_id'].strip():
-                events.setdefault(record['event_id'], []).append(record)
-    reversed_sends = set()
-    for same_event in events.values():
-        receipt = same_event[0]
-        if (any(record != receipt for record in same_event[1:])
-                or receipt.get('schema') != 'fm-judge-reversal.v1' or receipt.get('actor') != 'captain'
-                or receipt.get('outcome') != 'reversed' or receipt.get('unchanged_premises') is not True):
-            continue
-        identity = receipt.get('auto_send')
-        if not isinstance(identity, dict) or not isinstance(identity.get('delivery_corr'), str):
-            continue
-        matches = deliveries.get(identity['delivery_corr'], [])
-        if len(matches) != 1:
-            continue
-        row, sent = matches[0]
-        decisions = sent.get('decisions')
-        if (row['at'] < since or type(receipt.get('at')) is not int or receipt['at'] < row['at']
-                or identity.get('home') != sent['home'] or identity.get('task') != sent['task']
-                or not isinstance(decisions, list) or not isinstance(identity.get('decision'), dict)
-                or decisions.count(identity['decision']) != 1):
-            continue
-        reversed_sends.add(sent['delivery_corr'])
-    return len(reversed_sends)
+            row, sent = matches[0]
+            decision = identity['decision']
+            if (row['at'] < since or receipt['at'] < row['at'] or identity['home'] != sent['home']
+                    or identity['task'] != sent['task'] or sent['decisions'].count(decision) != 1):
+                continue
+            occurrence = (sent['delivery_corr'], decision['key'], decision['at'],
+                          decision['opening_sha256'], decision['corr'])
+            qualifies = (event_unambiguous and receipt['actor'] == 'captain'
+                         and receipt['outcome'] == 'reversed' and receipt['unchanged_premises'])
+            occurrences[occurrence] = occurrences.get(occurrence, True) and qualifies
+    return sum(occurrences.values())
 
 
 def summarize(since, receipt_path=None):
@@ -575,7 +615,11 @@ def summarize(since, receipt_path=None):
     except (OSError, UnicodeError):
         print('judge-first: cannot read the supplied answer receipts', file=sys.stderr)
         return 2
+    except ValueError as exc:
+        print(f'judge-first: {exc}', file=sys.stderr)
+        return 2
     print(json.dumps({'counts': counts, 'confirmed_human_reversals': reversals,
+                      'reversal_source': 'operator-attested' if receipt_path is not None else None,
                       'live_sends_without_reversal_linkage': unlinked}, sort_keys=True))
     for line in autos:
         print(line)
