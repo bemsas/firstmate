@@ -131,36 +131,118 @@ jq -e --arg home "$HOME_DIR" --arg now "$NOW_ONE" --argjson epoch "$EPOCH_ONE" '
 ' "$HOME_DIR/state/home-summary.json" >/dev/null \
   || fail "initial ledger did not expose the extended producer schema"
 
-PATH="$FAKEBIN:$PATH" \
-  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
-  FM_SNAPSHOT_NOW="$NOW_TWO" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_TWO" \
-  FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=9999999 FM_HEARTBEAT=9999999 \
-  "$WATCH" > "$TMP_ROOT/watch.out" 2> "$TMP_ROOT/watch.err" &
-WATCH_PID=$!
-i=0
-while [ ! -e "$HOME_DIR/state/.last-watcher-beat" ] && [ "$i" -lt 100 ]; do
-  kill -0 "$WATCH_PID" 2>/dev/null || break
-  sleep 0.05
-  i=$((i + 1))
+# Trace the real watcher, writer and producer in a disposable code directory.
+# A refresh-completion marker lets us check zero collector starts without a sleep.
+TRACE_BIN="$TMP_ROOT/trace-bin"
+TRACE="$TMP_ROOT/trace"
+SUMMARY="$HOME_DIR/state/home-summary.json"
+mkdir -p "$TRACE_BIN" "$TRACE"
+ln -s "$ROOT"/bin/* "$TRACE_BIN/"
+rm "$TRACE_BIN/fm-home-summary-refresh.sh" "$TRACE_BIN/fm-fleet-snapshot.sh"
+cp "$WRITER" "$TRACE_BIN/refresh-real"
+cat > "$TRACE_BIN/fm-home-summary-refresh.sh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in --_*) exec "${0%/*}/refresh-real" "$@" ;; esac
+"${0%/*}/refresh-real" "$@"
+rc=$?
+printf '%s\n' "$rc" >> "$FM_TEST_SUMMARY_TRACE/completions"
+exit "$rc"
+SH
+cat > "$TRACE_BIN/fm-fleet-snapshot.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" >> "$FM_TEST_SUMMARY_TRACE/collectors"
+if [ -e "$FM_TEST_SUMMARY_TRACE/fail-next" ]; then
+  rm "$FM_TEST_SUMMARY_TRACE/fail-next"
+  printf 'injected collection failure\n' >&2
+  exit 42
+fi
+exec "$FM_TEST_REAL_SNAPSHOT" "$@"
+SH
+chmod +x "$TRACE_BIN/fm-home-summary-refresh.sh" "$TRACE_BIN/fm-fleet-snapshot.sh"
+TRACE_ENV=(
+  "PATH=$FAKEBIN:$PATH" "FM_ROOT_OVERRIDE=$ROOT" "FM_HOME=$HOME_DIR"
+  "FM_BACKEND=tmux" "FM_TEST_SUMMARY_TRACE=$TRACE" "FM_TEST_REAL_SNAPSHOT=$SNAPSHOT"
+  "FM_HOME_SUMMARY_INTERVAL=300" "FM_SNAPSHOT_NOW=$NOW_TWO" "FM_SNAPSHOT_NOW_EPOCH=$EPOCH_TWO"
+  "FM_POLL=1" "FM_SIGNAL_GRACE=0" "FM_CHECK_INTERVAL=9999999" "FM_HEARTBEAT=9999999"
+  "FM_WATCH_HANDLING_SUCCESSOR=1"
+)
+: > "$TRACE/completions"
+: > "$TRACE/collectors"
+trace_count() { wc -l < "$TRACE/$1"; }
+wait_for_completions() {
+  local expected=$1 i
+  for ((i=0; i<300; i++)); do
+    [ "$(trace_count completions)" -ge "$expected" ] && return 0
+    sleep 0.1
+  done
+  fail "expected $expected refresh completions, got $(trace_count completions)"
+}
+
+cp "$SUMMARY" "$TRACE/original.json"
+for wave in 1 2 3; do
+  printf 'needs-decision [key=fixture-%s]: waiting on fixture %s\n' "$wave" "$wave" \
+    >> "$HOME_DIR/state/ledger-task.status"
+  env "${TRACE_ENV[@]}" "$TRACE_BIN/fm-watch.sh" > "$TRACE/watch.out" 2> "$TRACE/watch.err" &
+  WATCH_PID=$!
+  wait_for_completions "$wave"
+  wait "$WATCH_PID" || fail "status watcher failed: $(cat "$TRACE/watch.err")"
+  WATCH_PID=
+  grep -F 'signal:' "$TRACE/watch.out" >/dev/null || fail "watcher missed status wave $wave"
 done
-[ -e "$HOME_DIR/state/.last-watcher-beat" ] \
-  || fail "the real watcher did not begin polling: $(cat "$TMP_ROOT/watch.err" 2>/dev/null)"
-printf 'blocked [key=fixture-dependency]: waiting for the fixture dependency\n' \
-  >> "$HOME_DIR/state/ledger-task.status"
+[ "$(trace_count collectors)" -eq 0 ] || fail "fresh ledger triggered $(trace_count collectors) collectors"
+cmp -s "$TRACE/original.json" "$SUMMARY" || fail "a fresh ledger was replaced during the burst"
+pass "watcher status bursts leave a fresh ledger alone"
+
+# Age the published file without changing its contents so the very next poll
+# is due. A failed attempt must leave that same ledger due for recovery.
+touch -t 200101010000 "$SUMMARY"
+: > "$TRACE/fail-next"
+env "${TRACE_ENV[@]}" FM_HOME_SUMMARY_IF_IDLE=1 \
+  "$TRACE_BIN/fm-home-summary-refresh.sh" --best-effort \
+  || fail "a due producer failure changed the best-effort result"
+[ "$(trace_count collectors)" -eq 1 ] || fail "the failed producer did not run exactly once"
+cmp -s "$TRACE/original.json" "$SUMMARY" || fail "a failed refresh changed the last complete ledger"
+grep -F 'injected collection failure' "$HOME_DIR/state/.home-summary-refresh.log" >/dev/null \
+  || fail "the due producer failure was not logged"
+
+env "${TRACE_ENV[@]}" "$TRACE_BIN/fm-watch.sh" > "$TRACE/idle.out" 2> "$TRACE/idle.err" &
+WATCH_PID=$!
 wait_for_ledger_generation "$NOW_TWO" \
-  || fail "a status append did not refresh the ledger within the watcher cadence"
+  || fail "an idle watcher did not retry the failed publication: $(cat "$TRACE/idle.err")"
+kill "$WATCH_PID" >/dev/null 2>&1 || true
 wait "$WATCH_PID" >/dev/null 2>&1 || true
 WATCH_PID=
-
-run_producer "$NOW_TWO" "$EPOCH_TWO" > "$TMP_ROOT/fresh-summary.json" \
+[ "$(trace_count collectors)" -eq 2 ] || fail "the due idle retry did not collect exactly once"
+jq -e '[.decisions_open[].key] | sort == ["fixture-1", "fixture-2", "fixture-3"]' "$SUMMARY" >/dev/null \
+  || fail "the due publication did not include every decision from the burst"
+run_producer "$NOW_TWO" "$EPOCH_TWO" > "$TRACE/expected.json" \
   || fail "fresh secondmate-home-summary production failed"
-jq -S 'del(.generated, .generated_epoch)' "$HOME_DIR/state/home-summary.json" \
-  > "$TMP_ROOT/published-normalized.json"
-jq -S 'del(.generated, .generated_epoch)' "$TMP_ROOT/fresh-summary.json" \
-  > "$TMP_ROOT/fresh-normalized.json"
-cmp -s "$TMP_ROOT/published-normalized.json" "$TMP_ROOT/fresh-normalized.json" \
-  || fail "the status-triggered ledger differed from the real fresh producer"
-pass "watcher-carried status append publishes the real home summary"
+jq -S . "$SUMMARY" > "$TRACE/published-normalized.json"
+jq -S . "$TRACE/expected.json" > "$TRACE/expected-normalized.json"
+cmp -s "$TRACE/published-normalized.json" "$TRACE/expected-normalized.json" \
+  || fail "the due ledger differed from the real fresh producer"
+pass "the next due idle poll retries failure and publishes all status changes in one collection"
+
+env "${TRACE_ENV[@]}" FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
+  "$TRACE_BIN/fm-home-summary-refresh.sh" --best-effort \
+  || fail "the explicit best-effort refresh failed"
+[ "$(trace_count collectors)" -eq 3 ] || fail "the explicit refresh was suppressed by freshness"
+wait_for_ledger_generation "$NOW_THREE" || fail "the explicit refresh did not publish"
+pass "an explicit best-effort request refreshes a fresh ledger"
+
+rm "$SUMMARY"
+refresh_pids=()
+for wave in 1 2 3; do
+  env "${TRACE_ENV[@]}" FM_HOME_SUMMARY_IF_IDLE=1 \
+    "$TRACE_BIN/fm-home-summary-refresh.sh" --best-effort &
+  refresh_pids+=("$!")
+done
+for pid in "${refresh_pids[@]}"; do
+  wait "$pid" || fail "an implicit refresh failed during concurrent publication"
+done
+[ "$(trace_count collectors)" -eq 4 ] || fail "concurrent first publication did not collect exactly once"
+wait_for_ledger_generation "$NOW_TWO" || fail "concurrent triggers did not publish the missing ledger"
+pass "concurrent implicit requests issue one collection for a missing ledger"
 
 # A structured in-flight inventory above Linux MAX_ARG_STRLEN must remain
 # publishable through every fleet snapshot mode and the real home-summary writer.

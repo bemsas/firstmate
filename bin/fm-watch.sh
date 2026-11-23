@@ -4319,7 +4319,10 @@ while :; do
     FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-rex-marks.sh" sync >/dev/null 2>&1 || true
   fi
 
-  if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
+  # Avoid launching a helper on every poll. The writer checks freshness again
+  # under its lock for this request and for the status-triggered request below.
+  if [ ! -e "$STATE/home-summary.json" ] \
+    || [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
   fi
   # Opt-in lane capacity facts: off costs one file test.
@@ -4680,11 +4683,9 @@ EOF
     sleep "$SIGNAL_GRACE"
     reconcile_overdue_pauses
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
-    # The final coalesced signal set is the watcher-carried status-change
-    # trigger for this home's published summary. Start it before either
-    # surfacing or absorbing the signal, but never wait on it: see
-    # home_summary_refresh_detached for why publication stays off the beacon's
-    # path. Publication failure stays side-band.
+    # Request publication before surfacing or absorbing the signal. If the
+    # ledger is still fresh or the writer is busy, the periodic poll will
+    # refresh once due. Publication remains detached from the liveness beacon.
     home_summary_refresh_detached
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
