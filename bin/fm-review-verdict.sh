@@ -42,7 +42,7 @@ if [ "${1:-}" = passing ]; then
          and (.reviewer | type == "string") and (.verdict == "merge" or .verdict == "fix")
       then . else error("invalid verdict receipt") end;
     [split("\n")[] | select(length > 0) | fromjson | receipt
-     | select(.pr == $pr and .head == $head and (has("refute") | not))]
+     | select(.pr == $pr and .head == $head and (.verdict == "fix" or (has("refute") | not)))]
     | last | .verdict == "merge"
   ' "$FILE" >/dev/null 2>&1
 fi

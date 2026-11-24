@@ -206,6 +206,7 @@ def git_env():
     return {
         "PATH": os.environ["PATH"], "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": os.devnull, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1",
+        "GIT_TERMINAL_PROMPT": "0",
     }
 
 
@@ -216,8 +217,35 @@ def git(identity, *args, check=True):
     )
 
 
-def commit(identity, sha):
-    require(git(identity, "cat-file", "-t", sha).stdout == b"commit\n", f"{sha} is not a commit")
+def has_commit(source, sha):
+    return git(source, "cat-file", "-t", sha, check=False).stdout == b"commit\n"
+
+
+def inspection_repository(identity, policy):
+    pins = (identity["base"], identity["head"])
+    for location in (identity["worktree"], identity["project"]):
+        source = {**identity, "worktree": location}
+        if all(has_commit(source, sha) for sha in pins):
+            return source
+
+    # Pipeline clones can push before the worker receives their commits. Use
+    # a supervisor-owned bare repository and the validated GitHub identity,
+    # never a URL or fetch configuration taken from the worker's checkout.
+    cache = STATE / f"{identity['task']}.acceptance-git"
+    cache.mkdir(mode=0o700, exist_ok=True)
+    info = cache.lstat()
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077,
+            "acceptance Git directory is not private")
+    source = {**identity, "worktree": str(cache)}
+    if not (cache / "HEAD").is_file():
+        git(source, "init", "--bare", "--template=")
+    if not all(has_commit(source, sha) for sha in pins):
+        remote = f"https://github.com/{policy['repo']}.git"
+        fetched = git(source, "-c", "http.followRedirects=false", "fetch", "--no-tags",
+                      "--no-recurse-submodules", "--no-write-fetch-head", remote, *pins, check=False)
+        require(fetched.returncode == 0, "could not fetch pinned commits from the candidate GitHub repository")
+    require(all(has_commit(source, sha) for sha in pins), "fetched objects do not contain both pinned commits")
+    return source
 
 
 def tree(identity, sha):
@@ -231,7 +259,7 @@ def tree(identity, sha):
 
 def changed_paths(identity):
     raw = git(identity, "diff", "--name-status", "-z", "--no-renames", "--no-ext-diff",
-              "--no-textconv", identity["base"], identity["head"], "--").stdout
+              "--no-textconv", "--ignore-submodules=none", identity["base"], identity["head"], "--").stdout
     fields = raw.split(b"\0")
     require(fields[-1] == b"" and len(fields) % 2 == 1, "Git returned incomplete path evidence")
     return [(os.fsdecode(fields[i]), os.fsdecode(fields[i + 1])) for i in range(0, len(fields) - 1, 2)]
@@ -428,6 +456,7 @@ def regression_check(identity, policy, before, after):
                 "base regression path has an incompatible parent")
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(test)
+        dest.chmod(0o755 if after[path][0] == "100755" else 0o644)
         base_exit = run(roots[0], fixture)
         if base_exit == 0:
             raise Refusal("regression already passes at the pinned base (exit 0)")
@@ -439,16 +468,15 @@ def regression_check(identity, policy, before, after):
 
 def inspect(identity, policy):
     forge_check(identity, policy)
-    commit(identity, identity["base"])
-    commit(identity, identity["head"])
-    require(git(identity, "merge-base", "--is-ancestor", identity["base"], identity["head"],
+    source = inspection_repository(identity, policy)
+    require(git(source, "merge-base", "--is-ancestor", identity["base"], identity["head"],
                 check=False).returncode == 0, "candidate is not based on the pinned commit")
-    changes = changed_paths(identity)
+    changes = changed_paths(source)
     require(changes, "candidate has no changes against the pinned base")
-    before, after = (tree(identity, identity[key]) for key in ("base", "head"))
-    tamper_check(identity, policy, before, after, changes)
-    regression = regression_check(identity, policy, before, after) if policy["kind"] == "bug" else None
-    return {"paths": changes, "regression": regression}
+    before, after = (tree(source, identity[key]) for key in ("base", "head"))
+    tamper_check(source, policy, before, after, changes)
+    regression = regression_check(source, policy, before, after) if policy["kind"] == "bug" else None
+    return {"paths": changes, "regression": regression}, source["worktree"]
 
 
 def evidence_matches(evidence, policy):
@@ -470,14 +498,14 @@ def prepare(identity, policy, reviewer):
     require(reviewer != identity["task"] and not os.path.lexists(STATE / f"{reviewer}.meta")
             and not os.path.lexists(STATE / f"{reviewer}.status"),
             "review requires a fresh scout ID")
-    checked = inspect(identity, policy)
+    checked, source = inspect(identity, policy)
     task, url, base, head = (identity[key] for key in ("task", "pr", "base", "head"))
     spec = f"""Try to refute completion of {task} using the approved criteria and these exact commits.
 PR {url}
 Base {base}
 Head {head}
 
-Inspect the two exact commits with `git -C {shlex.quote(identity["worktree"])} diff --no-ext-diff --no-textconv {base} {head} --`.
+Inspect the two exact commits with `git --no-replace-objects -C {shlex.quote(source)} diff --no-ext-diff --no-textconv --ignore-submodules=none {base} {head} --`.
 Keep the project read-only and use only this review brief and committed source.
 Record a criterion, file and line, and a reproducing case for each blocker in the scout report.
 If the evidence is unavailable, report blocked.
@@ -598,14 +626,15 @@ def main():
     require(action in ("accept", "passing", "assert", "review-brief") and args, "invalid acceptance request")
     url, *rest = args
     identity, policy = context(task, url)
-    if action == "review-brief" and len(rest) == 1 and matches(ID, rest[0]):
+    if action == "review-brief":
+        require(len(rest) == 1 and matches(ID, rest[0]), "review-brief requires a valid fresh scout ID")
         prepare(identity, policy, rest[0])
         return
     require(not rest or (action in ("assert", "passing") and rest == [identity["head"]]),
             "acceptance evidence does not name the requested head")
     receipt = STATE / f"{task}.accepted.json"
     if action == "accept":
-        checked = inspect(identity, policy)
+        checked, _ = inspect(identity, policy)
         review = passing_review(identity)
         require(context(task, url)[0] == identity, "candidate or policy changed during verification")
         forge_check(identity, policy)

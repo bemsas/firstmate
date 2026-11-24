@@ -316,7 +316,8 @@ check_review_verdict() {
   review_text=${EV_LINE#*" head $EV_SHA"}
   if [ -f "$STATE/review-verdicts.jsonl" ]; then
     verdict=$(jq -Rrs --arg pr "$EV_URL" --arg head "$EV_SHA" '
-      [split("\n")[] | fromjson? | select(.pr == $pr and .head == $head and (has("refute") | not))
+      [split("\n")[] | fromjson?
+       | select(.pr == $pr and .head == $head and (.verdict == "fix" or (has("refute") | not)))
        | select(.verdict == "merge" or .verdict == "fix")] | last | .verdict // ""' \
       "$STATE/review-verdicts.jsonl" 2>/dev/null) || verdict=''
   fi

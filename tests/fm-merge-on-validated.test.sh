@@ -663,6 +663,17 @@ test_review_verdict_gate() {
   append_status "$dir" "$(validated_line)"
   scan "$dir"
   assert_contains "$(log_of "$dir")" "would merge $URL $HEAD_A" "fresh validation after re-review should pass"
+
+  dir=$(make_case refute-fix-verdict)
+  jq -nc --arg pr "$URL" --arg head "$HEAD_A" \
+    '{pr:$pr,head:$head,verdict:"fix",reviewer:"scout",refute:{}}' >> "$dir/home/state/review-verdicts.jsonl"
+  jq -nc --arg pr "$URL" --arg head "$HEAD_A" \
+    '{pr:$pr,head:$head,verdict:"merge",reviewer:"scout",refute:{}}' >> "$dir/home/state/review-verdicts.jsonl"
+  prime "$dir"
+  append_status "$dir" "$(validated_line)"
+  scan "$dir"
+  assert_contains "$(log_of "$dir")" "second-model review says fix" "legacy merge must retain the refute blocker"
+  assert_not_contains "$(log_of "$dir")" "would merge " "a refute merge row is not ordinary approval"
   pass "second-model review is exact-head, exact-PR, latest-record, and fail-closed"
 }
 

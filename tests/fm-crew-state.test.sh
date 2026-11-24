@@ -2632,6 +2632,22 @@ test_ship_candidate_does_not_read_done() {
   assert_contains "$out" "source: run-step" "pipeline attribution was lost"
   assert_equals "$before" "$(cat "$d/state/candidate.meta")" "status read changed task metadata"
   [ ! -e "$d/state/candidate.accepted.json" ] || fail "status read persisted acceptance"
+
+  FM_FAKE_AXI_STATUS="$(run_passed_with_skips fm/candidate)"
+  FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS//https:\/\/github.com\/o\/r\/pull\/1/}
+  out=$(FM_HOME="$d" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: blocked" "a current PR candidate must count even when the run omits its PR"
+  printf 'done: implementation complete\n' > "$d/state/candidate.status"
+  out=$(FM_HOME="$d" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: done" "skipping publication leaves no PR to accept"
+  assert_contains "$out" "publication/CI verification skipped" "the run must retain its skip detail"
+
+  sed 's/^mode=no-mistakes$/mode=local-only/' "$d/state/candidate.meta" > "$d/local.meta"
+  mv "$d/local.meta" "$d/state/candidate.meta"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/candidate)"
+  out=$(FM_HOME="$d" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: done" "an attributed run must not subject a local-only ship to PR acceptance"
+  assert_contains "$out" "source: run-step" "the fixture should read the attributed run"
   pass "protected status reads keep both a worker done candidate and a pipeline pass unaccepted"
 }
 

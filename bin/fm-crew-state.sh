@@ -310,15 +310,22 @@ emit() {  # <state> <source> [detail]
 }
 
 emit_run() {  # <state> <detail> [pr]
-  local detail=$2 pr=${3:-${RUN_PR:-}}
-  if [ "$1" = "done" ] && [ "$KIND" = ship ] &&
-    fm_dod_acceptance_required "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$ID" "$pr"; then
-    if ! { [ "$(status_line_verb "$LOG_LINE")" = "done" ] &&
-      fm_dod_candidate_fields "$(status_line_note "$LOG_LINE")" &&
-      { [ -z "$pr" ] || [ "$pr" = "$FM_DOD_CANDIDATE_URL" ]; } &&
-      fm_dod_should_gate_ship_done "$KIND" "$(meta_value mode)" "$LOG_LINE" &&
-      fm_dod_accept_ship_done "$KIND" "$(meta_value mode)" "$WT" "$(meta_value project)" \
-        "$LOG_LINE" "$STATE" "$ID" "$META" >/dev/null; }; then
+  local detail=$2 pr=${3:-${RUN_PR:-}} mode candidate=''
+  if [ "$1" = "done" ] && [ "$KIND" = ship ]; then
+    mode=$(meta_value mode)
+    if [ "$(status_line_verb "$LOG_LINE")" = "done" ]; then
+      candidate=$(fm_dod_pr_url_from_done_note "$(status_line_note "$LOG_LINE")") || candidate=
+    fi
+    # A terminal run can legitimately skip publication. A PR from either
+    # the run or the current worker report needs acceptance before delivery.
+    pr=${pr:-$candidate}
+    if [ "$mode" != local-only ] && [ -n "$pr" ] &&
+      fm_dod_acceptance_required "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$ID" "$pr" &&
+      ! { [ "$pr" = "$candidate" ] &&
+        fm_dod_candidate_fields "$(status_line_note "$LOG_LINE")" &&
+        fm_dod_should_gate_ship_done "$KIND" "$mode" "$LOG_LINE" &&
+        fm_dod_accept_ship_done "$KIND" "$mode" "$WT" "$(meta_value project)" \
+          "$LOG_LINE" "$STATE" "$ID" "$META" >/dev/null; }; then
       emit blocked run-step "ship delivery awaits supervisor acceptance for its exact head"
     fi
   fi

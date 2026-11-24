@@ -589,7 +589,9 @@ accept_refused() {  # <reason> <command...>
 }
 
 accept_candidate() {
-  git -C "$A_REPO" add -A || fail "cannot stage candidate"
+  if [ "${1:-}" != staged ]; then
+    git -C "$A_REPO" add -A || fail "cannot stage candidate"
+  fi
   git -C "$A_REPO" commit -qm candidate || fail "cannot commit candidate"
   A_HEAD=$(git -C "$A_REPO" rev-parse HEAD)
   printf 'done [at=100]: PR %s head %s\n' "$A_URL" "$A_HEAD" > "$A_STATUS"
@@ -653,6 +655,14 @@ test_acceptance_tamper() {
   printf '## Files in scope\n- **\n' > "$A_HOME/data/$A_ID/brief.md"
   accept_candidate
   accept_refused "out-of-scope change" "$SCRIPT" review-brief "$A_ID" "$A_URL" policy
+
+  accept_reset
+  git -C "$A_REPO" add app.py || fail "cannot stage allowed edit"
+  git -C "$A_REPO" update-index --add --cacheinfo "160000,$A_BASE,vendor" || fail "cannot stage Git link"
+  accept_candidate staged
+  git -C "$A_REPO" config diff.ignoreSubmodules all
+  accept_refused "out-of-scope change: 'vendor'" "$SCRIPT" review-brief "$A_ID" "$A_URL" hidden-submodule
+  git -C "$A_REPO" config --unset diff.ignoreSubmodules
   pass "exact diff rejects test and assertion deletion, skips, tautologies, renames and worker scope edits"
 }
 
@@ -665,6 +675,7 @@ class Regression(unittest.TestCase):
     def test_value(self):
         self.assertEqual(app.value, $1)
 PY
+  chmod +x "$A_REPO/tests/test_regression.py"
   accept_regression_policy
 }
 
@@ -698,7 +709,7 @@ from pathlib import Path
 import sys
 import unittest
 
-if Path("/home").exists() or os.environ.get("FM_HOME"):
+if Path("/home").exists() or os.environ.get("FM_HOME") or not os.access(sys.argv[1], os.X_OK):
     sys.exit(13)
 sys.path.insert(0, os.getcwd())
 spec = importlib.util.spec_from_file_location("regression", sys.argv[1])
@@ -805,6 +816,7 @@ test_acceptance_entry_points() {
 
   result=$(accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL") || fail "exact-head acceptance failed"
   assert_equals "$A_HEAD" "$result" "acceptance wrote a different head"
+  accept_refused "valid fresh scout ID" "$SCRIPT" review-brief "$A_ID" "$A_URL"
   A_FORGE_UNREADABLE=1 accept_cmd "$SCRIPT" passing "$A_ID" "$A_URL" "$A_HEAD" >/dev/null ||
     fail "offline status read contacted the forge"
   A_FORGE_UNREADABLE=1 accept_refused "done acceptance" "$PR_CHECK" "$A_ID" "$A_URL"
@@ -825,6 +837,9 @@ test_acceptance_entry_points() {
   printf 'done: Refute %s %s fix\n' "$A_BASE" "$A_HEAD" > "$A_STATE/$scout.status"
   accept_cmd "$A_VERDICT" refute "$A_ID" "$scout" "$A_HEAD" || fail "could not record exact-head blocker"
   accept_refused "missing passing fresh-context review" "$PR_CHECK" "$A_ID" "$A_URL"
+  if accept_cmd "$A_VERDICT" passing "$A_URL" "$A_HEAD"; then
+    fail "a refute fix must block the legacy verdict reader"
+  fi
   printf 'value = 3\n' > "$A_REPO/app.py"
   accept_candidate
   accept_refused "accepted evidence no longer matches" "$PR_CHECK" "$A_ID" "$A_URL"
@@ -834,6 +849,47 @@ test_acceptance_entry_points() {
   pass "ordinary PR registration requires a current exact candidate, native independent review and explicit supervisor acceptance"
 }
 
+test_acceptance_inspects_pipeline_objects() {
+  local result real_git
+  accept_reset
+  accept_candidate
+  if git -C "$A/pool" cat-file -e "$A_HEAD" 2>/dev/null; then
+    fail "test must start with the pipeline head absent from the worker copy"
+  fi
+  sed "s|^worktree=.*|worktree=$A/pool|;s/^mode=.*/mode=no-mistakes/" "$A_META" > "$A/pipeline.meta"
+  mv "$A/pipeline.meta" "$A_META"
+  printf 'done: PR %s checks green head %s\n' "$A_URL" "$A_HEAD" > "$A_STATUS"
+  result=$(accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" project-scout 2>&1) ||
+    fail "could not read exact pipeline objects from the registered project: $result"
+  assert_grep " -C $A_REPO diff " "$result" "review should use the repository that has the pinned objects"
+
+  sed "s|^project=.*|project=$A/pool|" "$A_META" > "$A/pipeline.meta"
+  mv "$A/pipeline.meta" "$A_META"
+  real_git=$(command -v git)
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'real_git=%q\nsource_repo=%q\npinned_base=%q\npinned_head=%q\n' "$real_git" "$A_REPO" "$A_BASE" "$A_HEAD"
+    cat <<'STUB'
+if [ "${5:-}" = fetch ]; then
+  case "$2" in *.acceptance-git) ;; *) exit 24 ;; esac
+  [[ "$*" = *" https://github.com/acme/widget.git $pinned_base $pinned_head" ]] || exit 25
+  exec "$real_git" -C "$2" fetch --no-write-fetch-head "$source_repo" "$pinned_base" "$pinned_head"
+fi
+exec "$real_git" "$@"
+STUB
+  } > "$A_FAKE/git"
+  chmod +x "$A_FAKE/git"
+  result=$(accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" fetched-scout 2>&1) ||
+    fail "could not prepare review of fetched pipeline objects: $result"
+  assert_grep " -C $A_STATE/$A_ID.acceptance-git diff " "$result" "review should use the exact fetched objects"
+  if git -C "$A/pool" cat-file -e "$A_HEAD" 2>/dev/null; then
+    fail "fallback fetch wrote objects into the worker copy"
+  fi
+  rm "$A_FAKE/git"
+  pass "pipeline objects missing from the worker copy use the registered project or a private pinned forge fetch"
+}
+
 test_acceptance_tamper
 test_acceptance_regression
 test_acceptance_entry_points
+test_acceptance_inspects_pipeline_objects

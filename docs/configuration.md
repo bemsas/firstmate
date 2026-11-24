@@ -1175,12 +1175,15 @@ Linux bubblewrap is required for this check, with network isolation, read-only s
 It supports ordinary files and symlinks in the snapshot, with no submodule materialization or project environment activation.
 
 Use `bin/fm-done-check.sh review-brief <task> <pr-url> <fresh-scout-id>` to check the candidate and prepare the reviewer brief.
+If neither registered checkout contains both commits, the supervisor checks the exact objects in a private bare repository populated from the pinned GitHub repository.
+The fallback is noninteractive, so an inaccessible repository requires making both commits available in a registered checkout before retrying.
 Use the native `bin/fm-spawn.sh` scout path with a new ID and an explicit model from the other supported provider.
 The initial supported pairing is Codex GPT and Claude, with explicit model IDs recorded by dispatch.
 The reviewer receives the approved criteria and pinned commits and tries to refute completion.
 After reading the scout's report, the supervisor records its exact verdict with `bin/fm-review-verdict.sh refute <task> <scout> <reviewed-head>` and verifies with `bin/fm-done-check.sh accept <task> <pr-url>`.
 The acceptance record binds the task incarnation, policy, base, candidate, executed evidence and latest qualifying review.
 A new head, a change to the live base commit, a policy change or a new task incarnation requires fresh review and acceptance.
+If the target advances, approve and pin the new base, then publish and report an exact-head candidate that includes it before requesting fresh review and acceptance.
 Normal project capacity applies to the reviewer, so leave room for its scout while the candidate ship is still assigned.
 
 Homes with the directory absent use existing delivery checks.
