@@ -7713,7 +7713,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp claude_sandbox base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen refute_context approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential launch_context_bytes launch_context_source_bytes", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp claude_sandbox base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen builder_history refute_context approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential launch_context_bytes launch_context_source_bytes", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7760,6 +7760,15 @@ preserve_relaunch_meta() {
   [ "$HARNESS" != hermes ] || { echo "hermes_profile=$HERMES_PROFILE"; echo "hermes_home=$HERMES_PROFILE_HOME"; }
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+    previous_builders=
+    if [ "$RELAUNCH" -eq 1 ]; then
+      previous_builders=$(fm_backend_meta_exact_value "$RELAUNCH_META" builder_history) || previous_builders=unknown
+      [ -n "$previous_builders" ] || previous_builders=unknown
+    fi
+    printf 'builder_history=%s%s\n' "${previous_builders:+$previous_builders,}" \
+      "$(fm_dod_builder_entry "$SPAWN_GEN" "$HARNESS" "$MODEL" "$RAW_LAUNCH")"
+  fi
   [ -z "${SPAWN_REFUTE_CONTEXT:-}" ] || echo "refute_context=$SPAWN_REFUTE_CONTEXT"
   [ -z "${LAUNCH_CONTEXT_BYTES:-}" ] || echo "launch_context_bytes=$LAUNCH_CONTEXT_BYTES"
   [ -z "${LAUNCH_CONTEXT_SOURCE_BYTES:-}" ] || echo "launch_context_source_bytes=$LAUNCH_CONTEXT_SOURCE_BYTES"

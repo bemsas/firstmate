@@ -308,9 +308,9 @@ vision_blob() {  # <ref> -> blob sha, or "absent"; returns 1 when unreadable
 check_review_verdict() {
   local verdict='' files count review_text
   if fm_dod_acceptance_required "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$EV_TASK" "$EV_URL"; then
-    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    fm_run_timed "$GH_SECS" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-done-check.sh" assert "$EV_TASK" "$EV_URL" "$EV_SHA" >/dev/null 2>&1 ||
-      add_reason "missing current supervisor acceptance for this head"
+      add_retry "missing current supervisor acceptance for this head"
     return 0
   fi
   review_text=${EV_LINE#*" head $EV_SHA"}
@@ -394,8 +394,6 @@ check_live() {
   if [ "$(jqf 'any(.labels[]?; (.name // "") | test("security"; "i"))')" = true ]; then
     add_reason "marked security-sensitive on the pull request"
   fi
-  check_review_verdict
-
   if red=$(fm_pr_github_checks_not_green "$EV_JSON"); then
     nchecks=$(jqf '.statusCheckRollup | length')
     if [ "${nchecks:-0}" -eq 0 ]; then
@@ -499,6 +497,9 @@ evaluate() {  # <status-line>
     return 2
   elif [ "$find_rc" -eq 0 ]; then
     check_task
+    if [ "$(jqf '.baseRefName // ""')" = "$DEV_BASE" ] && [ "$EV_HEAD_CHANGED" -eq 0 ]; then
+      check_review_verdict
+    fi
   fi
   [ -z "$EV_REASON" ]
 }

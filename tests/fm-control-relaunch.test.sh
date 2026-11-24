@@ -849,14 +849,17 @@ test_relaunch_requires_a_note_for_a_ship_task() {
 # --- 2. harness switch -------------------------------------------------------
 
 test_harness_switch_moves_the_record_and_clears_prior_wiring() {
-  local dir out rc
+  local dir out rc meta
   dir=$(new_case switch rl4)
   add_ship_task "$dir" rl4 claude
+  meta="$dir/home/state/rl4.meta"
+  printf '%s\n' 'spawn_gen=s10.20.30' 'builder_history=s10.20.30:claude:claude-sonnet-4-6' \
+    'tern_tab_id=retired-endpoint' >> "$meta"
   # Wiring the previous claude incarnation left in the worktree.
   mkdir -p "$dir/wt/.claude"
   printf '{"hooks":{}}\n' > "$dir/wt/.claude/settings.local.json"
   printf 'codex' > "$dir/fake/becomes"
-  out=$(run_control "$dir" rl4 relaunch --harness codex --note "switching runtime"); rc=$?
+  out=$(run_control "$dir" rl4 relaunch --harness codex --model gpt-5.6-sol --note "switching runtime"); rc=$?
   expect_code 0 "$rc" "a harness switch should succeed"$'\n'"$out"
   assert_contains "$out" "harness=codex from=claude" "the outcome should name both harnesses"
   [ "$(meta_field "$dir" rl4 harness)" = codex ] || fail "the record should follow the switch"
@@ -865,6 +868,10 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   assert_grep "codex" "$dir/fake/literal" "the replacement launch should be the new harness"
   [ "$(journal_field "$dir" rl4 from_harness)" = claude ] || fail "the journal should record the origin harness"
   [ "$(journal_field "$dir" rl4 to_harness)" = codex ] || fail "the journal should record the target harness"
+  assert_equals "s10.20.30:claude:claude-sonnet-4-6,$(meta_field "$dir" rl4 spawn_gen):codex:gpt-5.6-sol" \
+    "$(meta_field "$dir" rl4 builder_history)" "harness switch must keep every builder identity"
+  assert_equals 1 "$(grep -c '^builder_history=' "$meta")" "relaunch duplicated builder lineage"
+  assert_no_grep 'tern_tab_id=' "$meta" "relaunch carried a retired backend's tab ID"
   pass "fm-control relaunch: switching harness is one ordinary relaunch, and the old wiring goes with the old agent"
 }
 

@@ -2626,6 +2626,19 @@ test_ship_candidate_does_not_read_done() {
   assert_contains "$out" "state: blocked" "a worker candidate did not establish acceptance"
   assert_contains "$out" "awaiting supervisor acceptance" "status did not explain the candidate hold"
 
+  printf 'done: PR https://github.com/o/r/pull/1\n' > "$d/state/candidate.status"
+  out=$(FM_HOME="$d" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: blocked" "a PR claim without a head or checks-green rider stays a candidate"
+  printf 'done: implementation complete\n' > "$d/state/candidate.status"
+  out=$(FM_HOME="$d" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: blocked" "a protected pre-validation handoff stays a candidate"
+  sed '/^mode=/d; /^kind=/d' "$d/state/candidate.meta" > "$d/legacy.meta"
+  mv "$d/legacy.meta" "$d/state/candidate.meta"
+  out=$(FM_HOME="$d" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: blocked" "missing legacy mode and kind must not authorize completion"
+  printf '%s\n' "$before" > "$d/state/candidate.meta"
+  printf 'done: PR https://github.com/o/r/pull/1 checks green head %s\n' "$head" > "$d/state/candidate.status"
+
   FM_FAKE_AXI_STATUS="$(run_passed fm/candidate)"
   out=$(FM_HOME="$d" run_crew_state "$d" candidate)
   assert_contains "$out" "state: blocked" "an attributed pipeline pass did not establish acceptance"

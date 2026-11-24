@@ -761,6 +761,23 @@ test_pending_ledger_done_is_delivered_after_worktree_removal() {
   pass "a pending ship done: is delivered by report after teardown removed the worktree"
 }
 
+test_pending_legacy_ship_candidate_waits_for_acceptance() {
+  make_world pending-unaccepted; bind_secondmate local
+  write_child "$MATE" child 'done: implementation complete'
+  cp "$MATE/.fm-secondmate-parent" "$WORLD/parent-binding"
+  printf 'schema=fm-secondmate-parent.v1\nroute=invalid\n' > "$MATE/.fm-secondmate-parent"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ "$(outcome_count "$MATE" pending)" = 1 ] || fail "legacy event did not leave a pending delivery"
+
+  mkdir "$MATE/config/done-acceptance"
+  cp "$WORLD/parent-binding" "$MATE/.fm-secondmate-parent"
+  run_report "$MATE" child || fail "reporting an unaccepted candidate should leave it pending"
+  [ "$(outcome_count "$MATE" reported)" = 0 ] || fail "legacy pending event bypassed acceptance"
+  [ "$(outcome_count "$MATE" pending)" = 1 ] || fail "unaccepted candidate disappeared from the ledger"
+  [ ! -s "$MAIN/state/mate.status" ] || fail "parent received an unaccepted candidate as done"
+  pass "pending legacy ship completion waits for acceptance before parent delivery"
+}
+
 # `report <child>` is the teardown-side delivery: it delivers or says nothing
 # is owed with 0, and returns non-zero only when the channel cannot be written.
 test_report_subcommand_delivers_and_refuses() {
@@ -1502,6 +1519,7 @@ test_secondmate_partial_ledger_line_waits_for_newline
 test_secondmate_remote_route_ledger_delivery
 test_report_subcommand_delivers_and_refuses
 test_pending_ledger_done_is_delivered_after_worktree_removal
+test_pending_legacy_ship_candidate_waits_for_acceptance
 test_report_avoids_scan_meta_lock_inversion
 test_local_secondmate_rejects_relative_parent_home
 test_invalid_secondmate_marker_blocks_routing

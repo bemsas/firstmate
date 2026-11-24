@@ -3,7 +3,6 @@
 
 import ast
 import base64
-from collections import Counter
 import hashlib
 import json
 import operator
@@ -17,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import quote
 
 BIN = Path(__file__).resolve().parent
 HOME_DIR = Path(os.environ["FM_HOME"])
@@ -126,7 +126,7 @@ def policy_for(task):
     data = private_bytes(POLICY_DIR / f"{task}.json")
     policy = decode(data)
     require(isinstance(policy, dict) and set(policy) <= {
-        "repo", "base_branch", "base", "kind", "allow", "tests", "criteria", "regression"
+        "repo", "base_branch", "base", "kind", "allow", "tests", "criteria", "regression", "new_tests"
     }, "invalid acceptance policy fields")
     require(matches(REPO, policy.get("repo")) and matches(SHA, policy.get("base"))
             and isinstance(policy.get("base_branch"), str) and policy["base_branch"]
@@ -138,6 +138,11 @@ def policy_for(task):
         require(isinstance(rules, list) and (field != "allow" or rules)
                 and all(relative(path, prefix=True) for path in rules),
                 f"invalid policy {field} paths")
+    new_tests = policy.get("new_tests", {})
+    require(isinstance(new_tests, dict) and all(
+        relative(path) and contains(path, policy["allow"]) and matches(SHA256, sha)
+        for path, sha in new_tests.items()
+    ), "new_tests must pin approved paths and SHA-256 values inside scope")
     if policy["kind"] == "bug":
         spec = policy.get("regression")
         require(isinstance(spec, dict) and set(spec) == {"path", "test_sha256", "runner_sha256"}
@@ -145,9 +150,35 @@ def policy_for(task):
                 and matches(SHA256, spec["runner_sha256"]),
                 "bug policy requires a pinned new regression test and runner")
         require(contains(spec["path"], policy["allow"]), "regression path is outside allowed scope")
+        require(new_tests.get(spec["path"], spec["test_sha256"]) == spec["test_sha256"],
+                "regression and new_tests pins disagree")
     else:
         require("regression" not in policy, "only a bug policy accepts a regression specification")
     return policy, digest(data)
+
+
+def builder_lineage(meta):
+    history = meta.get("builder_history", "").split(",")
+    builders = []
+    generations = set()
+    for entry in history:
+        parts = entry.split(":")
+        require(len(parts) == 3, "builder lineage is missing or incomplete")
+        generation, harness, model = parts
+        require(matches(r"s[0-9]+\.[0-9]+\.[0-9]+", generation) and generation not in generations
+                and harness in MODEL and matches(MODEL[harness], model),
+                "builder lineage has an unknown identity or ambiguous generation")
+        generations.add(generation)
+        builders.append({"generation": generation, "harness": harness, "model": model})
+    current = {key: meta.get(key) for key in ("harness", "model")}
+    require(builders[-1] == {**current, "generation": meta["spawn_gen"]},
+            "builder lineage does not match the current native dispatch")
+    return builders
+
+
+def independent_model(identity, harness, model):
+    return (harness in MODEL and matches(MODEL[harness], model)
+            and all(harness != builder["harness"] for builder in identity["builders"]))
 
 
 def context(task, url):
@@ -161,10 +192,7 @@ def context(task, url):
             and meta.get("worktree")
             and meta.get("base_branch", policy["base_branch"]) == policy["base_branch"],
             "task lacks matching native ship identity; recover its metadata before acceptance")
-    model = meta.get("model")
-    harness = meta.get("harness")
-    require(harness in MODEL and matches(MODEL[harness], model),
-            "native ship must record an explicit Codex or Claude model ID")
+    builders = builder_lineage(meta)
     event = done_note(task)
     submission = re.fullmatch(rf"PR {re.escape(url)}( checks green)? head ({SHA})(?: proof=\S+)?", event)
     require(submission and bool(submission[1]) == (meta["mode"] == "no-mistakes"),
@@ -174,32 +202,38 @@ def context(task, url):
         "worktree": meta["worktree"], "project": meta.get("project"),
         "candidate": event, "pr": url, "head": submission[2],
         "base": policy["base"], "base_branch": policy["base_branch"], "policy": policy_digest,
-        "builder": {"harness": harness, "model": model},
+        "builders": builders,
     }
     return identity, policy
 
 
-def forge_check(identity, policy):
-    parsed = re.fullmatch(URL, identity["pr"])
+def github_facts(path, projection):
     # gh-axi renders scalar jq results in an envelope. Base64 makes the fixed
     # projection independent of the renderer's quoting and forge-supplied prose.
-    projection = ("[.html_url,.base.repo.full_name,.base.ref,.base.sha,"
-                  ".head.repo.full_name,.head.ref,.head.sha,.state,.draft] | @json | @base64")
     result = subprocess.check_output(
-        ["gh-axi", "api", f"/repos/{parsed[1]}/pulls/{parsed[2]}",
-         "--hostname", "github.com", "--jq", projection], timeout=10, text=True
+        ["gh-axi", "api", path, "--hostname", "github.com", "--jq", projection + " | @json | @base64"],
+        timeout=10, text=True
     )
     envelope = re.fullmatch(r"api_response:\n  body: ([A-Za-z0-9+/=]+)\n  truncated: false\s*", result)
-    require(envelope, "GitHub PR facts are unreadable")
-    facts = decode(base64.b64decode(envelope[1], validate=True))
-    require(isinstance(facts, list) and len(facts) == 9, "GitHub PR facts are incomplete")
-    url, repo, branch, base, fork, source, head, state, draft = facts
+    require(envelope, "GitHub facts are unreadable")
+    return decode(base64.b64decode(envelope[1], validate=True))
+
+
+def forge_check(identity, policy):
+    parsed = re.fullmatch(URL, identity["pr"])
+    facts = github_facts(
+        f"/repos/{parsed[1]}/pulls/{parsed[2]}",
+        "[.html_url,.base.repo.full_name,.base.ref,.head.repo.full_name,.head.ref,.head.sha,.state,.draft]",
+    )
+    require(isinstance(facts, list) and len(facts) == 8, "GitHub PR facts are incomplete")
+    url, repo, branch, fork, source, head, state, draft = facts
     require(url == identity["pr"] and repo == policy["repo"] and fork == policy["repo"]
             and branch == identity["base_branch"] and source == identity["branch"],
             "GitHub repository, task branch or target branch does not match the pinned candidate")
-    require(base == identity["base"] and head == identity["head"],
-            "live GitHub base or head differs from the pinned candidate")
+    require(head == identity["head"], "live GitHub head differs from the pinned candidate")
     require(state == "open" and draft is False, "candidate PR must be open and ready for review")
+    target = github_facts(f"/repos/{repo}/branches/{quote(branch, safe='')}", "[.name,.commit.sha]")
+    require(target == [branch, identity["base"]], "live GitHub target branch differs from the pinned base")
 
 
 def git_env():
@@ -223,14 +257,9 @@ def has_commit(source, sha):
 
 def inspection_repository(identity, policy):
     pins = (identity["base"], identity["head"])
-    for location in (identity["worktree"], identity["project"]):
-        source = {**identity, "worktree": location}
-        if all(has_commit(source, sha) for sha in pins):
-            return source
-
-    # Pipeline clones can push before the worker receives their commits. Use
-    # a supervisor-owned bare repository and the validated GitHub identity,
-    # never a URL or fetch configuration taken from the worker's checkout.
+    # The trust root is the supervisor's bare store populated through the
+    # validated forge identity. Never read objects or configuration from the
+    # worker's repository, even if it claims to have both object IDs.
     cache = STATE / f"{identity['task']}.acceptance-git"
     cache.mkdir(mode=0o700, exist_ok=True)
     info = cache.lstat()
@@ -241,8 +270,10 @@ def inspection_repository(identity, policy):
         git(source, "init", "--bare", "--template=")
     if not all(has_commit(source, sha) for sha in pins):
         remote = f"https://github.com/{policy['repo']}.git"
-        fetched = git(source, "-c", "http.followRedirects=false", "fetch", "--no-tags",
-                      "--no-recurse-submodules", "--no-write-fetch-head", remote, *pins, check=False)
+        refspecs = [f"{sha}:refs/firstmate/acceptance/{sha}" for sha in pins]
+        fetched = git(source, "-c", "http.followRedirects=false", "-c", "fetch.fsckObjects=true",
+                      "fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
+                      remote, *refspecs, check=False)
         require(fetched.returncode == 0, "could not fetch pinned commits from the candidate GitHub repository")
     require(all(has_commit(source, sha) for sha in pins), "fetched objects do not contain both pinned commits")
     return source
@@ -257,17 +288,16 @@ def tree(identity, sha):
     return entries
 
 
-def changed_paths(identity):
-    raw = git(identity, "diff", "--name-status", "-z", "--no-renames", "--no-ext-diff",
-              "--no-textconv", "--ignore-submodules=none", identity["base"], identity["head"], "--").stdout
-    fields = raw.split(b"\0")
-    require(fields[-1] == b"" and len(fields) % 2 == 1, "Git returned incomplete path evidence")
-    return [(os.fsdecode(fields[i]), os.fsdecode(fields[i + 1])) for i in range(0, len(fields) - 1, 2)]
+def changed_paths(before, after):
+    return [
+        ("A" if path not in before else "D" if path not in after else "M", path)
+        for path in sorted(before.keys() | after.keys()) if before.get(path) != after.get(path)
+    ]
 
 
 def test_path(path, policy):
     return (contains(path, policy["tests"])
-            or bool(re.search(r"(?:^|/)(?:tests?|specs?)/|(?:^|/)test_[^/]+|[._-](?:test|spec)\.[^/]+$", path)))
+            or bool(re.search(r"(?:^|/)(?:tests?|specs?|__tests__)/|(?:^|/)test_[^/]+|[._-](?:test|spec)\.[^/]+$", path)))
 
 
 def blob(identity, entries, path):
@@ -287,10 +317,14 @@ def dotted(node):
 def trivial(node):
     if isinstance(node, ast.Constant):
         return bool(node.value)
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return bool(node.elts)
+    if isinstance(node, ast.Dict):
+        return bool(node.keys)
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not) and isinstance(node.operand, ast.Constant):
         return not node.operand.value
-    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
-        return any(isinstance(term, ast.Constant) and term.value for term in node.values)
+    if isinstance(node, ast.BoolOp):
+        return (any if isinstance(node.op, ast.Or) else all)(trivial(term) for term in node.values)
     if isinstance(node, ast.Compare) and len(node.ops) == 1:
         left, right = node.left, node.comparators[0]
         op = type(node.ops[0])
@@ -311,70 +345,89 @@ def trivial(node):
 
 def python_signals(data, path):
     tree_ast = ast.parse(data, filename=path)
-    tests, assertions, skips, tautologies = [], [], [], []
+    markers = {"skip", "skipif", "SkipTest", "skipIf", "skipUnless", "skipTest",
+               "xfail", "expectedFailure", "importorskip"}
     for node in ast.walk(tree_ast):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
-            tests.append(node.name)
-        if isinstance(node, ast.Assert):
-            assertions.append(ast.dump(node.test))
-            if trivial(node.test):
-                tautologies.append(ast.dump(node.test))
-        if isinstance(node, (ast.With, ast.AsyncWith)):
-            for item in node.items:
-                if isinstance(item.context_expr, ast.Call) and dotted(item.context_expr.func) == "pytest.raises":
-                    assertions.append(ast.dump(item.context_expr))
+            if any(isinstance(part, ast.Return) for part in ast.walk(node)):
+                return "added early-return marker"
+        if ((isinstance(node, ast.Name) and node.id == "__test__")
+                or (isinstance(node, ast.Attribute) and node.attr == "__test__")):
+            return "added collection override"
+        if isinstance(node, ast.Assert) and trivial(node.test):
+            return "added trivial assertion"
+        if isinstance(node, ast.Attribute) and node.attr in markers:
+            return "added skip"
         if isinstance(node, ast.Call):
-            name = dotted(node.func)
-            method = name.rsplit(".", 1)[-1]
-            if re.fullmatch(r"assert[A-Z]\w*", method):
-                assertions.append(ast.dump(node))
-                if ((method == "assertTrue" and node.args and trivial(node.args[0]))
-                        or (method == "assertEqual" and len(node.args) >= 2
-                            and trivial(ast.Compare(node.args[0], [ast.Eq()], [node.args[1]])))):
-                    tautologies.append(ast.dump(node))
-            if method in ("skip", "skipIf", "skipUnless", "skipTest", "xfail", "expectedFailure"):
-                skips.append(name)
-        if isinstance(node, ast.Attribute) and (
-                dotted(node).startswith("pytest.mark.") or dotted(node).startswith("unittest.")):
-            if node.attr in ("skip", "skipif", "xfail", "skipIf", "skipUnless", "expectedFailure"):
-                skips.append(dotted(node))
-    return tests, assertions, skips, tautologies
+            method = dotted(node.func).rsplit(".", 1)[-1]
+            if method in markers:
+                return "added skip"
+            if method == "assertTrue" and node.args and trivial(node.args[0]):
+                return "added trivial assertion"
+            if method == "assertEqual" and len(node.args) >= 2 and trivial(
+                    ast.Compare(node.args[0], [ast.Eq()], [node.args[1]])):
+                return "added trivial assertion"
+            if method in ("assertIsNotNone", "assertIn") and node.args:
+                try:
+                    first = ast.literal_eval(node.args[0])
+                    passes = first is not None if method == "assertIsNotNone" else (
+                        len(node.args) >= 2 and first in ast.literal_eval(node.args[1])
+                    )
+                except (ValueError, TypeError, SyntaxError):
+                    passes = False
+                if passes:
+                    return "added trivial assertion"
+    return None
 
 
-def shell_signals(data):
-    all_lines = [line.strip() for line in data.decode().splitlines()]
-    lines = [line for line in all_lines if not line.startswith("#")]
-    tests = [line for line in lines if re.match(r"(?:function\s+)?test_[\w-]+\s*\(\)", line)]
-    assertions = [line for line in lines if re.search(
-        r"(?:^|[;&|]\s*|\bthen\s+)(?:assert[\w-]*\b|expect[\w-]*\b|"
-        r"\[\[?\s|test\s|fail\b|not_ok\b)", line)]
-    skips = [line for line in lines if re.search(
-        r"(?:^|[;&|]\s*)(?:skip[\w-]*\b|exit\s+77\b)|#\s*SKIP\b", line, re.I)]
-    skips.extend(line for line in all_lines if re.match(r"#\s*SKIP\b", line, re.I))
-    tautologies = [line for line in lines if re.match(
-        r"(?:assert(?:_true)?\s+(?:true|1)|(?:test\s|\[\[?\s)(?:1\s*=\s*1|true))\s*(?:$|[;\]])", line)]
-    return tests, assertions, skips, tautologies
+def shell_signals(data, _path):
+    for line in data.decode().splitlines():
+        line = line.strip()
+        if re.search(r"#\s*SKIP\b", line, re.I):
+            return "added skip"
+        if line.startswith("#"):
+            continue
+        for part in re.split(r"[;&|]+\s*", line):
+            if re.match(r"(?:skip[\w-]*\b|exit\s+77\b)", part):
+                return "added skip"
+            if re.match(r"exit(?:\s+0)?\s*$", part):
+                return "added early-exit marker"
+            if re.match(r"(?:assert(?:_true)?\s+(?:true|1)|test\s+true)(?:\s|$)", part):
+                return "added trivial assertion"
+            if re.match(r"(?:test\s+|\[\[?\s+)([\w.-]+)\s+(?:=|==|-eq)\s+\1(?:\s|$)", part):
+                return "added trivial assertion"
+            if re.match(r"assert_(?:equals|eq)\s+([\w.-]+)\s+\1(?:\s|$)", part):
+                return "added trivial assertion"
+    return None
 
 
-def tamper_check(identity, policy, before, after, paths):
+def js_signals(data, _path):
+    text = data.decode()
+    if re.search(r"\b(?:describe|it|test)\s*\.\s*(?:skip|todo)\b|\b(?:xdescribe|xit|xtest)\s*\(", text):
+        return "added skip"
+    if re.search(r"\bexpect\(\s*(true|false|[0-9]+)\s*\)\s*\.\s*to(?:Be|Equal)\(\s*\1\s*\)", text):
+        return "added trivial assertion"
+    return None
+
+
+def tamper_check(identity, policy, after, paths):
+    approved = dict(policy.get("new_tests", {}))
+    if "regression" in policy:
+        regression = policy["regression"]
+        approved[regression["path"]] = regression["test_sha256"]
     for change, path in paths:
         require(relative(path) and contains(path, policy["allow"]), f"out-of-scope change: {path!r}")
-        if not test_path(path, policy):
+        if path not in approved and not test_path(path, policy):
             continue
-        require(change != "D", f"deleted or renamed test path: {path!r}")
+        require(change == "A", f"existing test entry changed: {path!r}")
         new = blob(identity, after, path)
-        old = blob(identity, before, path) if path in before else b""
-        detector = {".py": python_signals, ".sh": lambda data, _: shell_signals(data)}.get(
-            PurePosixPath(path).suffix
-        )
-        if detector is None:
-            # Other formats still receive the path/delete checks and refute review.
-            continue
-        previous = tuple(map(Counter, detector(old, path)))
-        candidate = tuple(map(Counter, detector(new, path)))
-        for i, reason in enumerate(("removed test", "removed assertion", "added skip", "added trivial assertion")):
-            difference = previous[i] - candidate[i] if i < 2 else candidate[i] - previous[i]
-            require(not difference, f"{reason}: {path!r}")
+        suffix = PurePosixPath(path).suffix
+        detector = {".py": python_signals, ".sh": shell_signals}.get(suffix)
+        if re.fullmatch(r"\.[cm]?[jt]sx?", suffix):
+            detector = js_signals
+        signal = detector(new, path) if detector else None
+        require(signal is None, f"{signal}: {path!r}")
+        require(digest(new) == approved.get(path), f"new test has no matching supervisor byte pin: {path!r}")
 
 
 def materialize(entries, root, blocks):
@@ -416,8 +469,18 @@ def regression_check(identity, policy, before, after):
             elif location.is_dir():
                 args.extend(("--ro-bind", str(location), str(location)))
         return subprocess.run([*args, "--", "/regression", path], stdin=subprocess.DEVNULL,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                              env=git_env(), timeout=120).returncode
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              env=git_env(), timeout=120)
+
+    def execution(result, label, expected):
+        try:
+            evidence = decode(result.stdout)
+        except (ValueError, UnicodeError):
+            raise Refusal(f"{label} regression did not report test execution evidence") from None
+        require(isinstance(evidence, dict) and type(evidence.get("tests_run")) is int
+                and evidence == {"test": path, "tests_run": 1, "result": expected},
+                f"{label} regression did not prove the expected test execution")
+        return evidence
 
     # Use one batch reader so extracting a tree is not one Git process per blob.
     with tempfile.TemporaryDirectory(prefix="fm-regression-", dir="/var/tmp") as scratch:
@@ -457,13 +520,16 @@ def regression_check(identity, policy, before, after):
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(test)
         dest.chmod(0o755 if after[path][0] == "100755" else 0o644)
-        base_exit = run(roots[0], fixture)
-        if base_exit == 0:
+        base = run(roots[0], fixture)
+        if base.returncode == 0:
             raise Refusal("regression already passes at the pinned base (exit 0)")
-        require(base_exit == 10, f"base regression did not reach the expected failure (exit {base_exit})")
-        head_exit = run(roots[1], fixture)
-        require(head_exit == 0, f"head regression did not pass (exit {head_exit})")
-    return {**spec, "base_exit": base_exit, "head_exit": head_exit}
+        require(base.returncode == 10, f"base regression did not reach the expected failure (exit {base.returncode})")
+        base_proof = execution(base, "base", "expected-failure")
+        head = run(roots[1], fixture)
+        require(head.returncode == 0, f"head regression did not pass (exit {head.returncode})")
+        head_proof = execution(head, "head", "pass")
+    return {**spec, "base_exit": base.returncode, "head_exit": head.returncode,
+            "base_execution": base_proof, "head_execution": head_proof}
 
 
 def inspect(identity, policy):
@@ -471,10 +537,10 @@ def inspect(identity, policy):
     source = inspection_repository(identity, policy)
     require(git(source, "merge-base", "--is-ancestor", identity["base"], identity["head"],
                 check=False).returncode == 0, "candidate is not based on the pinned commit")
-    changes = changed_paths(source)
-    require(changes, "candidate has no changes against the pinned base")
     before, after = (tree(source, identity[key]) for key in ("base", "head"))
-    tamper_check(source, policy, before, after, changes)
+    changes = changed_paths(before, after)
+    require(changes, "candidate has no changes against the pinned base")
+    tamper_check(source, policy, after, changes)
     regression = regression_check(source, policy, before, after) if policy["kind"] == "bug" else None
     return {"paths": changes, "regression": regression}, source["worktree"]
 
@@ -487,7 +553,12 @@ def evidence_matches(evidence, policy):
     regression = evidence["regression"]
     if policy["kind"] == "feature":
         return regression is None
-    return regression == {**policy["regression"], "base_exit": 10, "head_exit": 0}
+    path = policy["regression"]["path"]
+    return regression == {
+        **policy["regression"], "base_exit": 10, "head_exit": 0,
+        "base_execution": {"test": path, "tests_run": 1, "result": "expected-failure"},
+        "head_execution": {"test": path, "tests_run": 1, "result": "pass"},
+    }
 
 
 def ticket_for(reviewer):
@@ -540,15 +611,15 @@ def spawn_review(reviewer, kind, relaunch, harness, model, project, brief):
     record = private_bytes(ticket_for(reviewer))
     ticket = decode(record)
     ship = ticket["candidate"]
-    builder = ship["builder"]
     require(kind == "scout" and relaunch == "0" and ticket["reviewer"] == reviewer,
             "refute dispatch requires a fresh native scout ID")
-    require(harness in MODEL and matches(MODEL[harness], model) and harness != builder["harness"],
-            "reviewer must dispatch with an explicit model from the other supported provider")
+    require(independent_model(ship, harness, model),
+            "reviewer must dispatch with an explicit provider absent from the builder lineage")
     require(project == ship["project"] and digest(private_bytes(Path(brief))) == ticket["brief"],
             "refute dispatch project or brief does not match its prepared context")
-    current, _ = context(ship["task"], ship["pr"])
+    current, policy = context(ship["task"], ship["pr"])
     require(current == ship, "refute dispatch candidate has changed")
+    forge_check(current, policy)
     print(digest(record))
 
 
@@ -564,7 +635,7 @@ def review_result(task, reviewer, head):
             and meta.get("refute_context") == digest(ticket_bytes),
             "review lacks a matching fresh native scout dispatch")
     model, harness = meta.get("model"), meta.get("harness")
-    require(harness in MODEL and matches(MODEL[harness], model) and harness != identity["builder"]["harness"],
+    require(independent_model(identity, harness, model),
             "reviewer model is not independent of the builder")
     verdict = re.fullmatch(rf"Refute {identity['base']} {identity['head']} (merge|fix)", done_note(reviewer))
     require(verdict, "scout did not report a verdict for the exact pinned base and head")
@@ -601,8 +672,7 @@ def passing_review(identity):
         if refute.get("candidate") != identity:
             continue
         harness, model = refute.get("harness"), refute.get("model")
-        require(harness in MODEL and matches(MODEL[harness], model)
-                and harness != identity["builder"]["harness"] and refute.get("generation")
+        require(independent_model(identity, harness, model) and refute.get("generation")
                 and matches(SHA256, refute.get("ticket")) and matches(SHA256, refute.get("report"))
                 and matches(ID, row.get("reviewer")) and row["reviewer"] != identity["task"],
                 "recorded review does not identify an independent native scout")

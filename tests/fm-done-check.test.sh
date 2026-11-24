@@ -554,20 +554,28 @@ touch "$A_STATE/.last-watcher-beat"
 
 cat > "$A_FAKE/gh-axi" <<'STUB'
 #!/usr/bin/env bash
-[ "$1" = api ] && [ "$2" = /repos/acme/widget/pulls/8 ] || exit 98
+[ "$1" = api ] || exit 98
 [ "${A_FORGE_UNREADABLE:-0}" = 0 ] || exit 4
-body=$(jq -nr --arg url "$A_URL" --arg base "${A_LIVE_BASE:-$A_BASE}" --arg head "${A_LIVE_HEAD:-$A_HEAD}" \
-  --arg branch "${A_LIVE_BRANCH:-fm/ship-accept}" --arg repo "${A_LIVE_REPO:-acme/widget}" '
-  [$url,$repo,"dev",$base,"acme/widget",$branch,$head,"open",false] | @json | @base64
-')
+case "$2" in
+  /repos/acme/widget/pulls/8)
+    body=$(jq -nr --arg url "$A_URL" --arg head "${A_LIVE_HEAD:-$A_HEAD}" \
+      --arg branch "${A_LIVE_BRANCH:-fm/ship-accept}" --arg repo "${A_LIVE_REPO:-acme/widget}" '
+      [$url,$repo,"dev","acme/widget",$branch,$head,"open",false] | @json | @base64
+    ') ;;
+  /repos/acme/widget/branches/dev)
+    body=$(jq -nr --arg base "${A_LIVE_BASE:-$A_BASE}" '["dev",$base] | @json | @base64') ;;
+  *) exit 98 ;;
+esac
 printf 'api_response:\n  body: %s\n  truncated: false\n' "$body"
 STUB
 chmod +x "$A_FAKE/gh-axi"
 
 fm_git_init_commit "$A_REPO"
 git -C "$A_REPO" checkout -qb dev || fail "cannot prepare acceptance base"
-mkdir -p "$A_REPO/tests"
+mkdir -p "$A_REPO/tests" "$A_REPO/src/__tests__"
 printf 'def test_contract():\n    assert actual() == 2\n' > "$A_REPO/tests/test_old.py"
+printf 'test_check() { expect_result; }\ntest_check\n' > "$A_REPO/tests/contract.test.sh"
+printf 'it("open", () => expect(state()).toBe("open"));\n' > "$A_REPO/src/__tests__/state.test.ts"
 printf 'value = 1\n' > "$A_REPO/app.py"
 git -C "$A_REPO" add . || fail "cannot stage acceptance base"
 git -C "$A_REPO" commit -qm base || fail "cannot commit acceptance base"
@@ -575,6 +583,18 @@ fm_git_add_origin "$A_REPO" "$A/origin.git"
 A_BASE=$(git -C "$A_REPO" rev-parse HEAD)
 git clone --quiet --branch dev "$A/origin.git" "$A/pool" || fail "cannot initialize reviewer scratch"
 printf -- '- repo [direct-PR] - fixture (added 2026-01-01)\n' > "$A_HOME/data/projects.md"
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'real_git=%q\nforge_repo=%q\n' "$(command -v git)" "$A/origin.git"
+  cat <<'STUB'
+if [ "${7:-}" = fetch ]; then
+  [[ "$2" = *.acceptance-git && "${11:-}" = https://github.com/acme/widget.git ]] || exit 24
+  exec "$real_git" -C "$2" -c fetch.fsckObjects=true fetch "$forge_repo" "${12}" "${13}"
+fi
+exec "$real_git" "$@"
+STUB
+} > "$A_FAKE/git"
+chmod +x "$A_FAKE/git"
 
 accept_cmd() {
   FM_ROOT_OVERRIDE="$ROOT_STUB" FM_HOME="$A_HOME" PATH="$A_FAKE:$PATH" \
@@ -594,6 +614,7 @@ accept_candidate() {
   fi
   git -C "$A_REPO" commit -qm candidate || fail "cannot commit candidate"
   A_HEAD=$(git -C "$A_REPO" rev-parse HEAD)
+  git -C "$A_REPO" push --quiet "$A/origin.git" "$A_HEAD:refs/fixtures/$A_HEAD" || fail "cannot publish fixture objects"
   printf 'done [at=100]: PR %s head %s\n' "$A_URL" "$A_HEAD" > "$A_STATUS"
 }
 
@@ -601,10 +622,11 @@ accept_reset() {
   git -C "$A_REPO" checkout -qf -B "fm/$A_ID" "$A_BASE" || fail "cannot reset candidate"
   fm_write_meta "$A_META" "kind=ship" "mode=direct-PR" "project=$A_REPO" \
     "worktree=$A_REPO" "branch=fm/$A_ID" "base_branch=dev" "spawn_gen=s100.200.300" \
-    "harness=claude" "model=claude-sonnet-4-6" "yolo=off"
+    "harness=claude" "model=claude-sonnet-4-6" "yolo=off" \
+    "builder_history=s100.200.300:claude:claude-sonnet-4-6"
   (umask 077; jq -n --arg base "$A_BASE" '
     {repo:"acme/widget",base_branch:"dev",base:$base,kind:"feature",
-     allow:["app.py","tests/"],tests:[],criteria:"The value is two."}
+     allow:["app.py","tests/","src/"],tests:[],criteria:"The value is two."}
   ' > "$A_POLICY")
   printf 'value = 2\n' > "$A_REPO/app.py"
 }
@@ -613,25 +635,25 @@ test_acceptance_tamper() {
   accept_reset
   git -C "$A_REPO" rm -q tests/test_old.py || fail "cannot delete fixture test"
   accept_candidate
-  accept_refused "deleted or renamed test path" "$SCRIPT" review-brief "$A_ID" "$A_URL" deletion
+  accept_refused "existing test entry changed" "$SCRIPT" review-brief "$A_ID" "$A_URL" deletion
 
   accept_reset
   git -C "$A_REPO" mv tests/test_old.py tests/test_renamed.py || fail "cannot rename fixture test"
   accept_candidate
-  accept_refused "deleted or renamed test path" "$SCRIPT" review-brief "$A_ID" "$A_URL" rename
+  accept_refused "existing test entry changed" "$SCRIPT" review-brief "$A_ID" "$A_URL" rename
 
   accept_reset
   printf 'def test_contract():\n    actual()\n' > "$A_REPO/tests/test_old.py"
   accept_candidate
-  accept_refused "removed assertion" "$SCRIPT" review-brief "$A_ID" "$A_URL" assertion
+  accept_refused "existing test entry changed" "$SCRIPT" review-brief "$A_ID" "$A_URL" assertion
 
   accept_reset
-  printf '\n@pytest.mark.skip(reason="fixture")\ndef test_another():\n    assert value() == 2\n' >> "$A_REPO/tests/test_old.py"
+  printf '@pytest.mark.skip(reason="fixture")\ndef test_another():\n    assert value() == 2\n' > "$A_REPO/tests/test_new.py"
   accept_candidate
   accept_refused "added skip" "$SCRIPT" review-brief "$A_ID" "$A_URL" skip
 
   accept_reset
-  printf '\ndef test_another():\n    assert True\n' >> "$A_REPO/tests/test_old.py"
+  printf 'def test_another():\n    assert True\n' > "$A_REPO/tests/test_new.py"
   accept_candidate
   accept_refused "added trivial assertion" "$SCRIPT" review-brief "$A_ID" "$A_URL" tautology
 
@@ -643,7 +665,42 @@ test_acceptance_tamper() {
   accept_reset
   printf 'def helper():\n    assert actual() == 2\n' > "$A_REPO/tests/test_old.py"
   accept_candidate
-  accept_refused "removed test" "$SCRIPT" review-brief "$A_ID" "$A_URL" test-removal
+  accept_refused "existing test entry changed" "$SCRIPT" review-brief "$A_ID" "$A_URL" test-removal
+
+  accept_reset
+  printf 'test_check() { expect_result; }\n' > "$A_REPO/tests/contract.test.sh"
+  accept_candidate
+  accept_refused "existing test entry changed: 'tests/contract.test.sh'" "$SCRIPT" review-brief "$A_ID" "$A_URL" shell-call
+
+  accept_reset
+  : > "$A_REPO/src/__tests__/state.test.ts"
+  accept_candidate
+  accept_refused "existing test entry changed: 'src/__tests__/state.test.ts'" "$SCRIPT" review-brief "$A_ID" "$A_URL" typescript
+
+  accept_reset
+  printf '__test__ = False\n' > "$A_REPO/tests/test_new.py"
+  accept_candidate
+  accept_refused "added collection override" "$SCRIPT" review-brief "$A_ID" "$A_URL" collection
+
+  accept_reset
+  printf 'def test_other():\n    return\n' > "$A_REPO/tests/test_new.py"
+  accept_candidate
+  accept_refused "added early-return marker" "$SCRIPT" review-brief "$A_ID" "$A_URL" early-return
+
+  accept_reset
+  printf 'it("state", () => expect(state()).toBe("ready"));\n' > "$A_REPO/src/__tests__/added.js"
+  accept_candidate
+  accept_refused "new test has no matching supervisor byte pin" "$SCRIPT" review-brief "$A_ID" "$A_URL" unapproved-test
+  (umask 077; jq --arg sum "$(fixture_sha256 "$A_REPO/src/__tests__/added.js")" \
+    '.new_tests={"src/__tests__/added.js":$sum}' "$A_POLICY" > "$A/policy")
+  mv "$A/policy" "$A_POLICY"
+  accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" approved-test >/dev/null ||
+    fail "trusted exact byte pin should allow a new test format"
+
+  accept_reset
+  printf 'it.skip("state", () => expect(state()).toBe("ready"));\n' > "$A_REPO/src/__tests__/added.js"
+  accept_candidate
+  accept_refused "added skip" "$SCRIPT" review-brief "$A_ID" "$A_URL" skipped-javascript
 
   accept_reset
   git -C "$A_REPO" mv app.py moved.py || fail "cannot rename fixture source"
@@ -668,12 +725,16 @@ test_acceptance_tamper() {
 
 accept_add_regression() {
   cat > "$A_REPO/tests/test_regression.py" <<PY
+import subprocess
+import sys
 import unittest
-import app
 
 class Regression(unittest.TestCase):
     def test_value(self):
-        self.assertEqual(app.value, $1)
+        observed = subprocess.check_output(
+            [sys.executable, "-c", "from app import value; print(value)"], text=True
+        )
+        self.assertEqual(int(observed), $1)
 PY
   chmod +x "$A_REPO/tests/test_regression.py"
   accept_regression_policy
@@ -681,12 +742,16 @@ PY
 
 accept_regression_policy() {
   local test_sha runner_sha
-  test_sha=$(shasum -a 256 "$A_REPO/tests/test_regression.py" | cut -d' ' -f1)
-  runner_sha=$(shasum -a 256 "$A_HOME/data/$A_ID/regression" | cut -d' ' -f1)
+  test_sha=$(fixture_sha256 "$A_REPO/tests/test_regression.py")
+  runner_sha=$(fixture_sha256 "$A_HOME/data/$A_ID/regression")
   (umask 077; jq --arg test "$test_sha" --arg runner "$runner_sha" '
     .kind = "bug" | .regression = {path:"tests/test_regression.py",test_sha256:$test,runner_sha256:$runner}
   ' "$A_POLICY" > "$A/policy")
   mv "$A/policy" "$A_POLICY"
+}
+
+fixture_sha256() {
+  python3 -c 'import hashlib, pathlib, sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' "$1"
 }
 
 test_acceptance_regression() {
@@ -704,6 +769,7 @@ test_acceptance_regression() {
   (umask 077; cat > "$A_HOME/data/$A_ID/regression" <<'PY'
 #!/usr/bin/python3
 import importlib.util
+import json
 import os
 from pathlib import Path
 import sys
@@ -725,9 +791,16 @@ result = unittest.TestResult()
 suite.run(result)
 if result.testsRun != 1 or result.skipped or result.errors:
     sys.exit(12)
+def report(outcome):
+    print(json.dumps({"test": sys.argv[1], "tests_run": result.testsRun, "result": outcome}))
+
 if len(result.failures) == 1 and result.failures[0][1].endswith("AssertionError: 1 != 2\n"):
+    report("expected-failure")
     sys.exit(10)
-sys.exit(0 if result.wasSuccessful() else 12)
+if result.wasSuccessful():
+    report("pass")
+    sys.exit(0)
+sys.exit(12)
 PY
   )
   accept_add_regression 2
@@ -736,6 +809,9 @@ PY
     fail "isolated base-red/head-green regression did not pass: $result"
   assert_equals '10:0' "$(jq -r '.checks.regression | "\(.base_exit):\(.head_exit)"' "$A_STATE/bug-scout.refute.json")" \
     "trusted runner must observe the expected failure before and success after"
+  assert_equals '1:expected-failure:1:pass' "$(jq -r '.checks.regression |
+    "\(.base_execution.tests_run):\(.base_execution.result):\(.head_execution.tests_run):\(.head_execution.result)"' \
+    "$A_STATE/bug-scout.refute.json")" "both legs must report the selected test ran"
 
   accept_reset
   accept_add_regression 1
@@ -773,6 +849,25 @@ PY
   printf 'value = 3\n' > "$A_REPO/app.py"
   accept_candidate
   accept_refused "head regression did not pass (exit 12)" "$SCRIPT" review-brief "$A_ID" "$A_URL" still-failing
+
+  accept_reset
+  cat > "$A_HOME/data/$A_ID/regression" <<'PY'
+#!/usr/bin/python3
+import json
+from pathlib import Path
+import sys
+
+# Deliberately incomplete end-to-end runner fixture: simulates the base
+# observation but supplies no completed-test record when exiting successfully.
+if Path("app.py").read_text() == "value = 1\n":
+    print(json.dumps({"test": sys.argv[1], "tests_run": 1, "result": "expected-failure"}))
+    sys.exit(10)
+sys.exit(0)
+PY
+  accept_add_regression 2
+  accept_candidate
+  accept_refused "head regression did not report test execution evidence" \
+    "$SCRIPT" review-brief "$A_ID" "$A_URL" no-execution-proof
   pass "same test fails at the pinned base and passes at the candidate; missing, passing-before, broken, skipped and failing tests refuse"
 }
 
@@ -798,11 +893,14 @@ test_acceptance_entry_points() {
   accept_refused "exact-head done candidate" "$SCRIPT" review-brief "$A_ID" https://github.com/acme/widget/pull/7 other-pr
 
   result=$(accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" "$scout" 2>&1) || fail "review brief refused: $result"
-  accept_refused "other supported provider" "$SCRIPT" spawn-review "$scout" scout 0 claude claude-sonnet-4-6 "$A_REPO" "$result"
+  assert_grep " -C $A_STATE/$A_ID.acceptance-git diff " "$result" \
+    "review must use the supervisor's tree even when the worker reports both pins locally"
+  accept_refused "provider absent from the builder lineage" "$SCRIPT" spawn-review "$scout" scout 0 claude claude-sonnet-4-6 "$A_REPO" "$result"
   accept_refused "fresh native scout" "$SCRIPT" spawn-review "$scout" scout 1 codex gpt-5.6-sol "$A_REPO" "$result"
   accept_refused "$scout.meta" "$A_VERDICT" refute "$A_ID" "$scout" "$A_HEAD"
 
-  result=$(fm_test_run_spawn "$A_HOME" "$A/pool" "$A_FAKE" "$scout" "$A_REPO" \
+  result=$(A_HEAD="$A_HEAD" A_BASE="$A_BASE" A_URL="$A_URL" \
+    fm_test_run_spawn "$A_HOME" "$A/pool" "$A_FAKE" "$scout" "$A_REPO" \
     --scout --backend tmux --harness codex --model gpt-5.6-sol) || fail "native scout did not launch: $result"
   printf 'Checked the criterion against app.py. No blocker.\n' > "$A_HOME/data/$scout/report.md"
   printf 'done: Refute %s %s merge\n' "$A_BASE" "$A_BASE" > "$A_STATE/$scout.status"
@@ -820,8 +918,8 @@ test_acceptance_entry_points() {
   A_FORGE_UNREADABLE=1 accept_cmd "$SCRIPT" passing "$A_ID" "$A_URL" "$A_HEAD" >/dev/null ||
     fail "offline status read contacted the forge"
   A_FORGE_UNREADABLE=1 accept_refused "done acceptance" "$PR_CHECK" "$A_ID" "$A_URL"
-  A_LIVE_HEAD=$A_BASE accept_refused "live GitHub base or head" "$PR_CHECK" "$A_ID" "$A_URL"
-  A_LIVE_BASE=$A_HEAD accept_refused "live GitHub base or head" "$PR_CHECK" "$A_ID" "$A_URL"
+  A_LIVE_HEAD=$A_BASE accept_refused "live GitHub head" "$PR_CHECK" "$A_ID" "$A_URL"
+  A_LIVE_BASE=$A_HEAD accept_refused "live GitHub target branch" "$PR_CHECK" "$A_ID" "$A_URL"
   A_LIVE_BRANCH=fm/unrelated accept_refused "task branch" "$PR_CHECK" "$A_ID" "$A_URL"
   A_LIVE_REPO=other/widget accept_refused "GitHub repository" "$PR_CHECK" "$A_ID" "$A_URL"
   accept_cmd "$PR_CHECK" "$A_ID" "$A_URL" || fail "accepted candidate did not arm the ordinary PR check"
@@ -850,7 +948,7 @@ test_acceptance_entry_points() {
 }
 
 test_acceptance_inspects_pipeline_objects() {
-  local result real_git
+  local result
   accept_reset
   accept_candidate
   if git -C "$A/pool" cat-file -e "$A_HEAD" 2>/dev/null; then
@@ -859,37 +957,35 @@ test_acceptance_inspects_pipeline_objects() {
   sed "s|^worktree=.*|worktree=$A/pool|;s/^mode=.*/mode=no-mistakes/" "$A_META" > "$A/pipeline.meta"
   mv "$A/pipeline.meta" "$A_META"
   printf 'done: PR %s checks green head %s\n' "$A_URL" "$A_HEAD" > "$A_STATUS"
-  result=$(accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" project-scout 2>&1) ||
-    fail "could not read exact pipeline objects from the registered project: $result"
-  assert_grep " -C $A_REPO diff " "$result" "review should use the repository that has the pinned objects"
-
-  sed "s|^project=.*|project=$A/pool|" "$A_META" > "$A/pipeline.meta"
-  mv "$A/pipeline.meta" "$A_META"
-  real_git=$(command -v git)
-  {
-    printf '#!/usr/bin/env bash\n'
-    printf 'real_git=%q\nsource_repo=%q\npinned_base=%q\npinned_head=%q\n' "$real_git" "$A_REPO" "$A_BASE" "$A_HEAD"
-    cat <<'STUB'
-if [ "${5:-}" = fetch ]; then
-  case "$2" in *.acceptance-git) ;; *) exit 24 ;; esac
-  [[ "$*" = *" https://github.com/acme/widget.git $pinned_base $pinned_head" ]] || exit 25
-  exec "$real_git" -C "$2" fetch --no-write-fetch-head "$source_repo" "$pinned_base" "$pinned_head"
-fi
-exec "$real_git" "$@"
-STUB
-  } > "$A_FAKE/git"
-  chmod +x "$A_FAKE/git"
   result=$(accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" fetched-scout 2>&1) ||
     fail "could not prepare review of fetched pipeline objects: $result"
   assert_grep " -C $A_STATE/$A_ID.acceptance-git diff " "$result" "review should use the exact fetched objects"
   if git -C "$A/pool" cat-file -e "$A_HEAD" 2>/dev/null; then
     fail "fallback fetch wrote objects into the worker copy"
   fi
-  rm "$A_FAKE/git"
-  pass "pipeline objects missing from the worker copy use the registered project or a private pinned forge fetch"
+  pass "pipeline objects missing from the worker copy use a private pinned forge fetch"
+}
+
+test_acceptance_requires_complete_builder_lineage() {
+  local brief
+  accept_reset
+  accept_candidate
+  sed -e 's/^spawn_gen=.*/spawn_gen=s101.200.301/' -e 's/^harness=.*/harness=codex/' \
+    -e 's/^model=.*/model=gpt-5.6-sol/' -e 's/^builder_history=.*/&:INVALID/' "$A_META" > "$A/lineage.meta"
+  mv "$A/lineage.meta" "$A_META"
+  accept_refused "builder lineage" "$SCRIPT" review-brief "$A_ID" "$A_URL" incomplete-history
+  sed 's/:INVALID$/,s101.200.301:codex:gpt-5.6-sol/' "$A_META" > "$A/lineage.meta"
+  mv "$A/lineage.meta" "$A_META"
+  brief=$(accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" prior-model) || fail "known lineage should be readable"
+  accept_refused "provider absent from the builder lineage" "$SCRIPT" spawn-review prior-model scout 0 \
+    claude claude-sonnet-4-6 "$A_REPO" "$brief"
+  accept_refused "provider absent from the builder lineage" "$SCRIPT" spawn-review prior-model scout 0 \
+    codex gpt-5.6-sol "$A_REPO" "$brief"
+  pass "review dispatch excludes every recorded builder provider"
 }
 
 test_acceptance_tamper
 test_acceptance_regression
 test_acceptance_entry_points
 test_acceptance_inspects_pipeline_objects
+test_acceptance_requires_complete_builder_lineage

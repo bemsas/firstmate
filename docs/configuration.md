@@ -1154,31 +1154,38 @@ For each eligible task, the supervisor places a private `<task>.json` in that di
 The worker's ready report submits a candidate with `head <full SHA>` after the URL or `checks green` and before any visual-proof rider.
 Worker completion and legacy checklist results can still be inspected.
 Current-state reads, PR registration and the merge path require acceptance for the candidate.
-Registration and merge also check the live forge identity.
+The no-mistakes pre-validation handoff can start its ordinary pipeline while current state still shows a candidate awaiting acceptance.
+Registration and merge also check the live PR identity and read the target branch tip directly.
 Accepting a candidate confers no merge authority.
 
 The policy contains `repo` (same GitHub owner/repository for source and target), `base_branch`, `base` (full commit), `kind` (`feature` or `bug`), `allow` (allowed repository paths), `tests` (additional test paths, possibly empty), and `criteria` (approved task criteria).
 Path entries match literally, with a trailing slash for a directory prefix.
 Ordinary test/spec locations are checked in addition to the declared test paths.
-The diff compares the pinned commits and considers both paths of a rename.
-Python detection covers test functions, `assert`, standard unittest assertion calls, `pytest.raises`, common skip/xfail markers and simple truthy or self-equality assertions.
-Shell detection covers selected `test_*` functions, assertion and failure helper lines, common skip markers and simple literal assertions.
-These conservative checks can reject rewritten assertions and test renames.
-Other formats receive path and deletion checks, and all formats still require review of test behavior.
+The scope check compares exact committed tree entries, including gitlinks and both paths of a rename.
+Existing test entries are held for every format, including changes to an invocation, assertion, collection behavior, mode, or path.
+To add a new test, pin the supervisor-approved bytes in optional `new_tests` (a map from relative path to SHA-256), or use the bug regression pin below.
+New Python tests additionally check common collection overrides, returns inside test functions, skip markers and simple literal assertions.
+New shell tests check common skip and early-exit markers and literal comparisons.
+New JavaScript and TypeScript tests check common skip/todo forms and equal-literal expectations.
+An approved byte pin requires an independent assessment of the new test and the remaining review covers behavior beyond these static patterns.
 
 For a bug fix, add a `regression` object with `path`, `test_sha256` and `runner_sha256`.
 The supervisor approves the bytes of a new test file and of the runner at `data/<task>/regression`.
-The runner receives the relative test path as its sole argument and is responsible for distinguishing the expected test failure (exit 10), a passing execution (exit 0), and any other outcome (any other exit).
-Return an insufficient result for zero collected or executed tests, skips, unexpected failures, and infrastructure or collection errors.
-Firstmate copies the same test bytes into the pinned base snapshot and runs the approved fixture against both committed snapshots.
+The runner receives the relative test path as its sole argument.
+Keep the test observer in trusted code, invoke candidate programs in a child process, and capture their outputs separately from the observer's result.
+For the expected assertion failure, exit 10 and emit one JSON object with `test` set to the supplied path, `tests_run` set to the integer 1, and `result` set to `expected-failure`.
+For a passing execution, exit 0 and use `result: "pass"` with the same path and count.
+Return another exit for skips, unexecuted tests, unexpected failures, and infrastructure or collection errors.
+Firstmate overlays the same test bytes and executable mode on the base and requires execution evidence from both committed snapshots.
 Linux bubblewrap is required for this check, with network isolation, read-only source and fixture mounts, and a fresh environment.
 It supports ordinary files and symlinks in the snapshot, with no submodule materialization or project environment activation.
 
 Use `bin/fm-done-check.sh review-brief <task> <pr-url> <fresh-scout-id>` to check the candidate and prepare the reviewer brief.
-If neither registered checkout contains both commits, the supervisor checks the exact objects in a private bare repository populated from the pinned GitHub repository.
-The fallback is noninteractive, so an inaccessible repository requires making both commits available in a registered checkout before retrying.
-Use the native `bin/fm-spawn.sh` scout path with a new ID and an explicit model from the other supported provider.
-The initial supported pairing is Codex GPT and Claude, with explicit model IDs recorded by dispatch.
+The supervisor reads both commits from an owned bare repository populated by a noninteractive fetch of the exact pins from GitHub.
+Unavailable forge objects keep the candidate on hold.
+Use the native `bin/fm-spawn.sh` scout path with a new ID and an explicit Codex GPT or Claude model from a provider absent from the builder's complete dispatch lineage.
+Each native dispatch appends its identity to the lineage, including on a harness switch or relaunch.
+Missing, implicit, ambiguous or unavailable model history leaves the candidate on hold, as does a lineage that has used both supported providers.
 The reviewer receives the approved criteria and pinned commits and tries to refute completion.
 After reading the scout's report, the supervisor records its exact verdict with `bin/fm-review-verdict.sh refute <task> <scout> <reviewed-head>` and verifies with `bin/fm-done-check.sh accept <task> <pr-url>`.
 The acceptance record binds the task incarnation, policy, base, candidate, executed evidence and latest qualifying review.
@@ -1187,7 +1194,7 @@ If the target advances, approve and pin the new base, then publish and report an
 Normal project capacity applies to the reviewer, so leave room for its scout while the candidate ship is still assigned.
 
 Homes with the directory absent use existing delivery checks.
-In an enabled home, an older task must recover its approved scope, original base and native builder identity, submit a new exact-head candidate and undergo the same checks.
+In an enabled home, an older task must recover its approved scope, original base and complete native builder lineage, submit a new exact-head candidate and undergo the same checks.
 When the original inputs cannot be verified, leave the task unaccepted and use a new task with a pinned policy.
 The Firstmate home is the operational trust boundary.
 Keep these records under supervisor control, outside project worktrees and worker-authored evidence.

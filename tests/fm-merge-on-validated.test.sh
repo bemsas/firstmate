@@ -702,6 +702,31 @@ test_test_only_review_exemption() {
   pass "only a complete test-only diff exempts missing review; renamed source and unreadable lists fail closed"
 }
 
+test_pending_supervisor_acceptance() {
+  local dir
+  dir=$(live_case protected-pending 0)
+  printf '%s\n' dry-run > "$dir/home/config/merge-on-validated"
+  mkdir "$dir/home/config/done-acceptance"
+  rm "$dir/bin/fm-done-check.sh"
+  cat > "$dir/bin/fm-done-check.sh" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = assert ] && [ "$2" = task-a ] && [ "$3" = https://github.com/example/repo/pull/42 ] &&
+  [ "$4" = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ] &&
+  [ -f "$FM_HOME/state/fixture-accepted" ]
+SH
+  chmod +x "$dir/bin/fm-done-check.sh"
+  SCAN_BIN="$dir/bin/fm-merge-on-validated.sh" prime "$dir"
+  append_status "$dir" "$(validated_line)"
+  SCAN_BIN="$dir/bin/fm-merge-on-validated.sh" scan "$dir"
+  assert_present "$dir/home/state/.merge-on-validated.pending" \
+    "missing acceptance dropped the validated line: $(log_of "$dir") $(cat "$dir/stderr")"
+  assert_contains "$(log_of "$dir")" "missing current supervisor acceptance" "acceptance hold was not visible"
+  : > "$dir/home/state/fixture-accepted"
+  SCAN_BIN="$dir/bin/fm-merge-on-validated.sh" scan "$dir"
+  assert_contains "$(log_of "$dir")" "would merge $URL $HEAD_A" "acceptance did not release the original observation"
+  pass "the exact validated line stays pending and automatically sees later supervisor acceptance"
+}
+
 test_pending_retirement() {
   local dir
   dir=$(make_case pending-retirement)
@@ -898,6 +923,7 @@ test_retry_after_unreadable_supporting_facts
 test_pending_live_merge_and_revalidation
 test_review_verdict_gate
 test_test_only_review_exemption
+test_pending_supervisor_acceptance
 test_pending_retirement
 test_branch_fallback_ambiguity
 test_branch_fallback
