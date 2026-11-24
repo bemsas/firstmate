@@ -4339,10 +4339,18 @@ fi
 # are judged, the cap, what holds a place, the forge observation, and why an
 # unknown or incomplete observation defers). The one bounded forge call is made
 # here, before the project lock, so no lock is held across the network; the
-# local reservations are counted below while that lock is held through
-# metadata publication.
+# verdict is reached after the brief and delivery-agreement checks below, so a
+# spawn those checks refuse keeps its refusal rather than being deferred, and
+# the local reservations are counted while that lock is held through metadata
+# publication. A spawn the offline self-repository publication gate
+# (bin/fm-role-lib.sh) will refuse is not observed at all.
 SPAWN_REVIEW_CAP=
+SPAWN_REVIEW_SELF_RC=0
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ] && [ "$MODE" != local-only ]; then
+  fm_role_gate_self_publish "$FM_HOME" "$CONFIG" "$PROJ_ABS" "$FM_ROOT" "$UPSTREAM_CONSENT" || SPAWN_REVIEW_SELF_RC=$?
+fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ] && [ "$MODE" != local-only ] &&
+  { [ "$SPAWN_REVIEW_SELF_RC" -eq 0 ] || [ "$SPAWN_REVIEW_SELF_RC" -eq 2 ]; } &&
   SPAWN_REVIEW_FORGE=$("$FM_ROOT/bin/fm-project-mode.sh" --forge "$(basename "$PROJ_ABS")" 2>/dev/null) &&
   [ "${SPAWN_REVIEW_FORGE:-none}" = none ] &&
   fm_review_capacity_target "$PROJ_ABS" "$UPSTREAM_CONSENT"; then
@@ -4382,23 +4390,6 @@ if [ -n "$SPAWN_PROJECT_CAPACITY" ]; then
     echo "deferred: project $(basename "$PROJ_ABS") admits $SPAWN_PROJECT_CAPACITY worker(s) at once on this machine ($SPAWN_PROJECT_CAPACITY_FILE) and $FM_PROJECT_CAPACITY_OCCUPANTS already hold a place ($FM_PROJECT_CAPACITY_OCCUPANT_IDS); task $ID was not launched and its backlog item stays queued - dispatch it again once one of them records its ready PR or is cleaned up" >&2
     exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
   fi
-fi
-if [ -n "$SPAWN_REVIEW_CAP" ]; then
-  if ! fm_review_capacity_judge "$SPAWN_REVIEW_CAP" "$SPAWN_REVIEW_OBSERVED" "$SPAWN_REVIEW_PREFIXES" \
-    "$SPAWN_TREEHOUSE_PROJECT_LOCK" "$PROJ_ABS" "$STATE" "$ID"; then
-    echo "error: spawn refused: project $(basename "$PROJ_ABS") has a review-queue cap of $SPAWN_REVIEW_CAP, but this machine's task records cannot all be read to count it ($FM_REVIEW_ERROR)" >&2
-    exit 1
-  fi
-  case "$FM_REVIEW_VERDICT" in
-    full)
-      echo "deferred: project $(basename "$PROJ_ABS") admits $SPAWN_REVIEW_CAP open unreviewed fleet PR(s) in $FM_REVIEW_TARGET_HOST/$FM_REVIEW_TARGET_OWNER/$FM_REVIEW_TARGET_REPO and its review queue is full: $FM_REVIEW_WHY; task $ID was not launched and its backlog item stays queued - dispatch it again once one of them is approved, merged, or closed (cap from ${SPAWN_REVIEW_CAP_FILE} or the default of $FM_REVIEW_CAPACITY_DEFAULT)" >&2
-      exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
-      ;;
-    unknown)
-      echo "deferred: project $(basename "$PROJ_ABS")'s review queue in $FM_REVIEW_TARGET_HOST/$FM_REVIEW_TARGET_OWNER/$FM_REVIEW_TARGET_REPO cannot be counted: $FM_REVIEW_WHY; task $ID was not launched and its backlog item stays queued - dispatch it again once the open pull requests can be read" >&2
-      exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
-      ;;
-  esac
 fi
 # Lane capacity admission (opt-in; bin/fm-capacity.sh owns the verdict and
 # --spawn-gate exits 0 unless config/lane-capacity declares admit-spawns). A
@@ -4498,6 +4489,8 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   # pre-scope briefs and relaunches. Charters never enter this worker path.
   SOURCE_BRIEF=$BRIEF
   BRIEF="$DATA/$ID/launch-brief.md"
+  SPAWN_LAUNCH_BRIEF_PREEXISTED=0
+  [ ! -e "$BRIEF" ] || SPAWN_LAUNCH_BRIEF_PREEXISTED=1
   BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
   # A brief without the scaffold's `# Task` and `# Definition of done` sections
   # cannot be compacted, so it is delivered whole, as before capsules existed.
@@ -4698,6 +4691,33 @@ if [ "$KIND" = ship ]; then
   if [ "$BRANCH" != "$STANDING_BRANCH$ID" ]; then
     echo "notice: $ID ships branch=$BRANCH while $PROJ_NAME registers the ship-branch prefix '$STANDING_BRANCH' (branch $STANDING_BRANCH$ID) - the task's branch and PR will read as firstmate-authored; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
   fi
+fi
+
+# Review capacity verdict (the observation was made before the project lock
+# above, which is still held). Every check before this point only validates, so
+# the one artifact a deferral could leave is the launch brief this spawn
+# rendered; it is removed unless an earlier run had already left one.
+spawn_review_defer_cleanup() {
+  [ "${SPAWN_LAUNCH_BRIEF_PREEXISTED:-1}" = 1 ] || rm -f -- "$DATA/$ID/launch-brief.md"
+}
+if [ -n "$SPAWN_REVIEW_CAP" ]; then
+  if ! fm_review_capacity_judge "$SPAWN_REVIEW_CAP" "$SPAWN_REVIEW_OBSERVED" "$SPAWN_REVIEW_PREFIXES" \
+    "$SPAWN_TREEHOUSE_PROJECT_LOCK" "$PROJ_ABS" "$STATE" "$ID"; then
+    echo "error: spawn refused: project $(basename "$PROJ_ABS") has a review-queue cap of $SPAWN_REVIEW_CAP, but this machine's task records cannot all be read to count it ($FM_REVIEW_ERROR)" >&2
+    exit 1
+  fi
+  case "$FM_REVIEW_VERDICT" in
+    full)
+      spawn_review_defer_cleanup
+      echo "deferred: project $(basename "$PROJ_ABS") admits $SPAWN_REVIEW_CAP open unreviewed fleet PR(s) in $FM_REVIEW_TARGET_HOST/$FM_REVIEW_TARGET_OWNER/$FM_REVIEW_TARGET_REPO and its review queue is full: $FM_REVIEW_WHY; task $ID was not launched and its backlog item stays queued - dispatch it again once one of them is approved, merged, or closed (cap from ${SPAWN_REVIEW_CAP_FILE} or the default of $FM_REVIEW_CAPACITY_DEFAULT)" >&2
+      exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
+      ;;
+    unknown)
+      spawn_review_defer_cleanup
+      echo "deferred: project $(basename "$PROJ_ABS")'s review queue in $FM_REVIEW_TARGET_HOST/$FM_REVIEW_TARGET_OWNER/$FM_REVIEW_TARGET_REPO cannot be counted: $FM_REVIEW_WHY; task $ID was not launched and its backlog item stays queued - dispatch it again once the open pull requests can be read" >&2
+      exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
+      ;;
+  esac
 fi
 
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
