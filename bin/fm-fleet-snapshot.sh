@@ -86,7 +86,9 @@
 #     observed status file's mtime instead: freshness is how fresh this snapshot's
 #     own observation is, never when a worker emitted the event.
 #     Each structured-home record carries active_children, decisions_open, holds,
-#     queued, landed, endpoints, counts, and omitted. provenance.summary_source
+#     queued, landed, endpoints, counts, omitted, lane_target ({value,source}
+#     or null), lane_occupancy (a number or null), and lane_occupancy_by_tool
+#     (an object or null); each is null from an older producer. provenance.summary_source
 #     distinguishes "local-ledger", "remote-ledger", and "remote-ledger-cache";
 #     freshness is "cached" only for the cache source, and observed_at/age_seconds
 #     come from the selected summary's generation. A remote fetch counts as
@@ -1025,11 +1027,49 @@ main_inventory_json() {  # <backlog-json-file> <tasks-json-file>
 # validated parent read needs.
 # This mode never reads parent events or terminal text and never aggregates
 # nested secondmates.
+# lane_target is this home's authorized lane target for a parent's away-mode
+# refill cue (bin/fm-lane-refill.sh): {value,source} from a keep-full away
+# record's lane_target, else the configured cap bin/fm-capacity.sh reads from
+# config/lane-capacity, else null. It is never invented.
+home_lane_target_json() {
+  local value='' source='' line
+  if [ -f "$STATE/.afk-contract" ] \
+    && [ "$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" mode 2>/dev/null)" = away ]; then
+    value=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" field lane_target 2>/dev/null || true)
+    source=away-record
+  fi
+  case "$value" in ''|*[!0-9]*|0) value=''; source='' ;; esac
+  if [ -z "$value" ] && [ -e "$CONFIG/lane-capacity" ]; then
+    line=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-capacity.sh" 2>/dev/null | sed -n '1p')
+    value=$(printf '%s\n' "$line" | tr ' ' '\n' | sed -n 's/^target=//p')
+    source=lane-capacity
+    case "$value" in ''|*[!0-9]*|0) value=''; source='' ;; esac
+  fi
+  if [ -n "$value" ]; then
+    printf '{"value":%s,"source":"%s"}\n' "$((10#$value))" "$source"
+  else
+    printf 'null\n'
+  fi
+}
+
+# lane_occupancy (and lane_occupancy_by_tool, split by harness) is this home's
+# live worker-process occupancy, measured on its own host by
+# bin/fm-lane-count.sh --occupancy-json (that script owns the rule), or null
+# where it cannot be measured. Each active child also carries its harness.
+home_lane_occupancy_json() {
+  local doc
+  doc=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-lane-count.sh" --occupancy-json 2>/dev/null)
+  printf '%s' "$doc" | jq -ce 'select(type == "object")' 2>/dev/null || printf '{"total":null,"by_tool":null}\n'
+}
+
 secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
   jq -n \
     --arg generated "$SNAPSHOT_NOW" \
     --argjson generated_epoch "$SNAPSHOT_EPOCH" \
     --arg home "$FM_HOME" \
+    --argjson lane_target "$(home_lane_target_json)" \
+    --argjson lane_occupancy "$(home_lane_occupancy_json)" \
     --argjson child_n "$FM_SNAPSHOT_SECONDMATE_CHILDREN" \
     --argjson queued_n "$FM_SNAPSHOT_SECONDMATE_QUEUED" \
     --argjson decisions_n "$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
@@ -1114,6 +1154,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | $tasks[]
          | select(.id == $work.id and .current_state.state == "working")
          | {id,kind,state:.current_state.state,
+            harness:((.harness // "") | if . == "" then null else trunc(40) end),
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
             name:(($work.title // null) | if . == null then null else trunc(70) end),
             source:.current_state.source,
@@ -1196,6 +1237,9 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
              + (map(select(.captain_actionable == true)) | newest_filed_first))
           | .[:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
+        lane_target:$lane_target,
+        lane_occupancy:$lane_occupancy.total,
+        lane_occupancy_by_tool:$lane_occupancy.by_tool,
         endpoints:([$tasks[] | {id,state:.current_state.state,source:.current_state.source,
           endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),
         counts:{
@@ -1964,6 +2008,9 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
          decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
          contributions:($summary.contributions // null),
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
+         lane_target:($summary.lane_target // null),
+         lane_occupancy:($summary.lane_occupancy // null),
+         lane_occupancy_by_tool:($summary.lane_occupancy_by_tool // null),
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
          terminal_evidence:$terminal,contradiction:$contradiction}' >> "$records_file" || return 1
     else

@@ -217,8 +217,10 @@
 #   Every single-task invocation holds one task-id-scoped lock across backend
 #   creation through metadata publication, so concurrent same-id spawns serialize
 #   even when they select different backends. A fresh spawn first takes the
-#   per-home task-set lock and refuses rather than waits when another operation
-#   owns it. The refusal names another spawn or forced teardown when the recorded
+#   per-home task-set lock. It waits, bounded by FM_SPAWN_TASK_SET_WAIT seconds
+#   (default 120; 0 refuses at once), only while the recorded holder is another
+#   spawn, and refuses at once for a forced teardown or an unidentified holder.
+#   The refusal names another spawn or forced teardown when the recorded
 #   holder role is known, otherwise another operation. --relaunch is exempt
 #   because the existing task's control lock covers it.
 #   A fresh Treehouse-backed spawn also takes the project-identity lock in the local
@@ -252,6 +254,12 @@
 #   every place held prints one `deferred:` line and exits 75 before any brief
 #   render, endpoint, worktree, record, or backlog move exists, so the task stays
 #   exactly as queued as it was; an unreadable declaration refuses with exit 1.
+#   Host resource gate: every ship or scout launch on this host, fresh or a
+#   relaunch, first asks bin/fm-capacity.sh --host-gate, before the task-set
+#   lock or any worktree, endpoint, or record, and a defer verdict prints one
+#   `deferred:` line and exits 75 with the backlog item exactly as queued; it
+#   needs no config, a secondmate is exempt, and an fm-control relaunch is
+#   gated by that transaction before it stops the old worker.
 #   Lane capacity: only when this home's config/lane-capacity declares
 #   admit-spawns (bin/fm-capacity.sh --spawn-gate-enabled answers; that script
 #   owns the declaration and the verdict), a fresh ship or
@@ -2322,6 +2330,38 @@ spawn_require_relocated_queued_work() {
     exit 1
   fi
 }
+# Host resource gate (bin/fm-capacity.sh --host-gate owns the thresholds and
+# the probes): every ship or scout launch on this host - a fresh spawn, and a
+# relaunch not already gated by the fm-control transaction that owns its
+# control lock (that transaction gates before it stops the old worker, so a
+# deferral never leaves a task without one) - defers with exit 75 while the
+# host is overloaded, before the task-set lock, any worktree, endpoint, or
+# record exists and before this script takes any lock (the relaunch control
+# lock included), so the backlog item stays exactly as queued and replacements
+# cannot restart a pile-up. It applies even when no home opted into lane
+# capacity, and a secondmate, a persistent home rather than a lane, is exempt.
+spawn_defer_if_host_strained() {
+  local kind=$KIND verdict rc owner
+  if [ "$RELAUNCH" -eq 1 ]; then
+    # Read-only: the fm-control transaction that owns this task's control lock
+    # gated before stopping the old worker. Nothing is acquired here.
+    owner=$(cat "$STATE/.control-$ID.lock/pid" 2>/dev/null || true)
+    if [ "$owner" = "$PPID" ] && fm_pid_alive "$owner"; then return 0; fi
+    kind=$(sed -n 's/^kind=//p' "$STATE/$ID.meta" 2>/dev/null | tail -1)
+  fi
+  [ "$kind" != secondmate ] || return 0
+  rc=0
+  verdict=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-capacity.sh" --host-gate 2>/dev/null) || rc=$?
+  [ "$rc" -eq 75 ] || return 0
+  if [ "$RELAUNCH" -eq 1 ]; then
+    echo "deferred: this host is overloaded ($verdict); task $ID was not relaunched - relaunch it again once load and memory recover" >&2
+  else
+    echo "deferred: this host is overloaded ($verdict); task $ID was not launched and its backlog item stays queued - dispatch it again once load and memory recover" >&2
+  fi
+  exit 75
+}
+spawn_defer_if_host_strained
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
   control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
@@ -2364,26 +2404,50 @@ if [ "$RELAUNCH" -eq 0 ]; then
   # already covered by that task's control lock, which the teardown preflight
   # tests.
   #
-  # Refusing rather than waiting is the fail-closed direction: the home may be
-  # moments from removal, so there is nothing worth waiting for.
+  # A forced teardown or an unidentified holder is refused at once, the
+  # fail-closed direction: the home may be moments from removal, so there is
+  # nothing worth waiting for. Only a holder positively identified as another
+  # spawn (role task-spawn) is transient contention - a burst of spawns, such
+  # as a review launcher's, each holding the lock only through its own
+  # publication - so that one is waited out for up to FM_SPAWN_TASK_SET_WAIT
+  # seconds (default 120, the lane-admission lock's bound; 0 refuses at once),
+  # re-reading the holder's role on every retry so a forced teardown that takes
+  # the lock meanwhile is still refused at once. A just-acquired lock whose
+  # holder has not yet recorded its role is given a two-second grace before it
+  # counts as unidentified.
   SPAWN_TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") || {
     echo "error: could not resolve the task-set lock for $STATE" >&2
     exit 1
   }
-  if ! fm_lock_try_acquire "$SPAWN_TASK_SET_LOCK"; then
-    case "$(fm_lock_role "$SPAWN_TASK_SET_LOCK" 2>/dev/null || true)" in
+  spawn_task_set_wait=${FM_SPAWN_TASK_SET_WAIT:-120}
+  case "$spawn_task_set_wait" in ''|*[!0-9]*) spawn_task_set_wait=120 ;; esac
+  spawn_task_set_deadline=$((SECONDS + spawn_task_set_wait))
+  spawn_task_set_unroled_since=
+  while ! fm_lock_try_acquire "$SPAWN_TASK_SET_LOCK"; do
+    spawn_task_set_role=$(fm_lock_role "$SPAWN_TASK_SET_LOCK" 2>/dev/null || true)
+    case "$spawn_task_set_role" in
       task-spawn)
-        echo "error: this home's task set is locked by another spawn; refusing to create task $ID rather than racing it" >&2
+        spawn_task_set_unroled_since=
+        if [ "$SECONDS" -lt "$spawn_task_set_deadline" ]; then sleep 0.2; continue; fi
+        echo "error: this home's task set is locked by another spawn; refusing to create task $ID rather than racing it (waited ${spawn_task_set_wait}s)" >&2
         ;;
       forced-teardown)
         echo "error: this home's task set is locked by a forced teardown; refusing to create task $ID rather than racing it" >&2
+        ;;
+      '')
+        [ -n "$spawn_task_set_unroled_since" ] || spawn_task_set_unroled_since=$SECONDS
+        if [ $((SECONDS - spawn_task_set_unroled_since)) -lt 2 ] && [ "$SECONDS" -lt "$spawn_task_set_deadline" ]; then
+          sleep 0.1
+          continue
+        fi
+        echo "error: this home's task set is locked by another operation; refusing to create task $ID rather than racing it" >&2
         ;;
       *)
         echo "error: this home's task set is locked by another operation; refusing to create task $ID rather than racing it" >&2
         ;;
     esac
     exit 1
-  fi
+  done
   if ! fm_lock_set_role "$SPAWN_TASK_SET_LOCK" task-spawn; then
     fm_lock_release "$SPAWN_TASK_SET_LOCK" || true
     echo "error: could not record task-set lock holder for spawn of $ID" >&2

@@ -11,6 +11,9 @@
 # default output stays the same two words for every project, bound or not.
 # With --pr it prints one word: the project's registered PR-text posture,
 # auto|manual, "auto" when the project registers none.
+# With --production <project> <base> it prints one word classifying a pull
+# request base branch against the project's registered deployment mapping
+# (prod= below): production|non-production|unknown.
 #
 # MECHANICAL CONSUMERS ONLY. This answers "what posture did the captain register
 # for this project", never "how does this task ship". A task's delivery mode,
@@ -34,9 +37,10 @@
 #   - <name> [<mode> forge=forgejo] - <desc> (added <date>)          -> <mode> <yolo>, --forge forgejo
 #   - <name> [direct-PR forge=external] - <desc> (added <date>)      -> direct-PR off, --forge external
 #   - <name> [no-mistakes pr=manual] - <desc> (added <date>)         -> no-mistakes off, --pr manual
+#   - <name> [no-mistakes prod=main,release/v1] - <desc> (added <date>) -> --production <name> main: production
 #   <name> may contain spaces; it ends at the literal " [" or " - " that follows it.
-#   Bracket tokens are order-independent: +yolo, branch=<prefix>, forge=<value>, and
-#   pr=<value> are recognized by their own shape wherever they appear, and whichever token is
+#   Bracket tokens are order-independent: +yolo, branch=<prefix>, forge=<value>,
+#   pr=<value>, and prod=<value> are recognized by their own shape wherever they appear, and whichever token is
 #   left over is the mode. <prefix> must not contain a space; an empty override
 #   ("branch=") resolves to "" for a bare "<task-id>" ship branch instead of the
 #   legacy "fm/<task-id>".
@@ -99,6 +103,23 @@
 #   nothing on stdout, exit status 3, the token named. --branch-prefix and
 #   --forge do not make these checks.
 #
+# prod (orthogonal, and the one owner of production classification) = the
+#   project's deployment mapping: which base branches deploy to production.
+#   `prod=<branch>[,<branch>...]` names a prod-hosted project's production bases
+#   exactly; `prod=none` records a project with no production deployment.
+#   --production <project> <base> prints `production` when <base> equals one
+#   listed branch exactly (so `main` never matches `master`, and a dev, staging,
+#   or feature base never inherits the project's production status),
+#   `non-production` for any other base of a mapped project or any base of a
+#   `prod=none` project, and `unknown` when the base is empty or `-`, the project
+#   or registry is absent, no prod token is registered, or the token is
+#   malformed (an empty value or an empty list item, warned on stderr). Unknown
+#   is a hold, never a guess: callers holding production work hold an unknown
+#   base too. The delivery mode never classifies production: the
+#   `no-mistakes-prod-only` policy name says how a task ships, not where the
+#   project deploys. Only --production reads the token, so every other output
+#   form is unchanged by its presence, and a release hold stays the caller's.
+#
 # A registered `forge=gerrit` project reports yolo=off with an explicit stderr
 # refusal, on the captain's decision of 2026-09-15: a Gerrit Code-Review+2 is a
 # positive attributed claim that a named human approved, read by colleagues and
@@ -129,6 +150,7 @@
 # every path that reads the forge binding (default, --forge, and spawn's
 # forge-agreement check) still refuses.
 # Usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--pr] <project-name>
+#        fm-project-mode.sh --production <project-name> <base-branch>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -140,17 +162,44 @@ RAW=0
 BRANCH_PREFIX_QUERY=0
 WANT_FORGE=0
 WANT_PR=0
+WANT_PRODUCTION=0
 case "${1:-}" in
   --raw) RAW=1; shift ;;
   --branch-prefix) BRANCH_PREFIX_QUERY=1; shift ;;
   --forge) WANT_FORGE=1; shift ;;
   --pr) WANT_PR=1; shift ;;
+  --production) WANT_PRODUCTION=1; shift ;;
 esac
 NAME=${1:?usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--pr] <project-name>}
+if [ "$WANT_PRODUCTION" -eq 1 ]; then
+  [ "$#" -eq 2 ] || { echo "usage: fm-project-mode.sh --production <project-name> <base-branch>" >&2; exit 2; }
+  PRODUCTION_BASE=$2
+fi
+
+# --production: classify <base> against the registered prod= token (header).
+production_classify() {  # <prod-token or -> ; prints the verdict
+  local token=$1 list item found=0
+  case "$PRODUCTION_BASE" in ''|-) echo unknown; return 0 ;; esac
+  case "$token" in
+    -) echo unknown; return 0 ;;
+    prod=none) echo non-production; return 0 ;;
+    prod=|prod=,*|prod=*,|prod=*,,*)
+      echo "warn: malformed deployment mapping \"$token\" registered for $NAME in $REG; production is unknown" >&2
+      echo unknown; return 0 ;;
+  esac
+  list=${token#prod=},
+  while [ -n "$list" ]; do
+    item=${list%%,*}
+    list=${list#*,}
+    [ "$item" != "$PRODUCTION_BASE" ] || found=1
+  done
+  if [ "$found" -eq 1 ]; then echo production; else echo non-production; fi
+}
 
 if [ ! -f "$REG" ]; then
   echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
-  if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
+  if [ "$WANT_PRODUCTION" -eq 1 ]; then echo unknown
+  elif [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
     echo "fm/"
   elif [ "$WANT_FORGE" -eq 1 ]; then echo none
   elif [ "$WANT_PR" -eq 1 ]; then echo auto; else echo "no-mistakes off"; fi
@@ -188,7 +237,7 @@ parsed=$(awk -v n="$NAME" '
     if (substr($0, 1, plen) != prefix) next
     after = substr($0, plen + 1);
     if (after != "" && substr(after, 1, 2) != " [" && substr(after, 1, 3) != " - ") next
-    mode="no-mistakes"; yolo="off"; branch="fm/"; forge="none"; pr="auto";
+    mode="no-mistakes"; yolo="off"; branch="fm/"; forge="none"; pr="auto"; prod="-";
     if (substr(after, 1, 2) == " [") {
       s="";
       nk = split(after, rest, " ");
@@ -205,6 +254,7 @@ parsed=$(awk -v n="$NAME" '
         if (a[j] ~ /^branch=/) { branch = substr(a[j], 8); continue }
         if (a[j] ~ /^forge=/) { forge = a[j]; continue }
         if (a[j] ~ /^pr=/) { pr = a[j]; continue }
+        if (a[j] ~ /^prod=/) { prod = a[j]; continue }
         if (a[j] ~ /^[^=]+=/) {
           key = substr(a[j], 1, index(a[j], "=") - 1);
           e = dist(key, "forge");
@@ -217,13 +267,15 @@ parsed=$(awk -v n="$NAME" '
     }
     # branch is printed LAST: an empty branch= override must survive as an
     # empty final field, which only holds when nothing follows it.
+    print "prod", prod;
     print "posture", mode, yolo, forge, pr, branch; exit
   }
 ' "$REG")
 
 if [ -z "$parsed" ]; then
   echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
-  if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
+  if [ "$WANT_PRODUCTION" -eq 1 ]; then echo unknown
+  elif [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
     echo "fm/"
   elif [ "$WANT_FORGE" -eq 1 ]; then echo none
   elif [ "$WANT_PR" -eq 1 ]; then echo auto; else echo "no-mistakes off"; fi
@@ -231,10 +283,12 @@ if [ -z "$parsed" ]; then
 fi
 
 posture=
+prod_token=-
 while IFS=' ' read -r kind rest; do
   case "$kind" in
     near) echo "warn: ignoring \"$rest\" registered for $NAME in $REG; it is not a forge binding, and the forge binding is spelled forge=gerrit, forge=forgejo, or forge=external" >&2 ;;
     posture) posture=$rest ;;
+    prod) prod_token=$rest ;;
   esac
 done <<EOF
 $parsed
@@ -244,6 +298,10 @@ while IFS=' ' read -r m y f p b; do
 done <<EOF
 $posture
 EOF
+if [ "$WANT_PRODUCTION" -eq 1 ]; then
+  production_classify "$prod_token"
+  exit 0
+fi
 forge=${rest_forge:-none}
 pr=${rest_pr:-auto}
 case "$mode" in

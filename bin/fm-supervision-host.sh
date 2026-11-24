@@ -160,7 +160,8 @@
 #
 # STATE (all under state/, owned here): .supervision-host (this host's pid and
 # the processes it runs), .supervision-host-engine (the engine conversation:
-# engine, model, session id, main-session key, turn count, running cost),
+# engine, model, session id, main-session key, posture, turn count, running
+# cost),
 # .supervision-host-turn and .supervision-host-receipts (the current turn's
 # report scope and the reports it recorded), .supervision-host-prompt and
 # .supervision-host-wake (the prompt and wake text of the current turn),
@@ -178,8 +179,9 @@
 # FM_SUPERVISION_HOST_PARK_LIMIT (the park boundary; a later value below the
 # registration lets turns run past the boundary up to it, any other value is
 # the boundary), FM_SUPERVISION_HOST_TURN_TIMEOUT (1200), FM_SUPERVISION_HOST_ROTATE_TURNS (20:
-# a new engine conversation after this many turns; every main session start
-# also opens a new one), FM_SUPERVISION_HOST_READY_TIMEOUT (25: how long a
+# a new engine conversation after this many turns; every main session start,
+# and every turn whose posture differs from the conversation's, also opens a
+# new one), FM_SUPERVISION_HOST_READY_TIMEOUT (25: how long a
 # successor cycle may take to verify), FM_SUPERVISION_HOST_POLL (1).
 # Park duration uses Bash's process-relative SECONDS counter (including Bash
 # 3.2), while durable timestamps still use epoch time. This is not a portable
@@ -892,8 +894,12 @@ leave_successor_for_main() {
 }
 
 # The engine conversation for this turn: the recorded one while it belongs to
-# this main session and has turns left, otherwise a new one. Sets ENGINE_SESSION
-# and ENGINE_MODE (new|resume).
+# this main session, was held in this turn's posture (TURN_POSTURE), and has
+# turns left, otherwise a new one. A posture change opens a new conversation so
+# an attended turn after the captain's return never inherits the away wakes,
+# their words, or their hold-for-return outcomes as context (and an away turn
+# never inherits attended dialog); a record from before the posture field reads
+# as a change. Sets ENGINE_SESSION and ENGINE_MODE (new|resume).
 # Succeed, setting RECORD_KEY, RECORD_SESSION and RECORD_TURNS, when the
 # recorded conversation is one the next turn resumes.
 engine_record_resumable() {
@@ -908,6 +914,7 @@ engine_record_resumable() {
     && [ "$(sed -n 's/^key=//p' "$ENGINE_RECORD" 2>/dev/null | head -n 1)" = "$key" ] \
     && [ "$recorded_engine" = "$FM_SUPERVISION_ENGINE" ] \
     && [ "$recorded_model" = "$FM_SUPERVISION_ENGINE_MODEL" ] \
+    && [ "$(sed -n 's/^posture=//p' "$ENGINE_RECORD" 2>/dev/null | head -n 1)" = "${TURN_POSTURE:-attended}" ] \
     && [ "$RECORD_TURNS" -lt "$ROTATE_TURNS" ] && [ -s "$PROMPT_FILE" ]
 }
 
@@ -943,8 +950,8 @@ choose_conversation() {
 write_engine_record() {  # <turns> <conversation-cost>
   local tmp
   tmp=$(mktemp "$ENGINE_RECORD.tmp.XXXXXX") || return 1
-  printf 'engine=%s\nmodel=%s\nsession=%s\nkey=%s\nturns=%s\nconversation_cost=%s\nended=%s\n' \
-    "$FM_SUPERVISION_ENGINE" "$FM_SUPERVISION_ENGINE_MODEL" "$ENGINE_SESSION" "$ENGINE_KEY" "$1" "$2" "$(date +%s)" > "$tmp" \
+  printf 'engine=%s\nmodel=%s\nsession=%s\nkey=%s\nposture=%s\nturns=%s\nconversation_cost=%s\nended=%s\n' \
+    "$FM_SUPERVISION_ENGINE" "$FM_SUPERVISION_ENGINE_MODEL" "$ENGINE_SESSION" "$ENGINE_KEY" "${TURN_POSTURE:-attended}" "$1" "$2" "$(date +%s)" > "$tmp" \
     && mv -f "$tmp" "$ENGINE_RECORD"
 }
 

@@ -53,6 +53,7 @@ test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main() {
   first="$home/engine-call.1"
   assert_re '^actor=branch$' "$first" "the attended engine must run as the branch actor"
   assert_no_re '^POSTURE: AWAY' "$first" "an attended wake must carry no away tail"
+  assert_re '^POSTURE: ATTENDED\.' "$first" "an attended wake must name its posture"
   assert_re '^(arg=)?FIRSTMATE SUPERVISION WAKE: signal: ' "$first" "the attended wake must carry the close"
   assert_re '	handled	turn=[^	]*	posture=attended	' "$home/state/.supervision-host.log" "the ledger must record the attended turn"
   assert_grep '"verdict":"routine"' "$home/state/branch-outcomes.jsonl" "the engine's routine report did not reach the store"
@@ -682,6 +683,41 @@ test_away_wake_is_handled_on_the_engine_and_never_reaches_main() {
   pass "host: an away wake is handled on the engine through the branch contract and never reaches main"
 }
 
+# The engine conversation outlives the captain's return, so the first attended
+# turn after it must neither resume the away conversation nor lack a posture
+# of its own: it opens a new conversation and names POSTURE: ATTENDED, so away
+# words, away tails, and hold-for-return outcomes are not its context.
+test_first_attended_turn_after_the_return_starts_clean() {
+  local home first second
+  home=$(make_home return-starts-clean attended)
+  # The captain speaks (the attended fixture's mirrored prompt) before leaving,
+  # exactly as in use, so the away record is entered after the host is up.
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "return: the host never started a watcher cycle"
+  FM_HOME="$home" "$CONTRACT" enter --words 'hold anything prod for the morning' >/dev/null 2>&1 \
+    || fail "fixture: could not record the away posture"
+  append_status "$home" 'step one'
+  wait_until 250 handled_at_least "$home" 1 || fail "return: the away wake was not handled: $(cat "$home/host.out"; cat "$home/state/.supervision-host.log")"
+  first="$home/engine-call.1"
+  assert_re '^POSTURE: AWAY\.' "$first" "fixture: the first wake was not away"
+  assert_re '^arg=--session-id$' "$first" "fixture: the away turn did not open a conversation"
+  FM_HOME="$home" "$CONTRACT" archive >/dev/null 2>&1 || fail "fixture: the return could not archive the record"
+  append_status "$home" 'step two'
+  wait_until 250 handled_at_least "$home" 2 \
+    || fail "return: the attended wake was not handled: $(cat "$home/host.out"; cat "$home/state/.supervision-host.log")"
+  second="$home/engine-call.2"
+  assert_re '^POSTURE: ATTENDED\.' "$second" "the first attended wake after the return must name its posture"
+  assert_no_re '^POSTURE: AWAY' "$second" "the first attended wake after the return must carry no away tail"
+  assert_no_re 'hold anything prod for the morning' "$second" "the first attended wake after the return carried the archived words"
+  assert_re '^arg=--session-id$' "$second" "the first attended turn after the return resumed the away conversation"
+  assert_no_re '^arg=--resume$' "$second" "the first attended turn after the return resumed the away conversation"
+  assert_re '^posture=attended$' "$home/state/.supervision-host-engine" "the engine record did not record the new posture"
+  assert_re '	handled	turn=[^	]*	posture=attended	' "$home/state/.supervision-host.log" "the ledger must record the attended turn"
+  kill -TERM "$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")"
+  wait_until_deadline 60 host_exited "$home" || fail "return: the host did not stop on TERM"
+  pass "host: the first attended turn after the captain's return opens a new conversation that names its attended posture"
+}
+
 test_away_turn_without_a_report_hands_the_wake_to_main() {
   local home token
   home=$(make_home away-noreport away)
@@ -936,6 +972,7 @@ fm_test_run \
   test_undelivered_dialog_is_fed_again_on_the_next_turn \
   test_attended_wake_with_an_unreadable_mirror_reaches_main \
   test_away_wake_is_handled_on_the_engine_and_never_reaches_main \
+  test_first_attended_turn_after_the_return_starts_clean \
   test_away_turn_without_a_report_hands_the_wake_to_main \
   test_return_during_an_engine_turn_hands_its_outcomes_to_main \
   test_silent_outcomes_are_not_relayed_when_the_captain_returns \

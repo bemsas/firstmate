@@ -145,6 +145,9 @@
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
+#              A ship or scout relaunch first asks the host resource gate
+#              (bin/fm-capacity.sh --host-gate) and, while the host is
+#              overloaded, exits 75 before stopping anything.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
@@ -1562,6 +1565,20 @@ record_note() {
   esac
 }
 
+# The host resource gate (bin/fm-capacity.sh --host-gate) for a ship or scout
+# replacement, asked before anything is stopped, so an overloaded host leaves
+# the current worker as it is instead of exiting it and then failing to start
+# its successor; bin/fm-spawn.sh --relaunch skips its own gate under this
+# transaction's control lock for the same reason. A secondmate is exempt.
+relaunch_host_gate() {
+  local verdict rc=0
+  case "$KIND" in ship|scout) ;; *) return 0 ;; esac
+  verdict=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-capacity.sh" --host-gate 2>/dev/null) || rc=$?
+  [ "$rc" -eq 75 ] || return 0
+  echo "deferred: this host is overloaded ($verdict); task $ID was not relaunched and its current worker was left as it is - relaunch again once load and memory recover" >&2
+  exit 75
+}
+
 do_relaunch() {
   local exit_result state note_line
   local -a spawn_args
@@ -1576,6 +1593,7 @@ do_relaunch() {
       || die "ACP relaunch preserves the recorded model; profile changes are unsupported"
     [ "$EFFORT_SET" = 0 ] || [ "$NEW_EFFORT" = "$(fm_meta_get "$META" effort)" ] \
       || die "ACP relaunch preserves the recorded effort; profile changes are unsupported"
+    relaunch_host_gate
     safe_checkpoint
     fm_backend_source acp || die "ACP adapter unavailable"
     fm_backend_acp_harness resume "$ID" --worktree "$WT" --note "$NOTE" --restart \
@@ -1609,6 +1627,7 @@ do_relaunch() {
       ;;
   esac
 
+  relaunch_host_gate
   if [ -n "$NOTE" ]; then
     note_line="note_file=$NOTE_FILE"
   else

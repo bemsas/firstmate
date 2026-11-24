@@ -8,7 +8,10 @@
 # yolo=off with a refusal like gerrit, and is refused on local-only; and the
 # plain (no --forge/--raw) output stays exactly two words, because tests/fm-secondmate-safety.test.sh and
 # tests/fm-secondmate-lifecycle-e2e.test.sh assert that shape with strict
-# string equality.
+# string equality. It also pins the prod= deployment mapping read by
+# --production: an exact production base, non-production dev, staging, and
+# feature bases, main never matching master, and unknown for an unmapped
+# project, an absent project, an unknown base, or a malformed token.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -40,6 +43,13 @@ cat > "$DATA/projects.md" <<'EOF'
 - hand-forgejo [no-mistakes forge=forgejo pr=manual] - a bound forge (added 2026-01-01)
 - hand-empty [no-mistakes pr=] - an empty value (added 2026-01-01)
 - hand-auto [no-mistakes pr=auto] - auto is the absence of the token, not a value (added 2026-01-01)
+- live-main [no-mistakes-prod-only +yolo prod=main] - production deploys from main (added 2026-01-01)
+- live-master [prod=master direct-PR] - production deploys from master, token first (added 2026-01-01)
+- live-two [no-mistakes prod=release/v1,main] - two production bases (added 2026-01-01)
+- not-hosted [no-mistakes-prod-only prod=none] - research only, no production deployment (added 2026-01-01)
+- unmapped [no-mistakes-prod-only] - no deployment mapping registered (added 2026-01-01)
+- mapped-empty [direct-PR prod=] - an empty mapping (added 2026-01-01)
+- mapped-hole [direct-PR prod=main,,dev] - an empty list item (added 2026-01-01)
 EOF
 
 run_mode() {
@@ -160,5 +170,32 @@ assert_contains "$err" "pr=manual" "the unknown pr value refusal did not name th
 err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --pr hand-direct 2>&1 >/dev/null)
 assert_contains "$err" "only a no-mistakes ship takes it" "the direct-PR refusal did not say why"
 pass "fm-project-mode: pr=manual refuses another mode, a bound forge, an empty value, and an unknown value, but leaves --forge answerable"
+
+run_production() {
+  FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --production "$1" "$2" 2>/dev/null
+}
+for case_line in \
+  "live-main main production" "live-main master non-production" "live-main dev non-production" \
+  "live-main staging non-production" "live-main fm/feature-x non-production" "live-main - unknown" \
+  "live-master master production" "live-master main non-production" \
+  "live-two release/v1 production" "live-two main production" "live-two dev non-production" \
+  "not-hosted main non-production" "unmapped main unknown" "unmapped dev unknown" \
+  "mapped-empty main unknown" "mapped-hole main unknown" "absent-project main unknown"; do
+  read -r p_name p_base p_want <<EOF
+$case_line
+EOF
+  got=$(run_production "$p_name" "$p_base")
+  [ "$got" = "$p_want" ] || fail "--production $p_name $p_base must print $p_want, got '$got'"
+done
+[ "$(run_production live-main '')" = unknown ] || fail "an empty base must classify unknown"
+[ "$(run_mode live-main)" = "no-mistakes on" ] || fail "a prod= token changed the default posture: $(run_mode live-main)"
+[ "$(run_mode live-master)" = "direct-PR off" ] || fail "a leading prod= token displaced the mode: $(run_mode live-master)"
+[ "$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --raw live-main 2>/dev/null)" = "no-mistakes-prod-only on" ] \
+  || fail "a prod= token changed the raw conditional-policy output"
+err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --production mapped-empty main 2>&1 >/dev/null)
+assert_contains "$err" "malformed deployment mapping" "an empty prod= mapping must be named on stderr"
+FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --production live-main >/dev/null 2>&1
+[ "$?" -eq 2 ] || fail "--production without a base must be a usage error"
+pass "fm-project-mode: --production classifies only an exact registered production base as production, never by mode or project name"
 
 echo "# fm-project-mode.test.sh: all assertions passed"

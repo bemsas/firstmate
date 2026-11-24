@@ -184,6 +184,10 @@
 # because there is no established translation from a gh/glab-style flag into
 # a Forgejo API field yet.
 #
+# Only a task this home records can merge here: a missing record refuses and
+# points at bin/fm-merge-route.sh, which owns resolving a PR's owning home and
+# handing a second mate's child PR to that mate.
+#
 # Before either forge merge, the task's existing per-task control lock
 # serializes the captain-hold check through the forge command. A still-held or
 # unreadable row refuses before that command, so a captain approval must be
@@ -657,6 +661,9 @@ fm_lease_forbid_branch "PR merge (fm-pr-merge)" --away-relocated
 
 if [ ! -f "$META" ] || [ -L "$META" ]; then
   echo "error: task metadata is unavailable" >&2
+  # A second mate's relayed child has its record in the mate's home, so it is
+  # never merged from here; bin/fm-merge-route.sh owns that owner decision.
+  echo "hint: this home does not own task $ID; bin/fm-merge-route.sh $ID <pr-url> resolves its owner and hands a second mate's child to that mate" >&2
   exit 1
 fi
 if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then

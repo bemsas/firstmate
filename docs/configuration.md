@@ -985,6 +985,9 @@ The optional local, gitignored `config/lane-capacity` file says how many ship an
 With the file absent nothing changes: the report prints counts and host figures only, never invents a target, never advises holding dispatch, and nothing is published; a malformed value is reported as invalid rather than guessed.
 Persistent secondmates hold no lane.
 The file is a per-machine choice and is not inherited by secondmate homes, so each home owns its own numbers.
+A second mate's home summary publishes its cap as `lane_target`, which a parent's away session reads for the refill cue (`bin/fm-lane-refill.sh`).
+A task record holds a lane until this host proves it stopped: no process at all in its worktree, past a pending-launch grace, on a process table actually read; an unreadable table or a record without a worktree still holds its lane, and `bin/fm-capacity.sh`'s header owns the rule and how admission reuses the last publish's evidence.
+Independently of this file, every ship or scout spawn and relaunch first asks `bin/fm-capacity.sh --host-gate`, which defers with exit 75 while the 1-minute load is above 1.5 times the logical cores or available memory is under 20 percent; its header owns the thresholds, which an environment override may only tighten.
 
 The first non-comment line is the cap, one non-negative integer, so a file holding only that integer keeps its earlier meaning, or the word `auto` for a measured budget instead of a fixed cap (below).
 Optional lines follow, one key and its value per line, with `#` starting a comment:
@@ -2630,6 +2633,13 @@ It applies to a `no-mistakes` ship on a project with no `forge=` binding only, s
 Firstmate passes it to `bin/fm-brief.sh --pr manual` at intake the same way it passes `--forge`, `bin/fm-spawn.sh` refuses a brief whose `pr=` disagrees with the registry, and `bin/fm-promote.sh` reads it from the registry.
 The generated brief then has the worker pass `--skip pr,ci` on every `no-mistakes axi run`, write the PR title and body itself, open or update the PR with `gh-axi`, and wait for the PR's checks; `bin/fm-dod-lib.sh` owns that text.
 The token is the thin registry form of no-mistakes' own keep-text option, [kunchenguid/no-mistakes#1648](https://github.com/kunchenguid/no-mistakes/issues/1648), and is meant to map onto it once that exists.
+
+## Deployment mapping (data/projects.md prod= token)
+
+A project with no `prod=` token has no recorded deployment mapping, so away-mode production holds read every pull request base on it as unknown and hold it.
+A prod-hosted project registers the base branches that deploy to production, such as `[no-mistakes-prod-only prod=main]` or `[no-mistakes prod=release/v1,main]`, and a project with no production deployment registers `prod=none`.
+`bin/fm-project-mode.sh --production <name> <base>` classifies a verified pull request base as production, non-production, or unknown, and its header owns the grammar; `bin/fm-merge-route.sh` reads the base live and reports the result.
+The delivery mode never classifies production: `no-mistakes-prod-only` says how a task ships, not where the project deploys.
 
 ## GitHub Enterprise hosts (config/github-hosts)
 

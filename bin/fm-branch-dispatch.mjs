@@ -34,7 +34,8 @@
 //     feed adds nothing, and a feed that cannot be read exits 3 with no
 //     prompt, so the host hands the wake to main. --away appends the away tail with the
 //     record read-back from <path>; a missing or empty read-back prints the
-//     tail's fixed unavailable notice instead.
+//     tail's fixed unavailable notice instead. Without --away the attended
+//     tail (POSTURE: ATTENDED) is appended, so every wake names its posture.
 //
 // The state directory is FM_STATE_OVERRIDE, else $FM_HOME/state, else the
 // repository's own state/. Exit 0 on success, 2 on invalid use, 3 when a
@@ -124,7 +125,7 @@ if (command === "scope") {
       process.exit(3);
     }
   }
-  const tail = away ? dispatch.awayPostureTailFor(readOptional(readbackFile)) : "";
+  const tail = away ? dispatch.awayPostureTailFor(readOptional(readbackFile)) : dispatch.attendedPostureTailFor();
   process.stdout.write(`${dispatch.branchWakePrompt(message, report, tail, mirror)}\n`);
 } else {
   usage();

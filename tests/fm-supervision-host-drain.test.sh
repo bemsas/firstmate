@@ -142,6 +142,7 @@ test_dispatch_entry_scopes_rows_and_renders_the_away_tail() {
   assert_contains "$out" "MAIN DIALOG MIRROR (read-only context" "an attended wake prompt must open with the mirror header"
   assert_contains "$out" "[captain] keep it small" "the mirror must carry the captain's words"
   assert_not_contains "$out" "POSTURE: AWAY" "an attended wake prompt must carry no away tail"
+  assert_contains "$out" "POSTURE: ATTENDED." "an attended wake prompt must name its posture"
   : > "$home/mirror"
   out=$(printf 'signal: demo.status\n' | FM_HOME="$home" node "$DISPATCH" wake-prompt --report 'the bin/fm-branch-report.sh command' --mirror-file "$home/mirror")
   assert_not_contains "$out" "MAIN DIALOG MIRROR" "an empty feed must add nothing"
@@ -156,6 +157,7 @@ test_dispatch_entry_scopes_rows_and_renders_the_away_tail() {
   assert_contains "$out" "FIRSTMATE SUPERVISION WAKE: signal: demo.status" "the wake prompt must carry the reason"
   assert_contains "$out" "finish with the bin/fm-branch-report.sh command." "the wake prompt must name the host's report surface"
   assert_contains "$out" "POSTURE: AWAY." "an away wake prompt must carry the posture tail"
+  assert_not_contains "$out" "POSTURE: ATTENDED" "an away wake prompt must not also claim the attended posture"
   assert_contains "$out" "    merge nothing" "the away tail must carry the record's read-back verbatim"
   pass "dispatch entry: the host reads branch eligibility, the offer rule, and the wake prompt from the Pi branch's own owner"
 }

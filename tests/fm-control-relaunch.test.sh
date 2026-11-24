@@ -440,6 +440,37 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   pass "fm-control relaunch: pending composer text refuses before the exit command is typed"
 }
 
+# The host resource gate (bin/fm-capacity.sh --host-gate) is asked before the
+# old agent is stopped, so an overloaded host leaves the current worker as it is
+# instead of exiting it and then failing to start a replacement; a direct
+# fm-spawn --relaunch defers before it takes the task's control lock. The fake
+# /proc drives the Linux probes, so this case runs where they are the probes.
+test_overloaded_host_refuses_relaunch_before_stopping_the_worker() {
+  local dir out rc proc meta_before
+  if [ "$(uname -s)" != Linux ]; then
+    pass "fm-control relaunch: host gate case skipped off Linux (its fake /proc drives Linux probes only)"
+    return 0
+  fi
+  dir=$(new_case host-gate rl90)
+  add_ship_task "$dir" rl90 claude
+  proc="$dir/proc"
+  mkdir -p "$proc"
+  printf '9999.00 1.00 1.00 1/1 1\n' > "$proc/loadavg"
+  printf 'MemTotal: 1000 kB\nMemAvailable: 10 kB\n' > "$proc/meminfo"
+  meta_before=$(cat "$dir/home/state/rl90.meta")
+  out=$(FM_PROC_ROOT_OVERRIDE="$proc" run_control "$dir" rl90 relaunch --note "host is overloaded"); rc=$?
+  expect_code 75 "$rc" "an overloaded host must defer the relaunch"$'\n'"$out"
+  assert_contains "$out" "this host is overloaded" "the deferral must name the host"
+  assert_not_contains "$out" "capacity" "a hard health deferral must not read like retriable capacity contention"
+  assert_no_grep "/exit" "$dir/fake/literal" "a deferred relaunch must not stop the current worker"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a deferred relaunch must leave the old agent running"
+  [ "$(cat "$dir/home/state/rl90.meta")" = "$meta_before" ] || fail "a deferred relaunch changed the task record"
+  out=$(FM_PROC_ROOT_OVERRIDE="$proc" run_spawn "$dir" rl90 --relaunch --harness claude); rc=$?
+  expect_code 75 "$rc" "a direct relaunch on an overloaded host must defer"$'\n'"$out"
+  assert_absent "$dir/home/state/.control-rl90.lock" "a deferred direct relaunch must not take or leave the control lock"
+  pass "fm-control relaunch: an overloaded host defers the relaunch before stopping the worker or taking a lock"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven() {
   local dir out rc
   dir=$(new_case unproven-exit rl44)
@@ -3296,6 +3327,7 @@ test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_keeps_a_recorded_pr_valid_for_the_merge_poll
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
+test_overloaded_host_refuses_relaunch_before_stopping_the_worker
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_accepts_a_standalone_clone_worktree

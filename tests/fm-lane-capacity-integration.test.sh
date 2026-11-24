@@ -173,10 +173,14 @@ set_power() {
   fi
 }
 
-# set_mem <case-dir> <gb>: the injected available memory, in whole GB of 100.
+# set_mem <case-dir> <gb>: the injected available memory, in whole GB. The
+# total is four times that (at least 4 GB), so available memory always stays
+# at 25 percent and the always-on host gate (bin/fm-capacity.sh --host-gate,
+# pinned in tests/fm-capacity.test.sh) never decides these budget cases.
 set_mem() {
+  local total=$(( $2 > 0 ? $2 * 4 : 4 ))
   printf '%s\n' "$2" > "$1/v/avail_gb"
-  printf 'MemTotal:       104857600 kB\nMemAvailable:   %s kB\n' "$(( $2 * 1048576 ))" > "$1/proc/meminfo"
+  printf 'MemTotal:       %s kB\nMemAvailable:   %s kB\n' "$(( total * 1048576 ))" "$(( $2 * 1048576 ))" > "$1/proc/meminfo"
 }
 
 # set_room <case-dir> <lanes>: injected memory with room for exactly <lanes>

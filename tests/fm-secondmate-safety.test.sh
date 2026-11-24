@@ -2756,17 +2756,59 @@ EOF
   held=$(hold_task_set_lock "$subhome/state" task-spawn) \
     || fail "could not stage a fresh spawn holding the task-set lock"
   holder=${held%% *}
-  if FM_HOME="$subhome" FM_SPAWN_NO_GUARD=1 \
+  if FM_HOME="$subhome" FM_SPAWN_NO_GUARD=1 FM_SPAWN_TASK_SET_WAIT=1 \
     "$ROOT/bin/fm-spawn.sh" newtask "$subhome/projects/alpha" --scout >/dev/null 2>"$err"; then
     kill "$holder" 2>/dev/null || true
     fail "a fresh spawn published while another spawn owned the task set"
   fi
   grep -F "task set is locked by another spawn" "$err" >/dev/null \
     || fail "the refusal did not name the other spawn: $(cat "$err")"
+  grep -F "(waited 1s)" "$err" >/dev/null \
+    || fail "the refusal did not say it waited out its bound for the other spawn: $(cat "$err")"
   [ ! -e "$subhome/state/newtask.meta" ] || fail "a refused spawn published a task"
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
   pass "a fresh spawn refusal identifies another spawn as the task-set holder"
+}
+
+# A burst of spawns in one home (a review launcher's, for example) is transient
+# contention: a fresh spawn whose task-set holder is positively another spawn
+# waits for it, bounded, instead of giving up at once. The holder here releases
+# after about a second, so the waiting spawn must get past the task-set lock;
+# a forced teardown or an unidentified holder still refuses (the tests above).
+test_fresh_spawn_waits_out_a_briefly_held_spawn_task_set_lock() {
+  local home subhome err rec lock holder start elapsed
+  rec=$(seed_task_set_lock_home taskset-brief-spawn)
+  IFS='|' read -r home subhome <<EOF
+$rec
+EOF
+  err="$TMP_ROOT/taskset-brief-spawn.err"
+  lock=$(task_set_lock_path "$subhome/state") || fail "could not resolve the task-set lock"
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lock" || exit 1
+    fm_lock_set_role "$lock" task-spawn || exit 1
+    sleep 1
+    fm_lock_release "$lock"
+  ) >/dev/null 2>&1 &
+  holder=$!
+  local i=0
+  while [ "$(cat "$lock/role" 2>/dev/null || true)" != task-spawn ] && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$(cat "$lock/role" 2>/dev/null || true)" = task-spawn ] || fail "the brief spawn holder never took the task-set lock"
+  start=$SECONDS
+  FM_HOME="$subhome" FM_SPAWN_NO_GUARD=1 FM_SPAWN_TASK_SET_WAIT=20 \
+    "$ROOT/bin/fm-spawn.sh" newtask "$subhome/projects/alpha" --scout >/dev/null 2>"$err" || true
+  elapsed=$((SECONDS - start))
+  wait "$holder" 2>/dev/null || true
+  if grep -F "task set is locked" "$err" >/dev/null; then
+    fail "a fresh spawn gave up on a briefly held spawn task-set lock instead of waiting: $(cat "$err")"
+  fi
+  [ "$elapsed" -lt 20 ] || fail "the spawn waited out its whole bound for a lock released after a second"
+  pass "a fresh spawn waits out a briefly held spawn task-set lock instead of refusing at once"
 }
 
 test_fresh_remote_secondmate_spawn_refuses_while_task_set_is_owned() {
@@ -3186,6 +3228,7 @@ test_force_teardown_locks_descendant_with_absent_state
 test_force_teardown_refuses_while_a_task_is_being_published
 test_fresh_spawn_refuses_while_a_forced_teardown_owns_the_task_set
 test_fresh_spawn_names_another_spawn_as_task_set_holder
+test_fresh_spawn_waits_out_a_briefly_held_spawn_task_set_lock
 test_fresh_remote_secondmate_spawn_refuses_while_task_set_is_owned
 test_secondmate_force_teardown_refuses_child_active_home_descendant
 test_secondmate_force_teardown_refuses_child_repo_descendant

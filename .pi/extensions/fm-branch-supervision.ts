@@ -114,6 +114,7 @@ import {
 import {
   activateEligibleRowsOwner,
   afkPostureRecordPresent,
+  attendedPostureTailFor,
   awayPostureTailFor,
   branchWakePrompt,
   deactivateEligibleRowsOwner,
@@ -1574,7 +1575,7 @@ ${context.command}
         // Same residual: archive during snapshot publish or read-back still
         // lets this prompt proceed; the guarded scripts revalidate, and the
         // durable queue keeps every row (bin/fm-lease-lib.sh role-partition).
-        const postureTail = afk ? await awayPostureTail() : "";
+        const postureTail = afk ? await awayPostureTail() : attendedPostureTailFor();
         try {
           await session.prompt(branchWakePrompt(message, "fm_branch_report", postureTail));
         } finally {

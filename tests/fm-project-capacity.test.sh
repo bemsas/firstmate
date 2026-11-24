@@ -687,6 +687,45 @@ test_lane_capacity_gate_defers_without_leaving_anything_behind() {
   pass "admit-spawns defers a spawn the lane verdict refuses, leaves nothing behind, and nothing in the environment bypasses it"
 }
 
+# The host resource gate needs no opt-in: an overloaded host defers a fresh
+# spawn with exit 75 before the task-set lock, any shared project or lane lock,
+# endpoint, worktree, record, or backlog move exists. The fake /proc drives the
+# Linux probes; elsewhere they read their own sources, so the case runs on Linux.
+test_overloaded_host_defers_a_fresh_spawn_before_any_lock() {
+  local case_dir home out rc=0 before worktrees proc
+  if [ "$(uname -s)" != Linux ]; then
+    pass "host gate spawn case skipped off Linux (its fake /proc drives Linux probes only)"
+    return 0
+  fi
+  case_dir=$(make_case host-gate task-c)
+  home="$case_dir/home"
+  proc="$case_dir/proc"
+  mkdir -p "$proc"
+  printf '9999.00 1.00 1.00 1/1 1\n' > "$proc/loadavg"
+  printf 'MemTotal: 1000 kB\nMemAvailable: 900 kB\n' > "$proc/meminfo"
+  before=$(call_count "$case_dir")
+  worktrees=$(worktree_list "$case_dir")
+  out=$(FM_PROC_ROOT_OVERRIDE="$proc" spawn_ship "$case_dir" task-c "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "an overloaded host did not defer a fresh spawn: $out"
+  assert_contains "$out" "deferred: this host is overloaded (host-gate: verdict=defer" "the deferral did not carry the host verdict"
+  assert_contains "$out" "task task-c was not launched and its backlog item stays queued" "the deferral did not say the task stays queued"
+  assert_not_contains "$out" "locked by another spawn" "a hard health deferral read like brief lock contention"
+  assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+  assert_absent "$home/state/.task-set.lock" "a deferred spawn took the task-set lock"
+  assert_absent "$home/state/.lane-admission.lock" "a deferred spawn took the lane admission lock"
+  printf 'MemTotal: 1000 kB\nMemAvailable: 100 kB\n' > "$proc/meminfo"
+  printf '0.10 1.00 1.00 1/1 1\n' > "$proc/loadavg"
+  rc=0
+  out=$(FM_PROC_ROOT_OVERRIDE="$proc" spawn_ship "$case_dir" task-c "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "low available memory did not defer a fresh spawn: $out"
+  assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+  rc=0
+  out=$(FM_PROC_ROOT_OVERRIDE="$case_dir/no-such-proc" spawn_ship "$case_dir" task-c) || rc=$?
+  expect_code 0 "$rc" "unknown host readings blocked a spawn by themselves: $out"
+  assert_contains "$out" "spawned task-c" "unknown host readings did not let the spawn proceed under its other gates"
+  pass "an overloaded host defers a fresh spawn before any lock or record, and unknown readings alone do not block"
+}
+
 test_lane_capacity_gate_refuses_an_unreadable_opt_in() {
   local case_dir home out rc=0 before worktrees
   case_dir=$(make_case lane-invalid task-c)
@@ -734,3 +773,4 @@ test_orca_spawn_is_admitted_under_the_shared_project_lock
 test_lane_capacity_gate_is_opt_in
 test_lane_capacity_gate_defers_without_leaving_anything_behind
 test_lane_capacity_gate_refuses_an_unreadable_opt_in
+test_overloaded_host_defers_a_fresh_spawn_before_any_lock
