@@ -352,6 +352,9 @@ if [ -f "$PARK_RECORD" ]; then
   if [ -n "$(fm_meta_get "$PARK_RECORD" held)" ]; then
     emit paused review-park "parked on review and held: PR $PARK_PR at ${PARK_HEAD:0:12}; $(fm_meta_get "$PARK_RECORD" held_reason); automatic relaunch stopped - run bin/fm-park.sh resume to relaunch"
   fi
+  if [ -n "$(fm_meta_get "$PARK_RECORD" resume_attempt)" ]; then
+    emit paused review-park "parked on review: PR $PARK_PR at ${PARK_HEAD:0:12}; a relaunch was attempted and has no recorded outcome yet - nothing retries it automatically"
+  fi
   if [ -n "$(fm_meta_get "$PARK_RECORD" pending)" ]; then
     emit paused review-park "parking on review: PR $PARK_PR at ${PARK_HEAD:0:12} since $PARK_WHEN; the agent's stop is not yet confirmed"
   fi

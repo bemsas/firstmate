@@ -107,15 +107,26 @@ SH
   # The host resource gate: admits unless host.overloaded exists.
   cat > "$fakebin/fm-capacity.sh" <<SH
 #!/usr/bin/env bash
+printf 'asked\n' >> "$world/gate.log"
 [ ! -e "$world/host.overloaded" ] || exit 75
 exit 0
 SH
-  # mv fails for the lane's park record while record.mv.fail exists.
+  # mv fails for the lane's park record while record.mv.fail exists, only for a
+  # record that says held while held.mv.fail exists, and for one that carries
+  # the published marker, after running it, while marker.mv.hook exists.
   cat > "$fakebin/mv" <<SH
 #!/usr/bin/env bash
-last=
-for a in "\$@"; do last=\$a; done
-if [ -e "$world/record.mv.fail" ] && [ "\$last" = "$world/state/lane.review-park" ]; then exit 1; fi
+src= last=
+for a in "\$@"; do src=\$last; last=\$a; done
+if [ "\$last" = "$world/state/lane.review-park" ]; then
+  [ ! -e "$world/record.mv.fail" ] || exit 1
+  if [ -e "$world/held.mv.fail" ] && grep -q '^held=' "\$src"; then exit 1; fi
+  if [ -e "$world/marker.mv.hook" ] && grep -qx 'held_reported=1' "\$src"; then
+    PATH=/usr/bin:/bin mv "$world/marker.mv.hook" "$world/marker.mv.hook.ran"
+    sh "$world/marker.mv.hook.ran"
+    exit 1
+  fi
+fi
 PATH=/usr/bin:/bin exec mv "\$@"
 SH
   cat > "$fakebin/fm-teardown.sh" <<SH
@@ -738,6 +749,26 @@ tick_and_report() {  # <world> <label>
   run_park "$1" tick 2>&1 || fail "$2: the reporting tick failed"
 }
 
+# Ticks until a held outcome is reported, and prints everything they printed.
+ticks_until_held() {  # <world> <label>
+  local out=
+  for _ in $(seq 1 80); do
+    out="$out$(run_park "$1" tick 2>&1)"
+    case "$out" in *"held lane: "*) printf '%s\n' "$out"; return 0 ;; esac
+    sleep 0.1
+  done
+  fail "$2: no held outcome within 80 ticks: $out"
+}
+
+# Waits until <file> exists and no lane action still holds the lane.
+wait_lane_settled() {  # <world> <label> <file>
+  for _ in $(seq 1 200); do
+    if [ -e "$3" ] && [ ! -e "$1/state/.review-park-lane.lock" ]; then return 0; fi
+    sleep 0.1
+  done
+  fail "$2: the lane action did not settle within 20s"
+}
+
 expect_relaunch() {  # <world> <label> <trigger-substring>
   local world=$1 label=$2 want=$3 out
   out=$(tick_and_report "$world" "$label")
@@ -870,8 +901,8 @@ test_failing_checks_hold_the_lane_once_and_resume_by_hand() {
   for _ in $(seq 1 20); do [ ! -e "$w/control.log" ] || break; sleep 0.1; done
   [ ! -e "$w/control.log" ] || fail "hold-timed-out: a timed-out review check relaunched the worker: $(cat "$w/control.log")"
 
-  # A held outcome whose marker cannot be written is withdrawn, not left to be
-  # published twice: the episode stays pending and is published once later.
+  # A held outcome whose marker cannot be written is not published: the
+  # episode stays pending and is published once later.
   w=$(make_world hold-marker-fail "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
   gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
   : > "$w/record.mv.fail"
@@ -924,7 +955,7 @@ test_gate_refused_review_relaunch_is_held_until_a_manual_resume() {
     w=$(make_world "resume-refused-$how" "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
     gh_fixture "$w/gh.1.json" decision=CHANGES_REQUESTED
     : > "$w/$how"
-    out=$(tick_and_report "$w" "refused-$how")
+    out=$(ticks_until_held "$w" "refused-$how")
     case "$out" in "held lane: PR $GH_URL - relaunch refused by the host resource gate (changes were requested)"*"resume it by hand"*) ;; *) fail "refused-$how: tick output: $out" ;; esac
     grep -q '^held=[0-9]' "$w/state/lane.review-park" || fail "refused-$how: the refusal was not held"
     ! grep -q '^resume_error=' "$w/state/lane.review-park" || fail "refused-$how: a refusal was recorded as a failed relaunch"
@@ -935,7 +966,7 @@ test_gate_refused_review_relaunch_is_held_until_a_manual_resume() {
 
     # Still refused, then recovered: no tick relaunches or reports again.
     out=$(for i in 1 2 3; do run_park "$w" tick 2>&1; done)
-    rm -f "$w/$how"
+    rm -f "$w/host.overloaded" "$w/control.defer"
     out="$out$(for i in 1 2 3; do run_park "$w" tick 2>&1; sleep 0.3; done)"
     [ -z "$out" ] || fail "refused-$how: a held refusal was reported or acted on again: $out"
     [ "$(cat "$w/control.log" 2>/dev/null | grep -c ' relaunch ')" = "$calls" ] || fail "refused-$how: a tick retried the refused relaunch: $(cat "$w/control.log")"
@@ -948,12 +979,94 @@ test_gate_refused_review_relaunch_is_held_until_a_manual_resume() {
     expect_code 75 "$rc" "refused-$how: a manual resume on an overloaded host must exit 75: $out"
     case "$out" in *"deferred: lane was not relaunched"*) ;; *) fail "refused-$how: manual refusal: $out" ;; esac
     ! compgen -G "$w/state/.review-park-report-*" >/dev/null || fail "refused-$how: a refused manual resume queued a second report"
-    rm -f "$w/$how"
+    rm -f "$w/host.overloaded" "$w/control.defer"
     out=$(run_park "$w" resume lane --trigger "operator retry" 2>&1) || fail "refused-$how: manual resume failed on a healthy host: $out"
     case "$out" in *"relaunched lane: PR $GH_URL - operator retry") ;; *) fail "refused-$how: manual resume: $out" ;; esac
     [ ! -e "$w/state/lane.review-park" ] || fail "refused-$how: the park record outlived its relaunch"
   done
   pass "a review relaunch the host gate refuses is held and reported once, no later tick retries it even after recovery, and a manual resume exits 75 while overloaded and relaunches once healthy"
+}
+
+# A refusal whose hold cannot be recorded still consumes the attempt: no tick
+# relaunches or asks the gate again after storage and the host recover, the
+# lane is then held and reported once, and a manual resume relaunches it.
+test_refusal_that_cannot_be_recorded_is_never_retried() {
+  local w out how
+  for how in host.overloaded control.defer; do
+    w=$(make_world "lost-hold-$how" "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+    gh_fixture "$w/gh.1.json" decision=CHANGES_REQUESTED
+    : > "$w/$how"; : > "$w/held.mv.fail"
+    out=$(run_park "$w" tick 2>&1)
+    wait_lane_settled "$w" "lost-hold-$how" "$w/gate.log"
+    out="$out$(run_park "$w" tick 2>&1; run_park "$w" tick 2>&1)"
+    [ -z "$out" ] || fail "lost-hold-$how: an unrecorded hold was reported: $out"
+    ! grep -q '^held=' "$w/state/lane.review-park" || fail "lost-hold-$how: the fixture did not lose the hold"
+    grep -q '^resume_attempt=[0-9]' "$w/state/lane.review-park" || fail "lost-hold-$how: the attempt was not consumed before admission"
+    ! grep -q 'parked on review and held' "$w/state/lane.status" || fail "lost-hold-$how: a hold was claimed before it was recorded"
+    out=$(FM_HOME="$w" FM_STATE_OVERRIDE="$w/state" "$ROOT/bin/fm-crew-state.sh" lane 2>&1 | head -1)
+    case "$out" in "state: paused"*"nothing retries it automatically"*) ;; *) fail "lost-hold-$how: crew state: $out" ;; esac
+    rm -f "$w/host.overloaded" "$w/control.defer" "$w/held.mv.fail"
+    out=$(ticks_until_held "$w" "lost-hold-$how")
+    out="$out$(for _ in 1 2 3; do run_park "$w" tick 2>&1; sleep 0.3; done)"
+    [ "$(printf '%s\n' "$out" | grep -c 'held lane: ')" = 1 ] || fail "lost-hold-$how: the outcome was not reported exactly once: $out"
+    case "$out" in *"a relaunch attempt (changes were requested) was refused or ended without a recorded outcome"*) ;; *) fail "lost-hold-$how: $out" ;; esac
+    [ "$(wc -l < "$w/gate.log" | tr -d ' ')" = 1 ] || fail "lost-hold-$how: a tick tried admission again: $(cat "$w/gate.log")"
+    case "$how" in
+      host.overloaded) [ ! -e "$w/control.log" ] || fail "lost-hold-$how: a tick relaunched: $(cat "$w/control.log")" ;;
+      *) [ "$(grep -c ' relaunch ' "$w/control.log")" = 1 ] || fail "lost-hold-$how: a tick relaunched again: $(cat "$w/control.log")" ;;
+    esac
+    [ "$(grep -c 'parked on review and held' "$w/state/lane.status")" = 1 ] || fail "lost-hold-$how: not exactly one paused episode"
+    out=$(run_park "$w" resume lane --trigger "operator retry" 2>&1) || fail "lost-hold-$how: manual resume failed: $out"
+    case "$out" in *"relaunched lane: PR $GH_URL - operator retry") ;; *) fail "lost-hold-$how: manual resume: $out" ;; esac
+  done
+  # With no record write possible at all, nothing is tried.
+  w=$(make_world lost-attempt "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" decision=CHANGES_REQUESTED
+  : > "$w/record.mv.fail"
+  out=$(for _ in 1 2 3; do run_park "$w" tick 2>&1; sleep 0.5; done)
+  [ -z "$out" ] || fail "lost-attempt: $out"
+  [ ! -e "$w/gate.log" ] && [ ! -e "$w/control.log" ] || fail "lost-attempt: an attempt that could not be recorded went ahead"
+  pass "a relaunch refusal whose hold cannot be recorded is never retried by a tick, is held and reported once when storage recovers, and resumes by hand; an attempt that cannot be recorded is not made"
+}
+
+# The outcome and its durable marker agree for every collecting tick: a tick
+# running inside a failing marker write sees nothing, and the outcome is
+# reported once after recovery. A wake that cannot be recorded leaves it pending.
+test_held_outcome_is_published_once_across_concurrent_and_failed_ticks() {
+  local w out
+  w=$(make_world marker-race "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" decision=CHANGES_REQUESTED
+  : > "$w/host.overloaded"
+  printf '"%s" tick >> "%s" 2>&1\n' "$PARK" "$w/concurrent.out" > "$w/marker.mv.hook"
+  out=
+  for _ in $(seq 1 80); do
+    out="$out$(run_park "$w" tick 2>&1)"
+    [ ! -e "$w/marker.mv.hook.ran" ] || break
+    sleep 0.1
+  done
+  wait_lane_settled "$w" marker-race "$w/marker.mv.hook.ran"
+  [ -z "$out" ] || fail "marker-race: an outcome was printed before its marker: $out"
+  [ ! -s "$w/concurrent.out" ] || fail "marker-race: a concurrent tick surfaced the outcome before rollback: $(cat "$w/concurrent.out")"
+  ! compgen -G "$w/state/.review-park-report-*" >/dev/null || fail "marker-race: a report survived its failed marker"
+  out=$(for _ in 1 2 3; do run_park "$w" tick 2>&1; done)
+  [ "$(printf '%s\n' "$out" | grep -c 'held lane: ')" = 1 ] || fail "marker-race: the outcome was not reported exactly once: $out"
+  [ "$(grep -c 'parked on review and held' "$w/state/lane.status")" = 1 ] || fail "marker-race: not exactly one paused episode"
+  [ ! -e "$w/control.log" ] || fail "marker-race: a tick relaunched"
+  rm -f "$w/host.overloaded"
+  out=$(run_park "$w" resume lane --trigger "operator retry" 2>&1) || fail "marker-race: manual resume failed: $out"
+  case "$out" in *"relaunched lane: "*) ;; *) fail "marker-race: manual resume: $out" ;; esac
+
+  w=$(make_world wake-fail "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  mkdir "$w/state/.wake-queue"
+  out=$(run_park "$w" tick 2>/dev/null)
+  [ -z "$out" ] || fail "wake-fail: an outcome was printed without its wake: $out"
+  grep -q '^held=' "$w/state/lane.review-park" || fail "wake-fail: the lane was not held"
+  ! grep -q '^held_reported=' "$w/state/lane.review-park" || fail "wake-fail: the marker survived a wake that was not recorded"
+  rmdir "$w/state/.wake-queue"
+  out=$(for _ in 1 2 3; do run_park "$w" tick 2>&1; done)
+  [ "$(printf '%s\n' "$out" | grep -c 'held lane: ')" = 1 ] || fail "wake-fail: the outcome was not reported exactly once: $out"
+  pass "a held outcome is reported once: never before its marker is durable, never to a concurrent tick inside a failing marker write, and again only when its wake was not recorded"
 }
 
 test_edited_comment_beyond_first_hundred_triggers_relaunch() {
@@ -1386,6 +1499,8 @@ fm_test_run \
   test_failed_relaunch_keeps_record_and_stops_retrying \
   test_failing_checks_hold_the_lane_once_and_resume_by_hand \
   test_gate_refused_review_relaunch_is_held_until_a_manual_resume \
+  test_refusal_that_cannot_be_recorded_is_never_retried \
+  test_held_outcome_is_published_once_across_concurrent_and_failed_ticks \
   test_closed_pr_is_reported_once \
   test_tick_parks_clean_idle_lanes_only_when_opted_in \
   test_land_requires_opt_in_but_always_cleans_parked \

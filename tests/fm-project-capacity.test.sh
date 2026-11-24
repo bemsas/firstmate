@@ -804,21 +804,23 @@ SH
 
 # One open pull request node: number, head branch, draft, reviewDecision
 # (null for none), the head commit an APPROVED review was left on (empty for
-# none), and the repository the head branch lives in (default acme/widget, the
-# target itself). Its own head commit is h<number>.
-pr_node() {  # <number> <head> <draft> <decision|null> [<approved-oid>] [<head-repo>]
-  jq -cn --argjson n "$1" --arg head "$2" --argjson draft "$3" --arg d "$4" --arg ap "${5:-}" --arg hr "${6:-Acme/Widget}" '{
-    number: $n, headRefName: $head, headRefOid: "h\($n)", isDraft: $draft,
+# none), the repository the head branch lives in (default acme/widget, the
+# target itself), and its base branch (default main). Its own head commit is
+# h<number>.
+pr_node() {  # <number> <head> <draft> <decision|null> [<approved-oid>] [<head-repo>] [<base>]
+  jq -cn --argjson n "$1" --arg head "$2" --argjson draft "$3" --arg d "$4" --arg ap "${5:-}" --arg hr "${6:-Acme/Widget}" --arg base "${7:-main}" '{
+    number: $n, baseRefName: $base, headRefName: $head, headRefOid: "h\($n)", isDraft: $draft,
     headRepository: {nameWithOwner: $hr},
     reviewDecision: (if $d == "null" then null else $d end),
     latestOpinionatedReviews: {nodes: (if $ap == "" then [] else [{state: "APPROVED", commit: {oid: $ap}}] end)}}'
 }
 
 # The raw GraphQL answer: <total-count>, then one pr_node per open PR listed.
+# The target's default branch is main; FORGE_DEFAULT= reports none.
 forge_answer() {  # <case-dir> <total-count> [<node>...]
   local out="$1/forge.json" total=$2
   shift 2
-  printf '%s\n' "$@" | jq -s --argjson t "$total" '{data: {repository: {pullRequests: {totalCount: $t, nodes: .}}}}' > "$out"
+  printf '%s\n' "$@" | jq -s --argjson t "$total" --arg def "${FORGE_DEFAULT-main}" '{data: {repository: {defaultBranchRef: (if $def == "" then null else {name: $def} end), pullRequests: {totalCount: $t, nodes: .}}}}' > "$out"
 }
 
 # Review spawns read an idle, roomy host fixture, so the always-on host gate
@@ -963,7 +965,7 @@ test_review_capacity_keeps_places_across_handoff_heads_and_clones() {
 # A worker's own pull request is matched by its exact identity, never by a
 # branch name alone, and its record is read as one generation of the file.
 test_review_capacity_matches_exact_identity_and_reads_records_coherently() {
-  local case_dir home out rc=0 before worktrees real_stat
+  local case_dir home out rc=0 before worktrees real_stat other
   # An approved pull request from another fork that shares an unpublished
   # worker's branch name does not release that worker's place.
   case_dir=$(make_case review-fork task-c)
@@ -986,6 +988,30 @@ test_review_capacity_matches_exact_identity_and_reads_records_coherently() {
   out=$(review_spawn "$case_dir" task-c) || rc=$?
   expect_code 0 "$rc" "the worker's own approved pull request did not free its place: $out"
 
+  # One branch can have open pull requests into several bases. Before its
+  # handoff a worker's is the one into its intended base: the recorded
+  # base_branch, else the default branch; an unknown base matches nothing.
+  base_case() {  # <name> <recorded-base> <forge-default> <pr-base> -> sets case_dir home out rc
+    case_dir=$(make_case "review-base-$1" task-c)
+    home="$case_dir/home"
+    github_target "$case_dir"
+    review_forge "$case_dir"
+    printf '%s\n' "project 1" > "$home/config/review-capacity"
+    write_live "$home" live-s "$case_dir/project" "branch=fm/same-name" ${2:+"base_branch=$2"}
+    FORGE_DEFAULT=$3 forge_answer "$case_dir" 1 "$(pr_node 40 fm/same-name false APPROVED '' '' "$4")"
+    rc=0
+    out=$(review_spawn "$case_dir" task-c) || rc=$?
+  }
+  base_case default-other "" main release
+  expect_code "$DEFER_EXIT" "$rc" "an approved pull request into another base released an unpublished worker: $out"
+  assert_contains "$out" "1 of 1 places are held (live-s)" "the deferral did not keep the place of the worker whose base differs"
+  base_case recorded-other release main main
+  expect_code "$DEFER_EXIT" "$rc" "an approved pull request into the default branch released a worker that targets another: $out"
+  base_case recorded-own release main release
+  expect_code 0 "$rc" "the worker's own approved pull request into its recorded base did not free its place: $out"
+  base_case unknown "" "" main
+  expect_code "$DEFER_EXIT" "$rc" "an unknown intended base released an unpublished worker: $out"
+
   # A handoff published by rename while the walk reads the record: a stat shim
   # replaces the record (as bin/fm-worker-done.sh does) on its first identity
   # read and reports the old identity, so only a coherent read keeps the place.
@@ -993,15 +1019,18 @@ test_review_capacity_matches_exact_identity_and_reads_records_coherently() {
     pass "review capacity matches exact pull request identity; the mid-read handoff case skipped (its stat shim replaces GNU stat)"
     return 0
   fi
-  case_dir=$(make_case review-rename task-c)
-  home="$case_dir/home"
-  github_target "$case_dir"
-  review_forge "$case_dir"
-  printf '%s\n' "project 1" > "$home/config/review-capacity"
-  write_live "$home" live-r "$case_dir/project" "branch=fm/live-r"
-  age_record "$home/state/live-r.meta"
-  real_stat=$(command -v stat)
-  cat > "$case_dir/fakebin/stat" <<SH
+  # The second round lists an approved pull request 40 from the same branch:
+  # once pull request 50 is handed off, only 50 can account for the worker.
+  for other in '' 40; do
+    case_dir=$(make_case "review-rename-${other:-none}" task-c)
+    home="$case_dir/home"
+    github_target "$case_dir"
+    review_forge "$case_dir"
+    printf '%s\n' "project 1" > "$home/config/review-capacity"
+    write_live "$home" live-r "$case_dir/project" "branch=fm/live-r"
+    age_record "$home/state/live-r.meta"
+    real_stat=$(command -v stat)
+    cat > "$case_dir/fakebin/stat" <<SH
 #!/usr/bin/env bash
 target="$home/state/live-r.meta"
 if [ "\$1" = -c ] && [ "\$2" = '%i %Y' ] && [ "\$3" = "\$target" ] && [ ! -e "$case_dir/stat.fired" ]; then
@@ -1014,17 +1043,22 @@ if [ "\$1" = -c ] && [ "\$2" = '%i %Y' ] && [ "\$3" = "\$target" ] && [ ! -e "$c
 fi
 exec "$real_stat" "\$@"
 SH
-  chmod +x "$case_dir/fakebin/stat"
-  forge_answer "$case_dir" 0
-  before=$(call_count "$case_dir")
-  worktrees=$(worktree_list "$case_dir")
-  rc=0
-  out=$(review_spawn "$case_dir" task-c "$case_dir/unused") || rc=$?
-  [ -e "$case_dir/stat.fired" ] || fail "the mid-read rename shim never fired"
-  grep -qx 'pr=https://github.com/acme/widget/pull/50' "$home/state/live-r.meta" || fail "the shim did not publish the handoff"
-  expect_code "$DEFER_EXIT" "$rc" "a handoff renamed in mid-read released its place: $out"
-  assert_contains "$out" "1 of 1 places are held (live-r)" "the deferral did not keep the renamed record's place"
-  assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+    chmod +x "$case_dir/fakebin/stat"
+    if [ -z "$other" ]; then
+      forge_answer "$case_dir" 0
+    else
+      forge_answer "$case_dir" 1 "$(pr_node "$other" fm/live-r false APPROVED)"
+    fi
+    before=$(call_count "$case_dir")
+    worktrees=$(worktree_list "$case_dir")
+    rc=0
+    out=$(review_spawn "$case_dir" task-c "$case_dir/unused") || rc=$?
+    [ -e "$case_dir/stat.fired" ] || fail "the mid-read rename shim never fired"
+    grep -qx 'pr=https://github.com/acme/widget/pull/50' "$home/state/live-r.meta" || fail "the shim did not publish the handoff"
+    expect_code "$DEFER_EXIT" "$rc" "a handoff renamed in mid-read released its place: $out"
+    assert_contains "$out" "1 of 1 places are held (live-r)" "the deferral did not keep the renamed record's place"
+    assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+  done
   # A record that is present but whose text cannot be read is never skipped.
   case_dir=$(make_case review-unreadable task-c)
   home="$case_dir/home"
@@ -1043,7 +1077,7 @@ SH
   expect_code 1 "$rc" "an unreadable task record was skipped instead of refusing admission: $out"
   assert_contains "$out" "task record $home/state/live-u.meta cannot be read" "the refusal did not name the unreadable record"
   assert_absent "$home/state/task-c.meta" "a spawn refused on an unreadable record published one"
-  pass "review capacity matches a worker's exact pull request (another fork's lookalike never releases it), reads each record as one generation across a rename, and refuses when a record cannot be read"
+  pass "review capacity matches a worker's exact pull request (another fork's lookalike, another number, or another base never releases it), reads each record as one generation across a rename, and refuses when a record cannot be read"
 }
 
 test_review_capacity_defers_when_the_queue_cannot_be_counted() {
