@@ -53,23 +53,31 @@
 #     so a stale approval GitHub dismissed on a new push no longer frees
 #     anything. With no reviewDecision (no required review), the place frees
 #     only when a latest opinionated review is APPROVED on the pull request's
-#     current head commit; a draft or a pull request whose only approval is of
-#     an older head holds its place.
+#     current head commit, draft or not; a pull request whose only approval is
+#     of an older head holds its place.
 #   - every reservation: a ship task record (any mode but local-only, not a
 #     secondmate) in any local Firstmate home on this machine
 #     (fm_local_firstmate_state_dirs), other than the task being admitted, whose
 #     publication target (its upstream_consent, else its project directory's
 #     fm_role_publication_target) is the same repository - whatever origin its
-#     clone uses - and whose recorded branch is not among the observed open
-#     pull requests, when it has no recorded pr= handoff, or its record changed
-#     at or after the observation began. Such a worker has not opened its pull
-#     request yet, or opened it after the one read, so it still holds a place.
-# A record whose branch IS an observed open pull request is counted once,
-# through the forge, so a worker never double counts and never frees its place
-# at PR-ready: its place moves from reservation to open pull request and frees
-# only when the pull request is approved, merged, or closed. A record whose pr=
-# handoff was recorded before the read and whose branch the read no longer
-# lists has left the queue.
+#     clone uses - and whose own pull request the observation does not list,
+#     when it has no recorded pr= handoff, its record could not be read
+#     coherently, or its record changed at or after the observation began.
+#     Such a worker has not opened its pull request yet, or opened it after the
+#     one read, so it still holds a place.
+# A record's own pull request is the one its pr= names in the target, or one
+# whose head is its recorded branch in one of its own source repositories (the
+# target or its clone's origin), so an approved pull request from another fork
+# that happens to share the branch name never releases it. Each record is read
+# as one generation of the file (identity unchanged across the read), so a
+# handoff that bin/fm-worker-done.sh or bin/fm-pr-check.sh publishes by rename
+# mid-walk can never pair an old change time with a new pr=. A record whose
+# own pull request IS observed is counted once, through the forge, so a worker
+# never double counts and never frees its place at PR-ready: its place moves
+# from reservation to open pull request and frees only when the pull request
+# is approved, merged, or closed. A record whose pr= handoff was recorded
+# before the read and whose pull request the read no longer lists has left the
+# queue.
 #
 # Observation: exactly one bounded call per admission, through gh-axi's GraphQL
 # passthrough, of at most FM_REVIEW_CAPACITY_PAGE (100) open pull requests,
@@ -147,7 +155,9 @@ fm_review_capacity_target() {  # <project-dir> <consent>
 
 # One bounded observation of a GitHub repository's open pull requests.
 # Sets FM_REVIEW_INVENTORY to space-separated <number>:<draft 0|1>:
-# <approved|open>:<head-branch> entries, the head branch percent-encoded as
+# <approved|open>:<head-repository>:<head-branch> entries (the head
+# repository is the lower-case owner/name the branch lives in, empty when
+# GitHub no longer reports it), both percent-encoded as
 # jq's @uri does (fm_review_capacity_uri is the same encoding), so every valid
 # ref character survives and no quote, space, or newline reaches the parser;
 # FM_REVIEW_INVENTORY_AT to the epoch second just before the read;
@@ -163,12 +173,12 @@ fm_review_capacity_observe() {  # <host> <owner> <repo>
     FM_REVIEW_INVENTORY_ERROR="gh-axi is not installed"
     return 1
   }
-  query="query(\$owner:String!,\$name:String!){repository(owner:\$owner,name:\$name){pullRequests(states:OPEN,first:$FM_REVIEW_CAPACITY_PAGE,orderBy:{field:CREATED_AT,direction:DESC}){totalCount nodes{number headRefName headRefOid isDraft reviewDecision latestOpinionatedReviews(first:100){nodes{state commit{oid}}}}}}}"
+  query="query(\$owner:String!,\$name:String!){repository(owner:\$owner,name:\$name){pullRequests(states:OPEN,first:$FM_REVIEW_CAPACITY_PAGE,orderBy:{field:CREATED_AT,direction:DESC}){totalCount nodes{number headRefName headRefOid headRepository{nameWithOwner} isDraft reviewDecision latestOpinionatedReviews(first:100){nodes{state commit{oid}}}}}}}"
   # The answer is reduced inside gh-axi's own jq to plain tokens; the head
   # name is percent-encoded, so it is kept exactly and still carries no quote,
   # backslash, space, or newline into the parser below.
   # shellcheck disable=SC2016 # jq variables, not shell expansions.
-  jq_expr='.data.repository.pullRequests as $p | ([$p.nodes[] | . as $n | "\($n.number):\(if $n.isDraft then 1 else 0 end):\(if ($n.reviewDecision == "APPROVED") or ($n.reviewDecision == null and ([$n.latestOpinionatedReviews.nodes[] | select(.state == "APPROVED" and .commit.oid == $n.headRefOid)] | length) > 0) then "approved" else "open" end):\($n.headRefName | @uri)"] | "fm-review-inventory total=\($p.totalCount) listed=\($p.nodes | length) \(join(" "))")'
+  jq_expr='.data.repository.pullRequests as $p | ([$p.nodes[] | . as $n | "\($n.number):\(if $n.isDraft then 1 else 0 end):\(if ($n.reviewDecision == "APPROVED") or ($n.reviewDecision == null and ([$n.latestOpinionatedReviews.nodes[] | select(.state == "APPROVED" and .commit.oid == $n.headRefOid)] | length) > 0) then "approved" else "open" end):\(($n.headRepository.nameWithOwner // "") | ascii_downcase | @uri):\($n.headRefName | @uri)"] | "fm-review-inventory total=\($p.totalCount) listed=\($p.nodes | length) \(join(" "))")'
   rc=0
   out=$(
     fm_pr_github_host_export "$host"
@@ -233,19 +243,75 @@ fm_review_capacity_uri() {  # <string>
   printf '%s' "$out"
 }
 
+# One field of a task record's captured text, last value winning as in
+# fm_meta_get.
+fm_review_capacity_field() {  # <text> <key>
+  local line value=''
+  while IFS= read -r line; do
+    case "$line" in "$2="*) value=${line#*=} ;; esac
+  done <<< "$1"
+  printf '%s' "$value"
+}
+
+# The file identity a coherent read compares: inode and modification second.
+fm_review_capacity_stat() {  # <file>
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    /usr/bin/stat -f '%i %m' "$1" 2>/dev/null
+  else
+    stat -c '%i %Y' "$1" 2>/dev/null
+  fi
+}
+
+# Read a task record coherently: its identity before and after one read of its
+# text must agree, so every field and the change time come from one generation
+# of the file even while bin/fm-worker-done.sh or bin/fm-pr-check.sh replace it
+# by rename under their own lock. Sets FM_REVIEW_RECORD_TEXT and
+# FM_REVIEW_RECORD_MTIME and returns 0; returns 1 when three attempts never
+# agree, in which case the caller treats the record as changing now.
+fm_review_capacity_read_record() {  # <meta>
+  local before after attempt=0
+  FM_REVIEW_RECORD_TEXT='' FM_REVIEW_RECORD_MTIME=''
+  while [ "$attempt" -lt 3 ]; do
+    attempt=$((attempt + 1))
+    before=$(fm_review_capacity_stat "$1") || before=
+    FM_REVIEW_RECORD_TEXT=$(cat -- "$1" 2>/dev/null) || FM_REVIEW_RECORD_TEXT=
+    after=$(fm_review_capacity_stat "$1") || after=
+    if [ -n "$before" ] && [ "$before" = "$after" ]; then
+      FM_REVIEW_RECORD_MTIME=${after#* }
+      return 0
+    fi
+  done
+  return 1
+}
+
 # The publication target a task record would open its pull request in, in
 # lower case: its recorded upstream_consent, else the default publication target
 # of its project directory (fm_role_publication_target). Empty when neither
 # resolves.
-fm_review_capacity_record_target() {  # <meta>
+fm_review_capacity_record_target() {  # <record-text>
   local target project
-  target=$(fm_meta_get "$1" upstream_consent)
+  target=$(fm_review_capacity_field "$1" upstream_consent)
   if [ -z "$target" ]; then
-    project=$(fm_meta_get "$1" project)
+    project=$(fm_review_capacity_field "$1" project)
     [ -n "$project" ] && [ -d "$project" ] || return 0
     target=$(fm_role_publication_target "$project")
   fi
   printf '%s' "$target" | tr '[:upper:]' '[:lower:]'
+}
+
+# The repositories a task record's branch can be published from, as lower-case
+# owner/name lines: the publication target itself and the clone's origin.
+fm_review_capacity_record_sources() {  # <record-text> <target>
+  local project url origin
+  printf '%s\n' "${2#*/}"
+  project=$(fm_review_capacity_field "$1" project)
+  [ -n "$project" ] && [ -d "$project" ] || return 0
+  url=$(git -C "$project" remote get-url origin 2>/dev/null) || return 0
+  origin=$(fm_role_remote_identity "$url" "$project" nolocal)
+  case "$origin" in
+    '' | path:*) ;;
+    */*/*) printf '%s\n' "${origin#*/}" | tr '[:upper:]' '[:lower:]' ;;
+  esac
 }
 
 # The machine-wide lock that serializes review-queue admission for one
@@ -266,13 +332,17 @@ fm_review_capacity_lock_path() {  # <home> <host> <owner> <repo>
 # fm_project_capacity_occupants: the local homes come from
 # fm_local_firstmate_state_dirs <first-state>, and the admitted task's own
 # record is not counted. The caller holds fm_review_capacity_lock_path.
-# A ship record (not local-only, not a secondmate) holds a reservation when its
-# publication target (fm_review_capacity_record_target) is <target>, its
-# recorded branch is not among the observed open pull requests, and either it
-# has no pr= handoff or its record changed at or after the observation began
-# (FM_REVIEW_INVENTORY_AT), since a handoff recorded after that read names a
-# pull request the read could not have seen. Only a handoff already recorded
-# before the read, whose branch the read no longer lists, has left the queue.
+# Every record is read coherently (fm_review_capacity_read_record). A ship
+# record (not local-only, not a secondmate) whose publication target is
+# <target> is accounted for by the forge when the observation lists its exact
+# pull request - the number its pr= names in <target> - or its branch from one
+# of its own source repositories (fm_review_capacity_record_sources), so a
+# same-named branch from another fork never stands in for it. Otherwise it holds
+# a reservation when it has no pr= handoff, when its record could not be read
+# coherently, or when its record changed at or after the observation began
+# (FM_REVIEW_INVENTORY_AT): a handoff recorded after that read names a pull
+# request the read could not have seen. Only a handoff already recorded before
+# the read, whose pull request the read no longer lists, has left the queue.
 # Sets FM_REVIEW_HOLDERS (the count), FM_REVIEW_HOLDER_IDS (pull request
 # numbers as #N and reservations as task ids), and FM_REVIEW_VERDICT to admit,
 # full, or unknown, with FM_REVIEW_WHY naming the evidence for full or unknown.
@@ -280,8 +350,9 @@ fm_review_capacity_lock_path() {  # <home> <host> <owner> <repo>
 # read, since skipping one could undercount.
 fm_review_capacity_judge() {  # <cap> <observed> <target> <prefixes> <first-state> <own-id>
   local cap=$1 observed=$2 want=$3 prefixes=$4 first=$5 self=$6
-  local state meta kind mode target id label branch pr mtime i entry num verdict head p fleet listed
-  local -a rec_labels=() rec_branches=() rec_prs=() rec_mtimes=() enc_prefixes=()
+  local state meta text kind mode target id label branch pr prnum src keys coherent i entry num verdict hrepo head p fleet
+  local numbers=' ' listed=' ' all_keys=' '
+  local -a rec_labels=() rec_keys=() rec_prnums=() rec_prs=() rec_mtimes=() rec_coherent=() enc_prefixes=()
   FM_REVIEW_HOLDERS=0 FM_REVIEW_HOLDER_IDS='' FM_REVIEW_VERDICT='' FM_REVIEW_WHY='' FM_REVIEW_ERROR=''
   fm_local_firstmate_state_dirs "$first" || {
     FM_REVIEW_ERROR=$FM_LOCAL_FIRSTMATE_ERROR
@@ -299,47 +370,65 @@ fm_review_capacity_judge() {  # <cap> <observed> <target> <prefixes> <first-stat
         FM_REVIEW_ERROR="task record $meta cannot be read"
         return 1
       }
-      kind=$(fm_meta_get "$meta" kind)
+      coherent=1
+      fm_review_capacity_read_record "$meta" || coherent=0
+      text=$FM_REVIEW_RECORD_TEXT
+      kind=$(fm_review_capacity_field "$text" kind)
       [ "$kind" = ship ] || continue
-      mode=$(fm_meta_get "$meta" mode)
+      mode=$(fm_review_capacity_field "$text" mode)
       [ "$mode" != local-only ] || continue
-      target=$(fm_review_capacity_record_target "$meta")
+      target=$(fm_review_capacity_record_target "$text")
       [ -n "$target" ] && [ "$target" = "$want" ] || continue
       id=$(basename "$meta" .meta)
       label=$id
       [ "$state" = "$first" ] || label="$id in $(dirname "$state")"
-      mtime=$(fm_path_mtime "$meta") || mtime=
+      branch=$(fm_review_capacity_field "$text" branch)
+      keys=' '
+      if [ -n "$branch" ]; then
+        while IFS= read -r src; do
+          [ -n "$src" ] || continue
+          keys="$keys$(fm_review_capacity_uri "$src"):$(fm_review_capacity_uri "$branch") "
+        done < <(fm_review_capacity_record_sources "$text" "$want")
+      fi
+      pr=$(fm_review_capacity_field "$text" pr)
+      prnum=
+      case "$pr" in
+        */pull/*)
+          prnum=${pr##*/pull/}
+          prnum=${prnum%%[!0-9]*}
+          [ "$(printf '%s' "${pr%/pull/*}" | sed 's|^[a-zA-Z]*://||' | tr '[:upper:]' '[:lower:]')" = "$want" ] || prnum=
+          ;;
+      esac
       rec_labels+=("$label")
-      branch=$(fm_meta_get "$meta" branch)
-      [ -z "$branch" ] || branch=$(fm_review_capacity_uri "$branch")
-      rec_branches+=("$branch")
-      rec_prs+=("$(fm_meta_get "$meta" pr)")
-      rec_mtimes+=("$mtime")
+      rec_keys+=("$keys")
+      rec_prnums+=("$prnum")
+      rec_prs+=("$pr")
+      rec_mtimes+=("$FM_REVIEW_RECORD_MTIME")
+      rec_coherent+=("$coherent")
+      all_keys="$all_keys${keys# }"
     done
   done
   for p in $prefixes; do
     enc_prefixes+=("$(fm_review_capacity_uri "$p")")
   done
   # Open fleet pull requests without an approving review.
-  listed=' '
   if [ "$observed" -eq 0 ]; then
     for entry in $FM_REVIEW_INVENTORY; do
       num=${entry%%:*}
       entry=${entry#*:}
       entry=${entry#*:}
       verdict=${entry%%:*}
+      entry=${entry#*:}
+      hrepo=${entry%%:*}
       head=${entry#*:}
-      listed="$listed$head "
+      numbers="$numbers$num "
+      listed="$listed$hrepo:$head "
       [ "$verdict" = open ] || continue
       fleet=0
       for p in ${enc_prefixes[@]+"${enc_prefixes[@]}"}; do
         case "$head" in "$p"*) fleet=1 ;; esac
       done
-      i=0
-      while [ "$fleet" -eq 0 ] && [ "$i" -lt "${#rec_branches[@]}" ]; do
-        [ -z "${rec_branches[$i]}" ] || [ "${rec_branches[$i]}" != "$head" ] || fleet=1
-        i=$((i + 1))
-      done
+      case "$all_keys" in *" $hrepo:$head "*) fleet=1 ;; esac
       [ "$fleet" -eq 1 ] || continue
       FM_REVIEW_HOLDERS=$((FM_REVIEW_HOLDERS + 1))
       FM_REVIEW_HOLDER_IDS="${FM_REVIEW_HOLDER_IDS:+$FM_REVIEW_HOLDER_IDS, }#$num"
@@ -349,16 +438,16 @@ fm_review_capacity_judge() {  # <cap> <observed> <target> <prefixes> <first-stat
   # so every record without a pr= handoff is a reservation.
   i=0
   while [ "$i" -lt "${#rec_labels[@]}" ]; do
-    branch=${rec_branches[$i]}
-    pr=${rec_prs[$i]}
-    mtime=${rec_mtimes[$i]}
-    if [ -n "$branch" ] && [ "$observed" -eq 0 ]; then
-      case "$listed" in
-        *" $branch "*) i=$((i + 1)); continue ;;
+    if [ "$observed" -eq 0 ]; then
+      case "$numbers" in *" ${rec_prnums[$i]} "*)
+        [ -z "${rec_prnums[$i]}" ] || { i=$((i + 1)); continue; } ;;
       esac
+      for p in ${rec_keys[$i]}; do
+        case "$listed" in *" $p "*) i=$((i + 1)); continue 2 ;; esac
+      done
     fi
-    if [ -z "$pr" ] || [ -z "$mtime" ] ||
-      { [ "$observed" -eq 0 ] && [ "$mtime" -ge "${FM_REVIEW_INVENTORY_AT:-0}" ]; }; then
+    if [ -z "${rec_prs[$i]}" ] || [ "${rec_coherent[$i]}" -eq 0 ] || [ -z "${rec_mtimes[$i]}" ] ||
+      { [ "$observed" -eq 0 ] && [ "${rec_mtimes[$i]}" -ge "${FM_REVIEW_INVENTORY_AT:-0}" ]; }; then
       FM_REVIEW_HOLDERS=$((FM_REVIEW_HOLDERS + 1))
       FM_REVIEW_HOLDER_IDS="${FM_REVIEW_HOLDER_IDS:+$FM_REVIEW_HOLDER_IDS, }${rec_labels[$i]}"
     fi

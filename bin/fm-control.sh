@@ -146,7 +146,10 @@
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
 #              Asks bin/fm-capacity.sh --host-gate first: an overloaded host
-#              exits 75 with nothing checkpointed or stopped.
+#              exits 75 with nothing checkpointed or stopped. The launch owner
+#              asks again after the stop; if load rose in between, that
+#              deferral also exits 75, and then the lane has no running agent
+#              (record and work kept, no automatic retry).
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
@@ -1565,7 +1568,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line host_gate_rc=0
+  local exit_result state note_line host_gate_rc=0 spawn_rc
   local -a spawn_args
 
   # A relaunch starts a new agent process, so it asks the host resource gate
@@ -1651,8 +1654,10 @@ do_relaunch() {
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
   [ -z "$TARGET_ACCOUNT" ] || spawn_args+=(--account "$TARGET_ACCOUNT")
-  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
-      "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
+  spawn_rc=0
+  FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+    "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null || spawn_rc=$?
+  if [ "$spawn_rc" -eq 0 ]; then
     RELAUNCH_META_PUBLISHED=1
     # $T was resolved from the record before the launch. When the recorded
     # endpoint was gone, the launch owner created a fresh one and republished
@@ -1674,6 +1679,14 @@ do_relaunch() {
   else
     [ "$(fm_meta_get "$META" control_relaunch_tx)" != "$RELAUNCH_TX" ] \
       || RELAUNCH_META_PUBLISHED=1
+    # The launch owner asks the host gate again; load that rose after the
+    # preflight above defers the replacement after the old agent stopped. That
+    # is its own outcome, exit 75: the lane is left with no running agent, its
+    # record and work kept, and nothing retries it automatically.
+    if [ "$spawn_rc" -eq 75 ]; then
+      echo "deferred: $ID's agent was stopped, but this host became overloaded before its replacement launched; no agent is running, its record and work are kept, and nothing retries it automatically - relaunch it again once the host is back under the host gate's limits (bin/fm-capacity.sh --host-gate)" >&2
+      exit 75
+    fi
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
 

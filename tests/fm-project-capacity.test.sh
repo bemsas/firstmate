@@ -803,11 +803,13 @@ SH
 }
 
 # One open pull request node: number, head branch, draft, reviewDecision
-# (null for none) and the head commit an APPROVED review was left on (empty
-# for none). Its own head commit is h<number>.
-pr_node() {  # <number> <head> <draft> <decision|null> [<approved-oid>]
-  jq -cn --argjson n "$1" --arg head "$2" --argjson draft "$3" --arg d "$4" --arg ap "${5:-}" '{
+# (null for none), the head commit an APPROVED review was left on (empty for
+# none), and the repository the head branch lives in (default acme/widget, the
+# target itself). Its own head commit is h<number>.
+pr_node() {  # <number> <head> <draft> <decision|null> [<approved-oid>] [<head-repo>]
+  jq -cn --argjson n "$1" --arg head "$2" --argjson draft "$3" --arg d "$4" --arg ap "${5:-}" --arg hr "${6:-Acme/Widget}" '{
     number: $n, headRefName: $head, headRefOid: "h\($n)", isDraft: $draft,
+    headRepository: {nameWithOwner: $hr},
     reviewDecision: (if $d == "null" then null else $d end),
     latestOpinionatedReviews: {nodes: (if $ap == "" then [] else [{state: "APPROVED", commit: {oid: $ap}}] end)}}'
 }
@@ -958,6 +960,74 @@ test_review_capacity_keeps_places_across_handoff_heads_and_clones() {
   pass "a handoff during the forge read keeps its place, a + head is matched exactly, and clones with different origins share one repository's queue"
 }
 
+# A worker's own pull request is matched by its exact identity, never by a
+# branch name alone, and its record is read as one generation of the file.
+test_review_capacity_matches_exact_identity_and_reads_records_coherently() {
+  local case_dir home out rc=0 before worktrees real_stat
+  # An approved pull request from another fork that shares an unpublished
+  # worker's branch name does not release that worker's place.
+  case_dir=$(make_case review-fork task-c)
+  home="$case_dir/home"
+  github_target "$case_dir"
+  review_forge "$case_dir"
+  printf '%s\n' "project 1" > "$home/config/review-capacity"
+  write_live "$home" live-s "$case_dir/project" "branch=fm/same-name"
+  forge_answer "$case_dir" 1 "$(pr_node 40 fm/same-name false APPROVED '' other/widget)"
+  before=$(call_count "$case_dir")
+  worktrees=$(worktree_list "$case_dir")
+  out=$(review_spawn "$case_dir" task-c "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "another fork's approved lookalike released a local reservation: $out"
+  assert_contains "$out" "1 of 1 places are held (live-s)" "the deferral did not keep the unpublished worker's place"
+  assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+  # Control: the same approved pull request from the worker's own repository
+  # is its pull request, so the approval frees the place.
+  forge_answer "$case_dir" 1 "$(pr_node 40 fm/same-name false APPROVED)"
+  rc=0
+  out=$(review_spawn "$case_dir" task-c) || rc=$?
+  expect_code 0 "$rc" "the worker's own approved pull request did not free its place: $out"
+
+  # A handoff published by rename while the walk reads the record: a stat shim
+  # replaces the record (as bin/fm-worker-done.sh does) on its first identity
+  # read and reports the old identity, so only a coherent read keeps the place.
+  if [ "$(uname -s)" != Linux ]; then
+    pass "review capacity matches exact pull request identity; the mid-read handoff case skipped (its stat shim replaces GNU stat)"
+    return 0
+  fi
+  case_dir=$(make_case review-rename task-c)
+  home="$case_dir/home"
+  github_target "$case_dir"
+  review_forge "$case_dir"
+  printf '%s\n' "project 1" > "$home/config/review-capacity"
+  write_live "$home" live-r "$case_dir/project" "branch=fm/live-r"
+  age_record "$home/state/live-r.meta"
+  real_stat=$(command -v stat)
+  cat > "$case_dir/fakebin/stat" <<SH
+#!/usr/bin/env bash
+target="$home/state/live-r.meta"
+if [ "\$1" = -c ] && [ "\$2" = '%i %Y' ] && [ "\$3" = "\$target" ] && [ ! -e "$case_dir/stat.fired" ]; then
+  : > "$case_dir/stat.fired"
+  old=\$("$real_stat" "\$@")
+  { cat "\$target"; printf 'pr=https://github.com/acme/widget/pull/50\n'; } > "\$target.new"
+  PATH=/usr/bin:/bin mv -f "\$target.new" "\$target"
+  printf '%s\n' "\$old"
+  exit 0
+fi
+exec "$real_stat" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/stat"
+  forge_answer "$case_dir" 0
+  before=$(call_count "$case_dir")
+  worktrees=$(worktree_list "$case_dir")
+  rc=0
+  out=$(review_spawn "$case_dir" task-c "$case_dir/unused") || rc=$?
+  [ -e "$case_dir/stat.fired" ] || fail "the mid-read rename shim never fired"
+  grep -qx 'pr=https://github.com/acme/widget/pull/50' "$home/state/live-r.meta" || fail "the shim did not publish the handoff"
+  expect_code "$DEFER_EXIT" "$rc" "a handoff renamed in mid-read released its place: $out"
+  assert_contains "$out" "1 of 1 places are held (live-r)" "the deferral did not keep the renamed record's place"
+  assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+  pass "review capacity matches a worker's exact pull request (another fork's lookalike never releases it) and reads each record as one generation across a rename"
+}
+
 test_review_capacity_defers_when_the_queue_cannot_be_counted() {
   local case_dir home out rc=0 before worktrees
   case_dir=$(make_case review-unknown task-c)
@@ -1040,5 +1110,6 @@ test_review_capacity_admits_below_the_cap_with_one_bounded_call
 test_review_capacity_defers_a_full_queue_without_leaving_anything_behind
 test_review_capacity_counts_unpublished_work_once
 test_review_capacity_keeps_places_across_handoff_heads_and_clones
+test_review_capacity_matches_exact_identity_and_reads_records_coherently
 test_review_capacity_defers_when_the_queue_cannot_be_counted
 test_review_capacity_override_and_scope

@@ -81,6 +81,7 @@ case "${1:-}" in
       case "$payload" in
         /exit|/quit)
           printf 'zsh' > "$D/command"
+          [ ! -f "$D/on-exit.sh" ] || sh "$D/on-exit.sh"
           [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP:-}" ] || exit 1
           ;;
         *'encode launch-brief'* | *'Firstmate operational input waiting: read'*)
@@ -460,7 +461,24 @@ test_overloaded_host_defers_relaunch_and_secondmate_launch_before_any_change() {
   assert_contains "$out" "deferred: mate91 was not launched" "the secondmate deferral was not reported"
   [ ! -e "$dir/home/state/mate91.meta" ] || fail "a deferred secondmate spawn published a record"
   [ -z "$(ls -A "$dir/mate-home")" ] || fail "a deferred secondmate spawn wrote into its home: $(ls -A "$dir/mate-home")"
-  pass "an overloaded host defers fm-control relaunch before the stop, fm-spawn --relaunch before the record, and a fresh secondmate before its home is touched"
+  # Load that rises after fm-control's own check defers the replacement after
+  # the stop: still exit 75, said plainly, with the prior record and the work
+  # kept, no agent running, and no automatic retry.
+  dir=$(new_case host-gate-late rl92)
+  add_ship_task "$dir" rl92 claude
+  proc="$dir/proc"
+  mkdir -p "$proc"
+  printf '0.00 0.00 0.00 1/1 1\n' > "$proc/loadavg"
+  printf 'MemTotal: 1000000 kB\nMemAvailable: 600000 kB\n' > "$proc/meminfo"
+  printf "printf '100000.00 0.00 0.00 1/1 1\\n' > '%s'\n" "$proc/loadavg" > "$dir/fake/on-exit.sh"
+  meta_before=$(cat "$dir/home/state/rl92.meta")
+  out=$(FM_PROC_ROOT_OVERRIDE=$proc run_control "$dir" rl92 relaunch --note "recheck load during relaunch"); rc=$?
+  expect_code 75 "$rc" "a replacement deferred after the stop must still exit 75: $out"
+  assert_contains "$out" "deferred: rl92's agent was stopped, but this host became overloaded before its replacement launched; no agent is running, its record and work are kept, and nothing retries it automatically" \
+    "the late deferral did not say the lane is left without an agent"
+  [ "$(cat "$dir/fake/command")" = zsh ] || fail "the late-deferral fixture did not stop the old agent"
+  assert_equals "$meta_before" "$(cat "$dir/home/state/rl92.meta")" "a late deferral changed the prior task record"
+  pass "an overloaded host defers fm-control relaunch before the stop, fm-spawn --relaunch before the record, and a fresh secondmate before its home is touched; load rising after the check defers after the stop with exit 75 and the lane left without an agent"
 }
 
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
