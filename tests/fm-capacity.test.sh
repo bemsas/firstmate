@@ -112,7 +112,7 @@ test_host_gate_judges_observed_load_and_memory_only() {
 # path. Fixture /proc and /sys trees supply load, memory, and the cgroup; CPU
 # affinity comes from taskset when it is installed.
 test_host_gate_uses_usable_cores_on_linux() {
-  local home dir out rc
+  local home dir out rc cpu
   if [ "$(uname -s)" != Linux ]; then
     pass "--host-gate usable cores (skipped: affinity and cgroup quotas are Linux probes; the portable verdict is covered above)"
     return 0
@@ -123,7 +123,7 @@ test_host_gate_uses_usable_cores_on_linux() {
   printf '0::/fleet/lane\n' > "$dir/proc/self/cgroup"
   printf 'MemTotal: 1000000 kB\nMemAvailable: 600000 kB\n' > "$dir/proc/meminfo"
   printf 'max 100000\n' > "$dir/sys/fs/cgroup/fleet/lane/cpu.max"
-  printf '150000 100000\n' > "$dir/sys/fs/cgroup/fleet/cpu.max"
+  printf '50000 100000\n' > "$dir/sys/fs/cgroup/fleet/cpu.max"
   gate() {  # <load1> [taskset-cpus] -> sets out rc
     printf '%s 0.00 0.00 1/1 1\n' "$1" > "$dir/proc/loadavg"
     if [ -n "${2:-}" ]; then
@@ -132,21 +132,38 @@ test_host_gate_uses_usable_cores_on_linux() {
       out=$(FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$dir/proc" FM_SYS_ROOT_OVERRIDE="$dir/sys" "$CAPACITY" --host-gate 2>&1); rc=$?
     fi
   }
-  # An ancestor's 1.5-CPU quota is the tightest limit: 1.5 x 1.5 = 2.25.
-  gate 2.25
+  # An ancestor's half-CPU quota is the tightest limit on any runner: 0.5 x
+  # 1.5 = 0.75.
+  gate 0.75
   expect_code 0 "$rc" "load at the quota-scaled limit is not over"
-  assert_contains "$out" 'cores=1.50 load_limit=2.25' "an ancestor cgroup quota did not set usable cores"
-  gate 2.26
+  assert_contains "$out" 'cores=0.50 load_limit=0.75' "an ancestor cgroup quota did not set usable cores"
+  gate 0.76
   expect_code 75 "$rc" "load above 1.5 x the quota-limited cores defers"
   assert_contains "$out" 'reasons=cpu' "quota: reason"
+  # The comparison keeps the quota ratio exact: 1.338 CPUs allow 2.007, so a
+  # load of 2.01 is over although both round to 2.01 for display.
+  printf '133800 100000\n' > "$dir/sys/fs/cgroup/fleet/cpu.max"
+  gate 2.007
+  if awk -v n="$(nproc 2>/dev/null || echo 1)" 'BEGIN{exit !(n >= 2)}'; then
+    expect_code 0 "$rc" "load exactly at the unrounded limit is not over"
+    gate 2.01
+    expect_code 75 "$rc" "load above the unrounded limit defers even when the rounded limit equals it"
+    assert_contains "$out" 'cores=1.34 load_limit=2.01' "the report must round only for display"
+  fi
   # No quota anywhere on the path: usable cores are the CPUs this process may run on.
   printf 'max 100000\n' > "$dir/sys/fs/cgroup/fleet/cpu.max"
   if command -v taskset >/dev/null 2>&1; then
-    gate 1.51 0
-    expect_code 75 "$rc" "one usable CPU under affinity must defer a load of 1.51"
-    assert_contains "$out" 'cores=1 load_limit=1.50' "CPU affinity did not set usable cores"
-    gate 1.50 0
-    expect_code 0 "$rc" "load exactly 1.5 x one usable CPU is not over"
+    # Pin to a CPU this runner may actually use; CPU 0 can be outside a
+    # container's permitted set.
+    cpu=$(taskset -pc $$ 2>/dev/null | sed 's/.*: *//' | cut -d, -f1 | cut -d- -f1)
+    case "$cpu" in '' | *[!0-9]*) cpu= ;; esac
+    if [ -n "$cpu" ]; then
+      gate 1.51 "$cpu"
+      expect_code 75 "$rc" "one usable CPU under affinity must defer a load of 1.51"
+      assert_contains "$out" 'cores=1 load_limit=1.50' "CPU affinity did not set usable cores"
+      gate 1.50 "$cpu"
+      expect_code 0 "$rc" "load exactly 1.5 x one usable CPU is not over"
+    fi
   fi
   # An unreadable cgroup path leaves the affinity count, never unknown.
   rm -f "$dir/proc/self/cgroup"

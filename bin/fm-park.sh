@@ -76,7 +76,10 @@
 # plus that note. A working: line superseding the declared wait is appended just
 # before the launch, so the fresh worker's own reports always follow it. Success
 # removes the park record; failure keeps it with resume_error=, which crew state
-# reports as blocked and which stops tick retrying until resume runs by hand.
+# reports as blocked and which stops tick retrying until resume runs by hand. A
+# relaunch the host resource gate defers (bin/fm-control.sh exit 75) is not a
+# failure: the record stays parked with resume_deferred=, reported once, and a
+# later tick retries it when its feedback still calls for a relaunch.
 #
 # land waits for any other park action on the lane to finish, runs
 # bin/fm-teardown.sh <task-id> (never --force), so every teardown gate still
@@ -116,8 +119,11 @@
 # review-thread replies included), review or note created or edited after the
 # park (an approval with no body is not a comment). A branch merely behind its
 # base is not a trigger. Failing checks are never an automatic relaunch: a
-# failed or timed-out check or review lane (GitHub rollup FAILURE or ERROR,
-# which covers a timed-out check run; GitLab pipeline failed or canceled) is
+# failed or timed-out check or review lane - GitHub rollup FAILURE or ERROR, any
+# one of the first 100 check contexts with a terminal FAILURE, TIMED_OUT,
+# CANCELLED, or STARTUP_FAILURE conclusion or a FAILURE or ERROR status even
+# while the rollup is still pending, or a non-green rollup whose contexts are
+# not all listed; GitLab pipeline failed or canceled - is
 # recorded once as one episode - held= and held_reason= on the park record,
 # one `held` outcome line (retried on later ticks until it is published, then
 # marked held_reported) and one paused: status line - and the lane stays
@@ -190,6 +196,7 @@ export FM_HOME FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG"
 CONTROL_BIN="${FM_PARK_CONTROL_BIN:-$SCRIPT_DIR/fm-control.sh}"
 TEARDOWN_BIN="${FM_PARK_TEARDOWN_BIN:-$SCRIPT_DIR/fm-teardown.sh}"
 CREW_STATE_BIN="${FM_PARK_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
+HOST_GATE_BIN="${FM_PARK_HOST_GATE_BIN:-$SCRIPT_DIR/fm-capacity.sh}"
 QUIET_SECS=${FM_PARK_QUIET_SECS:-900}
 READ_SECS=${FM_PARK_READ_SECS:-15}
 ACTION_SECS=${FM_PARK_ACTION_SECS:-900}
@@ -251,11 +258,15 @@ action_start() {  # <id> <verb> <args...>
 }
 
 # Publishes one outcome line for the next tick to report.
+# Sets REPORT_WRITTEN to the published report's path.
 report_write() {  # <id> <line>
   local tmp
+  REPORT_WRITTEN=
   tmp=$(mktemp "$STATE/.review-park.XXXXXX") || return 1
-  if ! { printf '%s\n' "$2" > "$tmp" && mv -f -- "$tmp" "$STATE/.review-park-report-$1-$(date +%s)-$$"; }; then
+  REPORT_WRITTEN="$STATE/.review-park-report-$1-$(date +%s)-$$"
+  if ! { printf '%s\n' "$2" > "$tmp" && mv -f -- "$tmp" "$REPORT_WRITTEN"; }; then
     rm -f -- "$tmp"
+    REPORT_WRITTEN=
     return 1
   fi
 }
@@ -307,7 +318,7 @@ review_bots_json() {
 
 GITHUB_QUERY='query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){
   state isDraft headRefOid baseRefName mergeable mergeStateStatus reviewDecision
-  commits(last:1){nodes{commit{oid committedDate checkSuites(first:100){nodes{createdAt}} statusCheckRollup{state contexts(first:100){nodes{__typename ... on CheckRun{name completedAt} ... on StatusContext{context createdAt}}}}}}}
+  commits(last:1){nodes{commit{oid committedDate checkSuites(first:100){nodes{createdAt}} statusCheckRollup{state contexts(first:100){totalCount nodes{__typename ... on CheckRun{name completedAt conclusion} ... on StatusContext{context createdAt state}}}}}}}
   reviewThreads(first:100){totalCount nodes{isResolved comments(last:100){totalCount nodes{author{login __typename} createdAt updatedAt}}}}
   reviews(last:100){totalCount nodes{author{login __typename} state body submittedAt updatedAt commit{oid}}}
   comments(first:100,after:$endCursor){totalCount nodes{author{login __typename} createdAt updatedAt} pageInfo{hasNextPage endCursor}}
@@ -334,6 +345,9 @@ GITHUB_NORMALIZE='
       ci: (if $r == null then "none" elif $r.state == "SUCCESS" then "success"
            elif ($r.state | IN("FAILURE","ERROR")) then "failure" else "pending" end),
       ci_done_at: ([$r.contexts.nodes[]? | (.completedAt // .createdAt)] | map(select(. != null)) | max),
+      checks_failed: ([$r.contexts.nodes[]? | select(((.conclusion // "") | IN("FAILURE","TIMED_OUT","CANCELLED","STARTUP_FAILURE"))
+                         or ((.state // "") | IN("FAILURE","ERROR"))) | (.name // .context // "a check")] | unique),
+      checks_complete: ($r == null or (($r.contexts.totalCount // 0) <= ([$r.contexts.nodes[]?] | length))),
       pushed_at: ([$c.checkSuites.nodes[]?.createdAt | select(. != null)] | min // $c.committedDate),
       changes_requested: ($p.reviewDecision == "CHANGES_REQUESTED"),
       threads_unresolved: ([$p.reviewThreads.nodes[] | select(.isResolved | not)] | length),
@@ -499,7 +513,10 @@ TRIGGER_PROGRAM="$JQ_TIME"'
   . as $s
   | {
       state: $s.state,
-      failing: (if $s.ci == "failure" then "checks are failing on \($s.head[0:12])" else null end),
+      failing: (if $s.ci == "failure" then "checks are failing on \($s.head[0:12])"
+                elif (($s.checks_failed // []) | length) > 0 then "check(s) \($s.checks_failed | join(", ")) failed or timed out on \($s.head[0:12])"
+                elif ($s.checks_complete // true) == false and $s.ci != "success" then "the checks on \($s.head[0:12]) could not all be read"
+                else null end),
       triggers: [
         (if $s.head != $head then "the head moved to \($s.head[0:12])" else empty end),
         (if $s.changes_requested then "changes were requested" else empty end),
@@ -665,6 +682,19 @@ cmd_park() {
 
 # --- resume ----------------------------------------------------------------
 
+# A relaunch the host resource gate defers - before the attempt here, or inside
+# bin/fm-control.sh, which exits 75 whether it deferred before or after its
+# stop (a parked lane's agent is already stopped) - is temporary: the lane stays
+# parked with no resume_error, so a later tick re-reads its feedback and tries
+# again once the host has room, and the deferral is reported once per episode.
+resume_deferred() {  # <id> <pr> <head> <trigger>
+  [ -z "$(record_get "$1" resume_deferred)" ] || return 0
+  record_write "$1" "pr=$2" "head=$3" "parked_at=$(record_get "$1" parked_at)" \
+    "slot_leased=$(record_get "$1" slot_leased)" "resume_deferred=$(date +%s)" || return 0
+  status_append "$1" "paused [at=$(date +%s)]: parked on review: relaunch deferred by the host resource gate; the lane stays parked and a later tick retries once the host has room"
+  printf 'relaunch-deferred %s: PR %s (%s): this host is overloaded; the lane stays parked and a later tick retries\n' "$1" "$2" "$4"
+}
+
 cmd_resume() {
   local id=${1-} trigger pr head note out rc=0 rec
   task_id_ok "$id" || die "usage: fm-park.sh resume <task-id> --trigger <text>" 2
@@ -682,10 +712,19 @@ cmd_resume() {
     printf 'You are a fresh agent relaunched in the same local copy on the same branch because: %s.\n' "$trigger"
     printf 'Read the PR and its new review activity, address it on this branch, then report again exactly as your instructions define done.\n'
   } > "$note"
+  # An overloaded host defers before anything is announced or attempted.
+  if ! "$HOST_GATE_BIN" --host-gate </dev/null >/dev/null 2>&1; then
+    resume_deferred "$id" "$pr" "$head" "$trigger"
+    return 0
+  fi
   # Written before the launch, so the fresh worker's own reports always follow
   # it; while the record stays, crew state still reads the record, not this.
   status_append "$id" "working [at=$(date +%s)]: relaunched from review park: $trigger"
   out=$(FM_HOME=$FM_HOME fm_run_timed "$ACTION_SECS" "$CONTROL_BIN" "$id" relaunch --note-file "$note" 2>&1) || rc=$?
+  if [ "$rc" -eq 75 ]; then
+    resume_deferred "$id" "$pr" "$head" "$trigger"
+    return 0
+  fi
   if [ "$rc" -ne 0 ]; then
     record_write "$id" "pr=$pr" "head=$head" "parked_at=$(record_get "$id" parked_at)" \
       "slot_leased=$(record_get "$id" slot_leased)" "resume_error=$(date +%s)" || true
@@ -842,7 +881,12 @@ publish_held() {  # <id>
   local id=$1
   [ -e "$(record_path "$id")" ] && [ -n "$(record_get "$id" held)" ] && [ -z "$(record_get "$id" held_reported)" ] || return 0
   report_write "$id" "held $id: PR $(record_get "$id" pr) - $(record_get "$id" held_reason); automatic relaunch stopped and the lane stays parked; resume it by hand with bin/fm-park.sh resume $id --trigger <text>" || return 1
-  held_record_write "$id" held_reported=1
+  # Without the marker a later tick publishes the outcome again, so a report
+  # whose marker cannot be written is withdrawn and the episode stays pending.
+  held_record_write "$id" held_reported=1 || {
+    rm -f -- "$REPORT_WRITTEN"
+    return 1
+  }
 }
 
 # Record the one episode of a parked lane whose checks are failing and keep it

@@ -256,7 +256,8 @@
 #   reservations, or while that queue cannot be counted;
 #   bin/fm-review-capacity-lib.sh owns which spawns are judged, what holds a
 #   place, the one bounded gh-axi observation, and its cross-host limit. It makes
-#   that call before any lock, reaches its verdict after the brief and delivery
+#   that call before the project, lane, and review admission locks (the
+#   task-set and per-task locks are already held), reaches its verdict after the brief and delivery
 #   checks, and counts reservations while holding the machine-wide review
 #   admission lock for the publication target (waiting up to 120 s for it)
 #   through metadata publication. A deferral prints `deferred:` and exits 75
@@ -4718,7 +4719,7 @@ if [ "$KIND" = ship ]; then
   fi
 fi
 
-# Review capacity verdict. The observation was made before any lock; the
+# Review capacity verdict. The observation was made before the admission locks; the
 # reservations are counted while holding this machine's review-admission lock
 # for the publication target (fm_review_capacity_lock_path), kept through
 # metadata publication, so clones with different origins that publish to one

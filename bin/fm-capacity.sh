@@ -241,7 +241,12 @@
 #           affinity), lowered to the tightest cgroup v2 cpu.max quota on this
 #           process's cgroup path; without nproc, the online count (getconf
 #           _NPROCESSORS_ONLN); on Darwin, sysctl hw.logicalcpu. A cgroup v1
-#           quota is not read. The report's cores= is that usable count.
+#           quota is not read. The report's cores= and load_limit= are that
+#           count and its limit rounded to two decimals; the comparison uses
+#           the quota ratio at six. The load average is host-wide while the
+#           cores are this process's own, a deliberately conservative pairing:
+#           a pinned or quota-limited process on a busy host is refused even
+#           when its own CPUs are idle, never admitted onto an overloaded one.
 #   memory  available memory is under 20 percent of total (Linux
 #           MemAvailable/MemTotal; Darwin kern.memorystatus_level)
 # Both limits are fixed; a stricter configured protection (config/lane-capacity
@@ -552,8 +557,8 @@ host_gate_usable_cores() {
   dir="$SYS_ROOT/fs/cgroup$path"
   while [ -n "$path" ] || [ "$dir" = "$SYS_ROOT/fs/cgroup" ]; do
     if { read -r quota period < "$dir/cpu.max"; } 2>/dev/null && is_uint "$quota" && is_uint "$period" && [ "$period" -gt 0 ]; then
-      if [ -z "$limit" ] || num_lt "$(awk -v q="$quota" -v p="$period" 'BEGIN{printf "%.2f", q / p}')" "$limit"; then
-        limit=$(awk -v q="$quota" -v p="$period" 'BEGIN{printf "%.2f", q / p}')
+      if [ -z "$limit" ] || num_lt "$(awk -v q="$quota" -v p="$period" 'BEGIN{printf "%.6f", q / p}')" "$limit"; then
+        limit=$(awk -v q="$quota" -v p="$period" 'BEGIN{printf "%.6f", q / p}')
       fi
     fi
     [ -n "$path" ] || break
@@ -569,13 +574,17 @@ host_gate_usable_cores() {
 
 if [ "$mode" = host_gate ]; then
   hg_reasons='' hg_unknown='' hg_limit=unknown
-  cores=$(host_gate_usable_cores)
+  # The comparison keeps the quota ratio at six decimals; only the report
+  # line rounds cores and the limit to two.
+  hg_cores_exact=$(host_gate_usable_cores)
+  cores=$hg_cores_exact
+  case "$cores" in *.*) cores=$(awk -v c="$cores" 'BEGIN{printf "%.2f", c}') ;; esac
   [ "$load1" != unknown ] || hg_unknown="${hg_unknown:+$hg_unknown,}load1"
   [ "$cores" != unknown ] || hg_unknown="${hg_unknown:+$hg_unknown,}cores"
   [ "$mem_free_pct" != unknown ] || hg_unknown="${hg_unknown:+$hg_unknown,}mem_avail_pct"
   if [ "$cores" != unknown ]; then
-    hg_limit=$(awk -v c="$cores" -v f="$HOST_GATE_LOAD_FACTOR" 'BEGIN{printf "%.2f", c * f}')
-    if [ "$load1" != unknown ] && awk -v l="$load1" -v m="$hg_limit" 'BEGIN{exit !(l > m)}'; then
+    hg_limit=$(awk -v c="$hg_cores_exact" -v f="$HOST_GATE_LOAD_FACTOR" 'BEGIN{printf "%.2f", c * f}')
+    if [ "$load1" != unknown ] && awk -v l="$load1" -v c="$hg_cores_exact" -v f="$HOST_GATE_LOAD_FACTOR" 'BEGIN{exit !(l > c * f)}'; then
       hg_reasons=cpu
     fi
   fi

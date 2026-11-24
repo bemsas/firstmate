@@ -102,6 +102,21 @@ SH
 printf '%s\n' "\$*" >> "$world/control.log"
 if [ "\${2:-}" = relaunch ] && [ "\${3:-}" = --note-file ]; then cat "\$4" >> "$world/control.log"; fi
 [ ! -e "$world/control.fail" ] || { echo "error: control refused"; exit 1; }
+[ ! -e "$world/control.defer" ] || { echo "deferred: host overloaded"; exit 75; }
+SH
+  # The host resource gate: admits unless host.overloaded exists.
+  cat > "$fakebin/fm-capacity.sh" <<SH
+#!/usr/bin/env bash
+[ ! -e "$world/host.overloaded" ] || exit 75
+exit 0
+SH
+  # mv fails for the lane's park record while record.mv.fail exists.
+  cat > "$fakebin/mv" <<SH
+#!/usr/bin/env bash
+last=
+for a in "\$@"; do last=\$a; done
+if [ -e "$world/record.mv.fail" ] && [ "\$last" = "$world/state/lane.review-park" ]; then exit 1; fi
+PATH=/usr/bin:/bin exec mv "\$@"
 SH
   cat > "$fakebin/fm-teardown.sh" <<SH
 #!/usr/bin/env bash
@@ -144,6 +159,7 @@ run_park() {  # <world> <args...>
       FM_PARK_CONTROL_BIN="$world/fakebin/fm-control.sh" \
       FM_PARK_TEARDOWN_BIN="$world/fakebin/fm-teardown.sh" \
       FM_PARK_CREW_STATE_BIN="$world/fakebin/fm-crew-state.sh" \
+      FM_PARK_HOST_GATE_BIN="$world/fakebin/fm-capacity.sh" \
       FM_PARK_QUIET_SECS="${FM_TEST_QUIET:-900}" \
       PATH="$world/fakebin:$PATH" "$PARK" "$@"
   fi
@@ -151,6 +167,7 @@ run_park() {  # <world> <args...>
     FM_PARK_CONTROL_BIN="$world/fakebin/fm-control.sh" \
     FM_PARK_TEARDOWN_BIN="$world/fakebin/fm-teardown.sh" \
     FM_PARK_CREW_STATE_BIN="$world/fakebin/fm-crew-state.sh" \
+    FM_PARK_HOST_GATE_BIN="$world/fakebin/fm-capacity.sh" \
     FM_PARK_QUIET_SECS="${FM_TEST_QUIET:-900}" \
     PATH="$world/fakebin:$PATH" "$PARK" "$@"
 }
@@ -164,7 +181,7 @@ gh_fixture() {  # <out> [key=value...]
   shift
   local state=OPEN draft=false head mergeable=MERGEABLE mss=BLOCKED decision=REVIEW_REQUIRED
   local rollup='"SUCCESS"' completed=$OLD_ISO committed=$OLD_ISO threads='[]' total=0
-  local review_oid bot_at=$OLD_ISO comments='[]' extra_reviews='' pushed='' comment_count review_count
+  local review_oid bot_at=$OLD_ISO comments='[]' extra_reviews='' pushed='' comment_count review_count ctx_conclusion='' extra_ctx=
   head=$(cat "$(dirname "$out")/head")
   review_oid=$head
   for kv in "$@"; do
@@ -174,7 +191,7 @@ gh_fixture() {  # <out> [key=value...]
       rollup=*) rollup=${kv#*=} ;; completed=*) completed=${kv#*=} ;; committed=*) committed=${kv#*=} ;;
       threads=*) threads=${kv#*=} ;; total=*) total=${kv#*=} ;; review_oid=*) review_oid=${kv#*=} ;;
       bot_at=*) bot_at=${kv#*=} ;; comments=*) comments=${kv#*=} ;; extra_reviews=*) extra_reviews=${kv#*=} ;;
-      pushed=*) pushed=${kv#*=} ;;
+      pushed=*) pushed=${kv#*=} ;; ctx_conclusion=*) ctx_conclusion=${kv#*=} ;;
     esac
   done
   comment_count=$(printf '%s' "$comments" | jq 'length')
@@ -183,7 +200,8 @@ gh_fixture() {  # <out> [key=value...]
   local suites="[{\"createdAt\":\"${pushed:-$committed}\"}]"
   [ "$pushed" != none ] || suites='[]'
   local rollup_obj=null
-  [ "$rollup" = null ] || rollup_obj="{\"state\":$rollup,\"contexts\":{\"nodes\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"completedAt\":\"$completed\"}]}}"
+  [ -z "$ctx_conclusion" ] || extra_ctx=",{\"__typename\":\"CheckRun\",\"name\":\"review\",\"completedAt\":\"$completed\",\"conclusion\":\"$ctx_conclusion\"},{\"__typename\":\"CheckRun\",\"name\":\"slow\",\"completedAt\":null,\"conclusion\":null}"
+  [ "$rollup" = null ] || rollup_obj="{\"state\":$rollup,\"contexts\":{\"nodes\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"completedAt\":\"$completed\"}$extra_ctx]}}"
   cat > "$out" <<JSON
 {"data":{"repository":{"pullRequest":{
   "state":"$state","isDraft":$draft,"headRefOid":"$head","baseRefName":"main","mergeable":"$mergeable",
@@ -843,6 +861,39 @@ test_failing_checks_hold_the_lane_once_and_resume_by_hand() {
   for _ in $(seq 1 20); do [ ! -e "$w/control.log" ] || break; sleep 0.1; done
   [ ! -e "$w/control.log" ] || fail "hold-pending: the retry relaunched the worker: $(cat "$w/control.log")"
 
+  # A review check that already timed out holds the lane even while the
+  # rollup still reads pending because another check is running.
+  w=$(make_world hold-timed-out "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" 'rollup="PENDING"' ctx_conclusion=TIMED_OUT decision=CHANGES_REQUESTED
+  out=$(run_park "$w" tick 2>&1; run_park "$w" tick 2>&1)
+  case "$out" in *"held lane: PR $GH_URL - check(s) review failed or timed out on "*) ;; *) fail "hold-timed-out: tick output: $out" ;; esac
+  for _ in $(seq 1 20); do [ ! -e "$w/control.log" ] || break; sleep 0.1; done
+  [ ! -e "$w/control.log" ] || fail "hold-timed-out: a timed-out review check relaunched the worker: $(cat "$w/control.log")"
+
+  # A held outcome whose marker cannot be written is withdrawn, not left to be
+  # published twice: the episode stays pending and is published once later.
+  w=$(make_world hold-marker-fail "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  : > "$w/record.mv.fail"
+  run_park "$w" tick >/dev/null 2>&1
+  ! compgen -G "$w/state/.review-park-report-*" >/dev/null || fail "hold-marker-fail: a report survived its failed marker write: $(cat "$w"/state/.review-park-report-*)"
+  ! grep -q '^held=' "$w/state/lane.review-park" || fail "hold-marker-fail: the held record was written while the record mv failed"
+  rm -f "$w/record.mv.fail"
+  out=$(run_park "$w" tick 2>&1; run_park "$w" tick 2>&1)
+  [ "$(printf '%s\n' "$out" | grep -c '^held lane: ')" = 1 ] || fail "hold-marker-fail: the held outcome was not published exactly once after recovery: $out"
+
+  w=$(make_world hold-marker-fail2 "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  run_park "$w" tick >/dev/null 2>&1; run_park "$w" tick >/dev/null 2>&1
+  grep -v '^held_reported=' "$w/state/lane.review-park" > "$w/rec.tmp" && PATH=/usr/bin:/bin mv "$w/rec.tmp" "$w/state/lane.review-park"
+  : > "$w/record.mv.fail"
+  out=$(run_park "$w" tick 2>&1)
+  ! compgen -G "$w/state/.review-park-report-*" >/dev/null || fail "hold-marker-fail2: a report survived its failed marker write after publication"
+  ! grep -q '^held_reported=' "$w/state/lane.review-park" || fail "hold-marker-fail2: the marker was written despite the failure"
+  rm -f "$w/record.mv.fail"
+  out=$(run_park "$w" tick 2>&1; run_park "$w" tick 2>&1)
+  [ "$(printf '%s\n' "$out" | grep -c '^held lane: ')" = 1 ] || fail "hold-marker-fail2: the pending outcome was not published exactly once: $out"
+
   # A held lane whose PR is then closed is still reported once.
   w=$(make_world hold-closed "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
   gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
@@ -862,6 +913,52 @@ test_failing_checks_hold_the_lane_once_and_resume_by_hand() {
     [ ! -e "$w/control.log" ] || fail "hold-gl-$st: relaunched: $(cat "$w/control.log")"
   done
   pass "failing, erroring, or timed-out checks on a parked lane record one held episode, publish its outcome once (retrying an unpublished one), never relaunch automatically, still report a close, and resume by hand"
+}
+
+# Ticks until the deferred lane's relaunch is reported; a tick that reports one
+# outcome may already have started the next retry, so the outcome can arrive on
+# any of them. Prints everything the ticks printed.
+ticks_until_relaunched() {  # <world> <label>
+  local i out=
+  for i in $(seq 1 60); do
+    out="$out$(run_park "$1" tick 2>&1)"
+    case "$out" in *"relaunched lane: "*) printf '%s\n' "$out"; return 0 ;; esac
+    sleep 0.25
+  done
+  fail "$2: the lane did not relaunch within 60 ticks: $out"
+}
+
+# A review relaunch the host gate defers is temporary: the lane stays parked
+# without resume_error, the deferral is reported once, and a later tick
+# relaunches it once the host has room. Both the park's own check and a 75
+# from fm-control are deferrals.
+test_deferred_review_relaunch_stays_parked_and_retries() {
+  local w out
+  w=$(make_world resume-deferred "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" decision=CHANGES_REQUESTED
+  : > "$w/host.overloaded"
+  out=$(tick_and_report "$w" resume-deferred)
+  case "$out" in "relaunch-deferred lane: PR $GH_URL (changes were requested): this host is overloaded"*) ;; *) fail "resume-deferred: tick output: $out" ;; esac
+  [ ! -e "$w/control.log" ] || fail "resume-deferred: an overloaded host still called fm-control: $(cat "$w/control.log")"
+  ! grep -q '^resume_error=' "$w/state/lane.review-park" || fail "resume-deferred: a deferral was recorded as a failed relaunch"
+  grep -q '^resume_deferred=' "$w/state/lane.review-park" || fail "resume-deferred: the deferral was not recorded"
+  out=$(run_park "$w" tick 2>&1; sleep 1; run_park "$w" tick 2>&1)
+  case "$out" in *relaunch-deferred*) fail "resume-deferred: the deferral was reported twice: $out" ;; esac
+  rm -f "$w/host.overloaded"
+  out=$(ticks_until_relaunched "$w" resume-after)
+  case "$out" in *"relaunched lane: PR "*"changes were requested"*) ;; *) fail "resume-deferred: the lane did not relaunch once the host had room: $out" ;; esac
+  [ "$(grep -c ' relaunch ' "$w/control.log")" = 1 ] || fail "resume-deferred: expected exactly one relaunch: $(cat "$w/control.log")"
+
+  w=$(make_world resume-deferred-control "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" decision=CHANGES_REQUESTED
+  : > "$w/control.defer"
+  out=$(tick_and_report "$w" resume-deferred-control)
+  case "$out" in "relaunch-deferred lane: "*) ;; *) fail "resume-deferred-control: tick output: $out" ;; esac
+  ! grep -q '^resume_error=' "$w/state/lane.review-park" || fail "resume-deferred-control: a control deferral was recorded as a failed relaunch"
+  rm -f "$w/control.defer"
+  out=$(ticks_until_relaunched "$w" resume-deferred-control-after)
+  [ ! -e "$w/state/lane.review-park" ] || fail "resume-deferred-control: the park record outlived its relaunch"
+  pass "a review relaunch the host gate defers stays parked without a failure mark, is reported once, and relaunches on a later tick"
 }
 
 test_edited_comment_beyond_first_hundred_triggers_relaunch() {
@@ -1293,6 +1390,7 @@ fm_test_run \
   test_quiet_parked_lane_and_approval_do_not_relaunch \
   test_failed_relaunch_keeps_record_and_stops_retrying \
   test_failing_checks_hold_the_lane_once_and_resume_by_hand \
+  test_deferred_review_relaunch_stays_parked_and_retries \
   test_closed_pr_is_reported_once \
   test_tick_parks_clean_idle_lanes_only_when_opted_in \
   test_land_requires_opt_in_but_always_cleans_parked \
