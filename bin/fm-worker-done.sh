@@ -183,6 +183,9 @@ done_url() {  # <done-line>; refuse ambiguous PR ownership.
 capture_lessons
 [ "$KIND" = ship ] || exit 0
 done_url "$LAST_LINE" || exit 0
+# Protected GitHub done events are candidates. Only the supervisor acceptance
+# path and subsequent PR registration can write readiness metadata for them.
+if [ -e "$CONFIG/done-acceptance" ] || [ -L "$CONFIG/done-acceptance" ]; then exit 0; fi
 record_pr "$URL" || exit 1
 snapshot_current || exit 0
 check_done "$URL"

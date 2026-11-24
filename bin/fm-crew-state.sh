@@ -310,7 +310,18 @@ emit() {  # <state> <source> [detail]
 }
 
 emit_run() {  # <state> <detail> [pr]
-  local detail=$2
+  local detail=$2 pr=${3:-${RUN_PR:-}}
+  if [ "$1" = "done" ] && [ "$KIND" = ship ] &&
+    fm_dod_acceptance_required "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$ID" "$pr"; then
+    if ! { [ "$(status_line_verb "$LOG_LINE")" = "done" ] &&
+      fm_dod_candidate_fields "$(status_line_note "$LOG_LINE")" &&
+      { [ -z "$pr" ] || [ "$pr" = "$FM_DOD_CANDIDATE_URL" ]; } &&
+      fm_dod_should_gate_ship_done "$KIND" "$(meta_value mode)" "$LOG_LINE" &&
+      fm_dod_accept_ship_done "$KIND" "$(meta_value mode)" "$WT" "$(meta_value project)" \
+        "$LOG_LINE" "$STATE" "$ID" "$META" >/dev/null; }; then
+      emit blocked run-step "ship delivery awaits supervisor acceptance for its exact head"
+    fi
+  fi
   case "$1" in
     done|failed) [ -z "${3:-}" ] || detail="$detail${SEP}pr=$3" ;;
   esac

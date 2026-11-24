@@ -2608,6 +2608,33 @@ test_no_mistakes_prevalidation_done_stays_done() {
   pass "no-mistakes pre-validation done: stays current-state done"
 }
 
+test_ship_candidate_does_not_read_done() {
+  reset_fakes
+  local d out head before
+  d=$(new_case protected-candidate)
+  make_repo_on_branch "$d/wt" fm/candidate
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/config/done-acceptance"
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  fm_write_meta "$d/state/candidate.meta" "window=fm:fm-candidate" "kind=ship" \
+    "mode=no-mistakes" "worktree=$d/wt" "project=$d/wt" "harness=claude" \
+    "pr=https://github.com/o/r/pull/1" "pr_head=$head"
+  printf 'done: PR https://github.com/o/r/pull/1 checks green head %s\n' "$head" > "$d/state/candidate.status"
+  arm_idle_record "$d/state" candidate
+  before=$(cat "$d/state/candidate.meta")
+  out=$(FM_HOME="$d" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: blocked" "a worker candidate did not establish acceptance"
+  assert_contains "$out" "awaiting supervisor acceptance" "status did not explain the candidate hold"
+
+  FM_FAKE_AXI_STATUS="$(run_passed fm/candidate)"
+  out=$(FM_HOME="$d" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: blocked" "an attributed pipeline pass did not establish acceptance"
+  assert_contains "$out" "source: run-step" "pipeline attribution was lost"
+  assert_equals "$before" "$(cat "$d/state/candidate.meta")" "status read changed task metadata"
+  [ ! -e "$d/state/candidate.accepted.json" ] || fail "status read persisted acceptance"
+  pass "protected status reads keep both a worker done candidate and a pipeline pass unaccepted"
+}
+
 test_moved_remote_branch_without_named_head_is_blocked() {
   reset_fakes
   local d main_sha fix_sha out
@@ -6827,6 +6854,7 @@ test_other_branch_run_ignored
 test_unpushed_ship_done_is_blocked
 test_merged_pr_reads_done_under_captured_meta
 test_no_mistakes_prevalidation_done_stays_done
+test_ship_candidate_does_not_read_done
 test_moved_remote_branch_without_named_head_is_blocked
 test_external_review_done_reads_ready
 test_no_run_busy_pane

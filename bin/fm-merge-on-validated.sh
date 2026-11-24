@@ -115,6 +115,8 @@ THREADS_QUERY='query($owner:String!,$repo:String!,$number:Int!){repository(owner
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -305,10 +307,16 @@ vision_blob() {  # <ref> -> blob sha, or "absent"; returns 1 when unreadable
 # Test-only exemptions require a complete forge file list, including rename sources.
 check_review_verdict() {
   local verdict='' files count review_text
+  if fm_dod_acceptance_required "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$EV_TASK" "$EV_URL"; then
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-done-check.sh" assert "$EV_TASK" "$EV_URL" "$EV_SHA" >/dev/null 2>&1 ||
+      add_reason "missing current supervisor acceptance for this head"
+    return 0
+  fi
   review_text=${EV_LINE#*" head $EV_SHA"}
   if [ -f "$STATE/review-verdicts.jsonl" ]; then
     verdict=$(jq -Rrs --arg pr "$EV_URL" --arg head "$EV_SHA" '
-      [split("\n")[] | fromjson? | select(.pr == $pr and .head == $head)
+      [split("\n")[] | fromjson? | select(.pr == $pr and .head == $head and (has("refute") | not))
        | select(.verdict == "merge" or .verdict == "fix")] | last | .verdict // ""' \
       "$STATE/review-verdicts.jsonl" 2>/dev/null) || verdict=''
   fi

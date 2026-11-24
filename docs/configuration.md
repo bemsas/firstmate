@@ -1147,6 +1147,49 @@ The checks read the task's brief at `data/<id>/brief.md`: `## Base branch` (or `
 The `proof` check reads no brief section: it reads the ready-report `done:` line in `state/<id>.status` for the visual-proof rider a UI change's Definition of done requires and verifies the named screenshot or video files exist, failing only when the rider is absent and the PR's changed files carry UI extensions.
 `bin/fm-done-check.sh`'s header owns the exact checks, receipt shape, and exit codes.
 
+## Done acceptance (config/done-acceptance/)
+
+Create the home-local `config/done-acceptance/` directory to require supervisor acceptance for GitHub.com ship PRs.
+For each eligible task, the supervisor places a private `<task>.json` in that directory and pins the policy before dispatch.
+The worker's ready report submits a candidate with `head <full SHA>` after the URL or `checks green` and before any visual-proof rider.
+Worker completion and legacy checklist results can still be inspected.
+Current-state reads, PR registration and the merge path require acceptance for the candidate.
+Registration and merge also check the live forge identity.
+Accepting a candidate confers no merge authority.
+
+The policy contains `repo` (same GitHub owner/repository for source and target), `base_branch`, `base` (full commit), `kind` (`feature` or `bug`), `allow` (allowed repository paths), `tests` (additional test paths, possibly empty), and `criteria` (approved task criteria).
+Path entries match literally, with a trailing slash for a directory prefix.
+Ordinary test/spec locations are checked in addition to the declared test paths.
+The diff compares the pinned commits and considers both paths of a rename.
+Python detection covers test functions, `assert`, standard unittest assertion calls, `pytest.raises`, common skip/xfail markers and simple truthy or self-equality assertions.
+Shell detection covers selected `test_*` functions, assertion and failure helper lines, common skip markers and simple literal assertions.
+These conservative checks can reject rewritten assertions and test renames.
+Other formats receive path and deletion checks, and all formats still require review of test behavior.
+
+For a bug fix, add a `regression` object with `path`, `test_sha256` and `runner_sha256`.
+The supervisor approves the bytes of a new test file and of the runner at `data/<task>/regression`.
+The runner receives the relative test path as its sole argument and is responsible for distinguishing the expected test failure (exit 10), a passing execution (exit 0), and any other outcome (any other exit).
+Return an insufficient result for zero collected or executed tests, skips, unexpected failures, and infrastructure or collection errors.
+Firstmate copies the same test bytes into the pinned base snapshot and runs the approved fixture against both committed snapshots.
+Linux bubblewrap is required for this check, with network isolation, read-only source and fixture mounts, and a fresh environment.
+It supports ordinary files and symlinks in the snapshot, with no submodule materialization or project environment activation.
+
+Use `bin/fm-done-check.sh review-brief <task> <pr-url> <fresh-scout-id>` to check the candidate and prepare the reviewer brief.
+Use the native `bin/fm-spawn.sh` scout path with a new ID and an explicit model from the other supported provider.
+The initial supported pairing is Codex GPT and Claude, with explicit model IDs recorded by dispatch.
+The reviewer receives the approved criteria and pinned commits and tries to refute completion.
+After reading the scout's report, the supervisor records its exact verdict with `bin/fm-review-verdict.sh refute <task> <scout> <reviewed-head>` and verifies with `bin/fm-done-check.sh accept <task> <pr-url>`.
+The acceptance record binds the task incarnation, policy, base, candidate, executed evidence and latest qualifying review.
+A new head, a change to the live base commit, a policy change or a new task incarnation requires fresh review and acceptance.
+Normal project capacity applies to the reviewer, so leave room for its scout while the candidate ship is still assigned.
+
+Homes with the directory absent use existing delivery checks.
+In an enabled home, an older task must recover its approved scope, original base and native builder identity, submit a new exact-head candidate and undergo the same checks.
+When the original inputs cannot be verified, leave the task unaccepted and use a new task with a pinned policy.
+The Firstmate home is the operational trust boundary.
+Keep these records under supervisor control, outside project worktrees and worker-authored evidence.
+This mechanism does not defend against a process that can deliberately impersonate the supervisor and rewrite its private records under the same OS user.
+
 ## Parked-gate wait deferral (config/wedge-defer-parked-gate)
 
 The optional local, gitignored `config/wedge-defer-parked-gate` presence flag opts this home into a default-off further form of wait evidence in the watcher's wedge timer.

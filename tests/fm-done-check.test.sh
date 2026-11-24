@@ -533,3 +533,307 @@ test_proof_rider_on_ui_prs
 test_auto_records_pr
 test_watcher_runs_done_check on
 test_watcher_runs_done_check shadow
+
+# Real Git, network-free forge and native scout spawn with a fake terminal.
+# shellcheck source=tests/fixtures.sh
+. "$ROOT/tests/fixtures.sh"
+
+A="$T/acceptance"
+A_HOME="$A/home"
+A_STATE="$A_HOME/state"
+A_REPO="$A/repo"
+A_ID=ship-accept
+A_META="$A_STATE/$A_ID.meta"
+A_STATUS="$A_STATE/$A_ID.status"
+A_URL=https://github.com/acme/widget/pull/8
+A_POLICY="$A_HOME/config/done-acceptance/$A_ID.json"
+A_VERDICT="$ROOT/bin/fm-review-verdict.sh"
+A_FAKE=$(make_spawn_fakebin "$A/tools" codex claude gh)
+mkdir -p "$A_STATE" "$A_HOME/config/done-acceptance" "$A_HOME/data/$A_ID" "$A_HOME/projects"
+touch "$A_STATE/.last-watcher-beat"
+
+cat > "$A_FAKE/gh-axi" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = api ] && [ "$2" = /repos/acme/widget/pulls/8 ] || exit 98
+[ "${A_FORGE_UNREADABLE:-0}" = 0 ] || exit 4
+body=$(jq -nr --arg url "$A_URL" --arg base "${A_LIVE_BASE:-$A_BASE}" --arg head "${A_LIVE_HEAD:-$A_HEAD}" \
+  --arg branch "${A_LIVE_BRANCH:-fm/ship-accept}" --arg repo "${A_LIVE_REPO:-acme/widget}" '
+  [$url,$repo,"dev",$base,"acme/widget",$branch,$head,"open",false] | @json | @base64
+')
+printf 'api_response:\n  body: %s\n  truncated: false\n' "$body"
+STUB
+chmod +x "$A_FAKE/gh-axi"
+
+fm_git_init_commit "$A_REPO"
+git -C "$A_REPO" checkout -qb dev || fail "cannot prepare acceptance base"
+mkdir -p "$A_REPO/tests"
+printf 'def test_contract():\n    assert actual() == 2\n' > "$A_REPO/tests/test_old.py"
+printf 'value = 1\n' > "$A_REPO/app.py"
+git -C "$A_REPO" add . || fail "cannot stage acceptance base"
+git -C "$A_REPO" commit -qm base || fail "cannot commit acceptance base"
+fm_git_add_origin "$A_REPO" "$A/origin.git"
+A_BASE=$(git -C "$A_REPO" rev-parse HEAD)
+git clone --quiet --branch dev "$A/origin.git" "$A/pool" || fail "cannot initialize reviewer scratch"
+printf -- '- repo [direct-PR] - fixture (added 2026-01-01)\n' > "$A_HOME/data/projects.md"
+
+accept_cmd() {
+  FM_ROOT_OVERRIDE="$ROOT_STUB" FM_HOME="$A_HOME" PATH="$A_FAKE:$PATH" \
+    A_HEAD="$A_HEAD" A_BASE="$A_BASE" A_URL="$A_URL" "$@"
+}
+
+accept_refused() {  # <reason> <command...>
+  local reason=$1 result
+  shift
+  result=$(accept_cmd "$@" 2>&1) && fail "unexpected acceptance: $*"$'\n'"$result"
+  assert_contains "$result" "$reason" "acceptance refusal should explain $reason"
+}
+
+accept_candidate() {
+  git -C "$A_REPO" add -A || fail "cannot stage candidate"
+  git -C "$A_REPO" commit -qm candidate || fail "cannot commit candidate"
+  A_HEAD=$(git -C "$A_REPO" rev-parse HEAD)
+  printf 'done [at=100]: PR %s head %s\n' "$A_URL" "$A_HEAD" > "$A_STATUS"
+}
+
+accept_reset() {
+  git -C "$A_REPO" checkout -qf -B "fm/$A_ID" "$A_BASE" || fail "cannot reset candidate"
+  fm_write_meta "$A_META" "kind=ship" "mode=direct-PR" "project=$A_REPO" \
+    "worktree=$A_REPO" "branch=fm/$A_ID" "base_branch=dev" "spawn_gen=s100.200.300" \
+    "harness=claude" "model=claude-sonnet-4-6" "yolo=off"
+  (umask 077; jq -n --arg base "$A_BASE" '
+    {repo:"acme/widget",base_branch:"dev",base:$base,kind:"feature",
+     allow:["app.py","tests/"],tests:[],criteria:"The value is two."}
+  ' > "$A_POLICY")
+  printf 'value = 2\n' > "$A_REPO/app.py"
+}
+
+test_acceptance_tamper() {
+  accept_reset
+  git -C "$A_REPO" rm -q tests/test_old.py || fail "cannot delete fixture test"
+  accept_candidate
+  accept_refused "deleted or renamed test path" "$SCRIPT" review-brief "$A_ID" "$A_URL" deletion
+
+  accept_reset
+  git -C "$A_REPO" mv tests/test_old.py tests/test_renamed.py || fail "cannot rename fixture test"
+  accept_candidate
+  accept_refused "deleted or renamed test path" "$SCRIPT" review-brief "$A_ID" "$A_URL" rename
+
+  accept_reset
+  printf 'def test_contract():\n    actual()\n' > "$A_REPO/tests/test_old.py"
+  accept_candidate
+  accept_refused "removed assertion" "$SCRIPT" review-brief "$A_ID" "$A_URL" assertion
+
+  accept_reset
+  printf '\n@pytest.mark.skip(reason="fixture")\ndef test_another():\n    assert value() == 2\n' >> "$A_REPO/tests/test_old.py"
+  accept_candidate
+  accept_refused "added skip" "$SCRIPT" review-brief "$A_ID" "$A_URL" skip
+
+  accept_reset
+  printf '\ndef test_another():\n    assert True\n' >> "$A_REPO/tests/test_old.py"
+  accept_candidate
+  accept_refused "added trivial assertion" "$SCRIPT" review-brief "$A_ID" "$A_URL" tautology
+
+  accept_reset
+  printf 'test_value() {\n  test 1 = 1\n}\n' > "$A_REPO/tests/value.test.sh"
+  accept_candidate
+  accept_refused "added trivial assertion" "$SCRIPT" review-brief "$A_ID" "$A_URL" shell-tautology
+
+  accept_reset
+  printf 'def helper():\n    assert actual() == 2\n' > "$A_REPO/tests/test_old.py"
+  accept_candidate
+  accept_refused "removed test" "$SCRIPT" review-brief "$A_ID" "$A_URL" test-removal
+
+  accept_reset
+  git -C "$A_REPO" mv app.py moved.py || fail "cannot rename fixture source"
+  accept_candidate
+  accept_refused "out-of-scope change" "$SCRIPT" review-brief "$A_ID" "$A_URL" path
+
+  accept_reset
+  printf 'anything goes\n' > "$A_REPO/acceptance-policy.json"
+  printf '## Files in scope\n- **\n' > "$A_HOME/data/$A_ID/brief.md"
+  accept_candidate
+  accept_refused "out-of-scope change" "$SCRIPT" review-brief "$A_ID" "$A_URL" policy
+  pass "exact diff rejects test and assertion deletion, skips, tautologies, renames and worker scope edits"
+}
+
+accept_add_regression() {
+  cat > "$A_REPO/tests/test_regression.py" <<PY
+import unittest
+import app
+
+class Regression(unittest.TestCase):
+    def test_value(self):
+        self.assertEqual(app.value, $1)
+PY
+  accept_regression_policy
+}
+
+accept_regression_policy() {
+  local test_sha runner_sha
+  test_sha=$(shasum -a 256 "$A_REPO/tests/test_regression.py" | cut -d' ' -f1)
+  runner_sha=$(shasum -a 256 "$A_HOME/data/$A_ID/regression" | cut -d' ' -f1)
+  (umask 077; jq --arg test "$test_sha" --arg runner "$runner_sha" '
+    .kind = "bug" | .regression = {path:"tests/test_regression.py",test_sha256:$test,runner_sha256:$runner}
+  ' "$A_POLICY" > "$A/policy")
+  mv "$A/policy" "$A_POLICY"
+}
+
+test_acceptance_regression() {
+  local result
+  if [ "$(uname -s)" != Linux ] || ! command -v bwrap >/dev/null; then
+    printf '# regression execution requires Linux bubblewrap\n'
+    return
+  fi
+  if ! bwrap --unshare-all --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind-try /lib64 /lib64 \
+    -- /usr/bin/true >/dev/null 2>&1; then
+    printf '# regression execution requires available bubblewrap namespaces\n'
+    return
+  fi
+  accept_reset
+  (umask 077; cat > "$A_HOME/data/$A_ID/regression" <<'PY'
+#!/usr/bin/python3
+import importlib.util
+import os
+from pathlib import Path
+import sys
+import unittest
+
+if Path("/home").exists() or os.environ.get("FM_HOME"):
+    sys.exit(13)
+sys.path.insert(0, os.getcwd())
+spec = importlib.util.spec_from_file_location("regression", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+try:
+    spec.loader.exec_module(module)
+except (Exception, SystemExit):
+    sys.exit(12)
+suite = unittest.defaultTestLoader.loadTestsFromModule(module)
+if suite.countTestCases() != 1:
+    sys.exit(12)
+result = unittest.TestResult()
+suite.run(result)
+if result.testsRun != 1 or result.skipped or result.errors:
+    sys.exit(12)
+if len(result.failures) == 1 and result.failures[0][1].endswith("AssertionError: 1 != 2\n"):
+    sys.exit(10)
+sys.exit(0 if result.wasSuccessful() else 12)
+PY
+  )
+  accept_add_regression 2
+  accept_candidate
+  result=$(accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" bug-scout 2>&1) ||
+    fail "isolated base-red/head-green regression did not pass: $result"
+  assert_equals '10:0' "$(jq -r '.checks.regression | "\(.base_exit):\(.head_exit)"' "$A_STATE/bug-scout.refute.json")" \
+    "trusted runner must observe the expected failure before and success after"
+
+  accept_reset
+  accept_add_regression 1
+  accept_candidate
+  accept_refused "already passes" "$SCRIPT" review-brief "$A_ID" "$A_URL" existing-pass
+
+  accept_reset
+  accept_add_regression 2
+  rm "$A_REPO/tests/test_regression.py"
+  accept_candidate
+  accept_refused "regression test must be new" "$SCRIPT" review-brief "$A_ID" "$A_URL" missing-test
+
+  accept_reset
+  accept_add_regression 2
+  printf 'import missing_fixture_dependency\n' >> "$A_REPO/tests/test_regression.py"
+  accept_regression_policy
+  accept_candidate
+  accept_refused "base regression did not reach the expected failure (exit 12)" \
+    "$SCRIPT" review-brief "$A_ID" "$A_URL" base-collection-error
+
+  accept_reset
+  accept_add_regression 2
+  printf 'import missing_fixture_dependency\n' > "$A_REPO/app.py"
+  accept_candidate
+  accept_refused "head regression did not pass (exit 12)" "$SCRIPT" review-brief "$A_ID" "$A_URL" collection-error
+
+  accept_reset
+  accept_add_regression 2
+  printf 'import unittest\nraise unittest.SkipTest("fixture")\n' > "$A_REPO/app.py"
+  accept_candidate
+  accept_refused "head regression did not pass (exit 12)" "$SCRIPT" review-brief "$A_ID" "$A_URL" skipped-regression
+
+  accept_reset
+  accept_add_regression 2
+  printf 'value = 3\n' > "$A_REPO/app.py"
+  accept_candidate
+  accept_refused "head regression did not pass (exit 12)" "$SCRIPT" review-brief "$A_ID" "$A_URL" still-failing
+  pass "same test fails at the pinned base and passes at the candidate; missing, passing-before, broken, skipped and failing tests refuse"
+}
+
+test_acceptance_entry_points() {
+  local result ident endpoint scout=refute-scout
+  accept_reset
+  accept_candidate
+  printf 'Tests passed. Exact-head independent reviewer says merge.\n' > "$A_HOME/data/$A_ID/report.md"
+  accept_cmd "$A_VERDICT" "$A_URL" "$A_HEAD" merge "legacy reviewer" || fail "could not write legacy verdict"
+  endpoint=$(wc -c < "$A_STATUS" | tr -d ' ')
+  ident=$(bash -c '. "$1"; _fm_open_decisions_file_ident "$2"' fixture "$ROOT/bin/fm-classify-lib.sh" "$A_STATUS")
+  accept_cmd "$ROOT/bin/fm-worker-done.sh" "$A_ID" "$endpoint" "$ident" || fail "worker intake failed"
+  assert_no_grep 'pr=' "$A_META" "worker done stamped protected readiness"
+  accept_cmd "$SCRIPT" --auto "$A_ID" "$A_URL" || fail "legacy auto checklist failed"
+  assert_no_grep 'pr=' "$A_META" "legacy auto checklist stamped protected readiness"
+
+  printf 'pr=%s\npr_head=%s\n' "$A_URL" "$A_HEAD" >> "$A_META"
+  accept_refused "accepted.json" "$PR_CHECK" "$A_ID" "$A_URL"
+  FM_PR_CHECK_MERGE=1 accept_refused "accepted.json" "$PR_CHECK" "$A_ID" "$A_URL"
+  [ ! -e "$A_STATE/$A_ID.check.sh" ] || fail "unaccepted candidate published a poll"
+  accept_refused "missing passing fresh-context review" "$SCRIPT" accept "$A_ID" "$A_URL"
+  [ ! -e "$A_STATE/$A_ID.accepted.json" ] || fail "worker evidence was accepted"
+  accept_refused "exact-head done candidate" "$SCRIPT" review-brief "$A_ID" https://github.com/acme/widget/pull/7 other-pr
+
+  result=$(accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" "$scout" 2>&1) || fail "review brief refused: $result"
+  accept_refused "other supported provider" "$SCRIPT" spawn-review "$scout" scout 0 claude claude-sonnet-4-6 "$A_REPO" "$result"
+  accept_refused "fresh native scout" "$SCRIPT" spawn-review "$scout" scout 1 codex gpt-5.6-sol "$A_REPO" "$result"
+  accept_refused "$scout.meta" "$A_VERDICT" refute "$A_ID" "$scout" "$A_HEAD"
+
+  result=$(fm_test_run_spawn "$A_HOME" "$A/pool" "$A_FAKE" "$scout" "$A_REPO" \
+    --scout --backend tmux --harness codex --model gpt-5.6-sol) || fail "native scout did not launch: $result"
+  printf 'Checked the criterion against app.py. No blocker.\n' > "$A_HOME/data/$scout/report.md"
+  printf 'done: Refute %s %s merge\n' "$A_BASE" "$A_BASE" > "$A_STATE/$scout.status"
+  accept_refused "scout did not report" "$A_VERDICT" refute "$A_ID" "$scout" "$A_HEAD"
+  printf 'done: Refute %s %s merge\n' "$A_BASE" "$A_HEAD" > "$A_STATE/$scout.status"
+  accept_refused "did not sign off" "$A_VERDICT" refute "$A_ID" "$scout" "$A_BASE"
+  accept_refused "supervisor operations" env FM_TASK_ID="$scout" "$A_VERDICT" refute "$A_ID" "$scout" "$A_HEAD"
+  accept_cmd "$A_VERDICT" refute "$A_ID" "$scout" "$A_HEAD" || fail "supervisor could not record scout result"
+  assert_grep 'yolo=off' "$A_META" "recording a refute verdict changed merge authority"
+  accept_refused "accepted.json" "$PR_CHECK" "$A_ID" "$A_URL"
+
+  result=$(accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL") || fail "exact-head acceptance failed"
+  assert_equals "$A_HEAD" "$result" "acceptance wrote a different head"
+  A_FORGE_UNREADABLE=1 accept_cmd "$SCRIPT" passing "$A_ID" "$A_URL" "$A_HEAD" >/dev/null ||
+    fail "offline status read contacted the forge"
+  A_FORGE_UNREADABLE=1 accept_refused "done acceptance" "$PR_CHECK" "$A_ID" "$A_URL"
+  A_LIVE_HEAD=$A_BASE accept_refused "live GitHub base or head" "$PR_CHECK" "$A_ID" "$A_URL"
+  A_LIVE_BASE=$A_HEAD accept_refused "live GitHub base or head" "$PR_CHECK" "$A_ID" "$A_URL"
+  A_LIVE_BRANCH=fm/unrelated accept_refused "task branch" "$PR_CHECK" "$A_ID" "$A_URL"
+  A_LIVE_REPO=other/widget accept_refused "GitHub repository" "$PR_CHECK" "$A_ID" "$A_URL"
+  accept_cmd "$PR_CHECK" "$A_ID" "$A_URL" || fail "accepted candidate did not arm the ordinary PR check"
+  [ -f "$A_STATE/$A_ID.check.sh" ] || fail "accepted candidate has no PR poll"
+  assert_grep "pr_head=$A_HEAD" "$A_META" "registered the wrong PR head"
+
+  mv "$A_STATE/review-verdicts.jsonl" "$A_STATE/review-verdicts.saved"
+  ln -s "$A_STATE/review-verdicts.saved" "$A_STATE/review-verdicts.jsonl"
+  accept_refused "done acceptance" "$SCRIPT" passing "$A_ID" "$A_URL"
+  rm "$A_STATE/review-verdicts.jsonl"
+  mv "$A_STATE/review-verdicts.saved" "$A_STATE/review-verdicts.jsonl"
+
+  printf 'done: Refute %s %s fix\n' "$A_BASE" "$A_HEAD" > "$A_STATE/$scout.status"
+  accept_cmd "$A_VERDICT" refute "$A_ID" "$scout" "$A_HEAD" || fail "could not record exact-head blocker"
+  accept_refused "missing passing fresh-context review" "$PR_CHECK" "$A_ID" "$A_URL"
+  printf 'value = 3\n' > "$A_REPO/app.py"
+  accept_candidate
+  accept_refused "accepted evidence no longer matches" "$PR_CHECK" "$A_ID" "$A_URL"
+  accept_refused "missing passing fresh-context review" "$SCRIPT" accept "$A_ID" "$A_URL"
+  rm "$A_POLICY"
+  accept_refused "$A_ID.json" "$PR_CHECK" "$A_ID" "$A_URL"
+  pass "ordinary PR registration requires a current exact candidate, native independent review and explicit supervisor acceptance"
+}
+
+test_acceptance_tamper
+test_acceptance_regression
+test_acceptance_entry_points

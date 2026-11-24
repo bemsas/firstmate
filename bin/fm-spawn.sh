@@ -4502,6 +4502,14 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   # Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.
   SOURCE_BRIEF=$BRIEF
+  SPAWN_REFUTE_CONTEXT=
+  if [ -e "$STATE/$ID.refute.json" ] || [ -L "$STATE/$ID.refute.json" ]; then
+    [ "$RAW_LAUNCH" = 0 ] || { echo 'error: refute review requires a native harness launch' >&2; exit 1; }
+    SPAWN_REFUTE_CONTEXT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      FM_CONFIG_OVERRIDE="$CONFIG" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-done-check.sh" spawn-review "$ID" "$KIND" "$RELAUNCH" \
+      "$HARNESS" "$MODEL" "$PROJ_ABS" "$SOURCE_BRIEF") || exit 1
+  fi
   BRIEF="$DATA/$ID/launch-brief.md"
   SPAWN_LAUNCH_BRIEF_PREEXISTED=0
   [ ! -e "$BRIEF" ] || SPAWN_LAUNCH_BRIEF_PREEXISTED=1
@@ -4515,8 +4523,11 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     [ -n "$LAUNCH_TASK_TEXT" ] &&
       fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT" &&
       printf '\n%s\n' "$LAUNCH_TASK_TEXT" &&
-      if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+      { if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"
+      fi; } &&
+      if [ "$KIND" = ship ]; then
+        fm_dod_candidate_note "$CONFIG" "$MODE"
       fi
   } >"$BRIEF_TMP" || {
     rm -f -- "$BRIEF_TMP"
@@ -7701,7 +7712,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp claude_sandbox base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential launch_context_bytes launch_context_source_bytes", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp claude_sandbox base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen refute_context approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential launch_context_bytes launch_context_source_bytes", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7748,6 +7759,7 @@ preserve_relaunch_meta() {
   [ "$HARNESS" != hermes ] || { echo "hermes_profile=$HERMES_PROFILE"; echo "hermes_home=$HERMES_PROFILE_HOME"; }
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  [ -z "${SPAWN_REFUTE_CONTEXT:-}" ] || echo "refute_context=$SPAWN_REFUTE_CONTEXT"
   [ -z "${LAUNCH_CONTEXT_BYTES:-}" ] || echo "launch_context_bytes=$LAUNCH_CONTEXT_BYTES"
   [ -z "${LAUNCH_CONTEXT_SOURCE_BYTES:-}" ] || echo "launch_context_source_bytes=$LAUNCH_CONTEXT_SOURCE_BYTES"
   # Default-off writes no traceparent= line.
