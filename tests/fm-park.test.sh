@@ -516,8 +516,8 @@ test_interrupted_park_reads_as_parking_and_the_tick_settles_it() {
   case "$(run_park "$w" list)" in *"parking; stop not yet confirmed"*) ;; *) fail "interrupted: list: $(run_park "$w" list)" ;; esac
   # Feedback after the crash still relaunches the lane, and the tick first
   # promotes the record because the agent is confirmed dead.
-  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
-  expect_relaunch "$w" interrupted-dead "checks are failing"
+  gh_fixture "$w/gh.1.json" decision=CHANGES_REQUESTED
+  expect_relaunch "$w" interrupted-dead "changes were requested"
 
   w=$(make_world park-interrupted-quiet "$GH_URL")
   gh_fixture "$w/gh.1.json"
@@ -531,7 +531,7 @@ test_interrupted_park_reads_as_parking_and_the_tick_settles_it() {
   gh_fixture "$w/gh.1.json"
   kill_park_during_stop "$w"
   : > "$w/agent.alive"
-  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  gh_fixture "$w/gh.1.json" decision=CHANGES_REQUESTED
   out=$(run_park "$w" tick 2>&1)
   # A relaunch would run detached, so give one the time to appear.
   for _ in $(seq 1 20); do [ ! -e "$w/control.log" ] || break; sleep 0.1; done
@@ -542,7 +542,7 @@ test_interrupted_park_reads_as_parking_and_the_tick_settles_it() {
   w=$(make_world park-interrupted-unreadable "$GH_URL")
   gh_fixture "$w/gh.1.json"
   kill_park_during_stop "$w"
-  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  gh_fixture "$w/gh.1.json" decision=CHANGES_REQUESTED
   : > "$w/tmux.unreadable"
   run_park "$w" tick >/dev/null 2>&1
   for _ in $(seq 1 20); do [ ! -e "$w/control.log" ] || break; sleep 0.1; done
@@ -740,10 +740,6 @@ test_each_relaunch_trigger_relaunches_a_fresh_worker() {
   rm -f "$w"/gh.*.json; gh_fixture "$w/gh.1.json" head=0000000000000000000000000000000000000009
   expect_relaunch "$w" head "the head moved to 000000000000"
 
-  w=$(make_world trig-ci "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
-  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
-  expect_relaunch "$w" ci "checks are failing"
-
   w=$(make_world trig-changes "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
   gh_fixture "$w/gh.1.json" decision=CHANGES_REQUESTED
   expect_relaunch "$w" changes "changes were requested"
@@ -793,7 +789,60 @@ test_each_relaunch_trigger_relaunches_a_fresh_worker() {
   w=$(make_world trig-gl-note "$GL_URL"); gl_fixture "$w"; park_world "$w"
   gl_fixture "$w" notes="[{\"notes\":[{\"author\":{\"username\":\"dave\"},\"system\":false,\"created_at\":\"$later\",\"resolvable\":false}]}]"
   expect_relaunch "$w" gitlab-note "new comments from dave"
-  pass "head change, failing checks, changes requested, an unresolved thread, a conflict, and new or edited GitHub or GitLab comments, including an inline reply in a resolved thread, each relaunch a fresh worker with the trigger in its instructions"
+  pass "head change, changes requested, an unresolved thread, a conflict, and new or edited GitHub or GitLab comments, including an inline reply in a resolved thread, each relaunch a fresh worker with the trigger in its instructions"
+}
+
+# A failed or timed-out check on a parked lane is recorded once and the lane
+# stays parked: no tick relaunches a worker for it, and a deliberate resume
+# still does.
+test_failing_checks_hold_the_lane_once_and_resume_by_hand() {
+  local w out lines
+  w=$(make_world hold-ci "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"' decision=CHANGES_REQUESTED
+  out=$(run_park "$w" tick 2>&1; run_park "$w" tick 2>&1)
+  case "$out" in *"held lane: PR $GH_URL - checks are failing on "*"changes were requested"*"automatic relaunch stopped"*) ;; *) fail "hold: tick output: $out" ;; esac
+  for _ in $(seq 1 20); do [ ! -e "$w/control.log" ] || break; sleep 0.1; done
+  [ ! -e "$w/control.log" ] || fail "hold: a failing lane was relaunched: $(cat "$w/control.log")"
+  grep -q '^held=[0-9]' "$w/state/lane.review-park" || fail "hold: the park record does not record the episode"
+  grep -q '^held_reason=checks are failing on ' "$w/state/lane.review-park" || fail "hold: no held reason"
+  tail -1 "$w/state/lane.status" | grep -q "^paused \[at=[0-9]*\]: parked on review and held: PR $GH_URL - checks are failing" \
+    || fail "hold: no paused episode line: $(tail -1 "$w/state/lane.status")"
+  out=$(FM_HOME="$w" FM_STATE_OVERRIDE="$w/state" "$ROOT/bin/fm-crew-state.sh" lane 2>&1 | head -1)
+  case "$out" in "state: paused"*"parked on review and held"*"run bin/fm-park.sh resume"*) ;; *) fail "hold: crew state: $out" ;; esac
+  case "$(run_park "$w" list)" in *"held: checks are failing"*) ;; *) fail "hold: list: $(run_park "$w" list)" ;; esac
+  # Later ticks, even with more feedback, record nothing more and relaunch nothing.
+  lines=$(wc -l < "$w/state/lane.status")
+  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"' mergeable=CONFLICTING mss=DIRTY
+  out=$(run_park "$w" tick 2>&1; run_park "$w" tick 2>&1)
+  [ -z "$out" ] || fail "hold: a held lane reported again: $out"
+  for _ in $(seq 1 20); do [ ! -e "$w/control.log" ] || break; sleep 0.1; done
+  [ ! -e "$w/control.log" ] || fail "hold: a held lane was relaunched later: $(cat "$w/control.log")"
+  [ "$(wc -l < "$w/state/lane.status")" = "$lines" ] || fail "hold: a second episode was recorded"
+  # The deliberate manual recovery relaunches it exactly as before.
+  out=$(run_park "$w" resume lane --trigger "operator retry after the CI fix" 2>&1) || fail "hold: manual resume failed: $out"
+  case "$out" in "relaunched lane: PR $GH_URL - operator retry after the CI fix") ;; *) fail "hold: manual resume: $out" ;; esac
+  head -1 "$w/control.log" | grep -q "^lane relaunch --note-file " || fail "hold: manual resume made no relaunch call"
+  [ ! -e "$w/state/lane.review-park" ] || fail "hold: record kept after the manual resume"
+
+  # A held lane whose PR is then closed is still reported once.
+  w=$(make_world hold-closed "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  run_park "$w" tick >/dev/null 2>&1; run_park "$w" tick >/dev/null 2>&1
+  grep -q '^held=' "$w/state/lane.review-park" || fail "hold-closed: not held"
+  gh_fixture "$w/gh.1.json" state=CLOSED
+  out=$(run_park "$w" tick 2>&1)
+  [ "$out" = "closed lane: PR $GH_URL was closed without merging; the lane needs a decision" ] || fail "hold-closed: $out"
+
+  # GitLab: a failed or canceled head pipeline holds the lane the same way.
+  for st in failed canceled; do
+    w=$(make_world "hold-gl-$st" "$GL_URL"); gl_fixture "$w"; park_world "$w"
+    gl_fixture "$w" "pstatus=$st"
+    out=$(run_park "$w" tick 2>&1; run_park "$w" tick 2>&1)
+    case "$out" in *"held lane: "*"checks are failing"*) ;; *) fail "hold-gl-$st: tick output: $out" ;; esac
+    for _ in $(seq 1 20); do [ ! -e "$w/control.log" ] || break; sleep 0.1; done
+    [ ! -e "$w/control.log" ] || fail "hold-gl-$st: relaunched: $(cat "$w/control.log")"
+  done
+  pass "failing or timed-out checks on a parked lane record one held episode, never relaunch automatically, still report a close, and resume by hand"
 }
 
 test_edited_comment_beyond_first_hundred_triggers_relaunch() {
@@ -831,7 +880,7 @@ test_behind_base_does_not_relaunch() {
 test_slow_relaunch_is_never_cut_short_by_the_tick() {
   local w out
   w=$(make_world tick-slow-relaunch "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
-  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  gh_fixture "$w/gh.1.json" decision=CHANGES_REQUESTED
   printf '#!/usr/bin/env bash\nprintf started > "%s/control.started"\nwhile [ ! -e "%s/control.release" ]; do sleep 0.05; done\nprintf "%%s\\n" "$*" >> "%s/control.log"\n' "$w" "$w" "$w" > "$w/fakebin/fm-control.sh"
   out=$(FM_PARK_TICK_SECS=6 run_park "$w" tick 2>&1)
   [ -z "$out" ] || fail "slow-relaunch: the starting tick printed: $out"
@@ -843,7 +892,7 @@ test_slow_relaunch_is_never_cut_short_by_the_tick() {
   : > "$w/control.release"
   wait_report "$w" slow-relaunch
   out=$(FM_PARK_TICK_SECS=6 run_park "$w" tick 2>&1)
-  case "$out" in "relaunched lane: PR $GH_URL - checks are failing"*) ;; *) fail "slow-relaunch: report: $out" ;; esac
+  case "$out" in "relaunched lane: PR $GH_URL - changes were requested"*) ;; *) fail "slow-relaunch: report: $out" ;; esac
   [ "$(grep -c ' relaunch ' "$w/control.log")" = 1 ] || fail "slow-relaunch: relaunch calls: $(cat "$w/control.log")"
   [ ! -e "$w/state/lane.review-park" ] || fail "slow-relaunch: the record of a relaunched lane was kept: $(cat "$w/state/lane.review-park")"
   pass "a relaunch slower than the whole tick budget completes once, is never killed, and is reported by the next tick"
@@ -854,7 +903,7 @@ test_tick_resumes_where_the_last_one_ran_out_of_time() {
   w=$(make_world tick-rotate "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
   cp "$w/state/lane.meta" "$w/state/lane2.meta"
   cp "$w/state/lane.review-park" "$w/state/lane2.review-park"
-  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  gh_fixture "$w/gh.1.json" decision=CHANGES_REQUESTED
   # The first lane's read outlasts the whole tick; in the next tick the second
   # lane visited is the slow one, so only the lane that tick starts at relaunches.
   printf 'sleep 8\n' > "$w/gh.1.sh"
@@ -891,10 +940,10 @@ test_quiet_parked_lane_and_approval_do_not_relaunch() {
 test_failed_relaunch_keeps_record_and_stops_retrying() {
   local w out
   w=$(make_world relaunch-fail "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
-  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  gh_fixture "$w/gh.1.json" decision=CHANGES_REQUESTED
   : > "$w/control.fail"
   out=$(tick_and_report "$w" relaunch-fail)
-  case "$out" in "relaunch-failed lane: PR $GH_URL (checks are failing"*) ;; *) fail "relaunch-fail: tick output $out" ;; esac
+  case "$out" in "relaunch-failed lane: PR $GH_URL (changes were requested"*) ;; *) fail "relaunch-fail: tick output $out" ;; esac
   grep -q '^resume_error=' "$w/state/lane.review-park" || fail "relaunch-fail: record does not note the failure"
   rm -f "$w/control.log"
   out=$(run_park "$w" tick 2>&1)
@@ -1187,7 +1236,7 @@ test_reports_survive_until_their_wake_is_recorded() {
 test_land_waits_for_an_action_under_way() {
   local w out
   w=$(make_world land-waits "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
-  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  gh_fixture "$w/gh.1.json" decision=CHANGES_REQUESTED
   printf '#!/usr/bin/env bash\nsleep 3\nprintf "%%s\\n" "$*" >> "%s/order.log"\n' "$w" > "$w/fakebin/fm-control.sh"
   printf '#!/usr/bin/env bash\nprintf "teardown\\n" >> "%s/order.log"\n' "$w" > "$w/fakebin/fm-teardown.sh"
   out=$(run_park "$w" tick 2>&1)
@@ -1224,6 +1273,7 @@ fm_test_run \
   test_tick_resumes_where_the_last_one_ran_out_of_time \
   test_quiet_parked_lane_and_approval_do_not_relaunch \
   test_failed_relaunch_keeps_record_and_stops_retrying \
+  test_failing_checks_hold_the_lane_once_and_resume_by_hand \
   test_closed_pr_is_reported_once \
   test_tick_parks_clean_idle_lanes_only_when_opted_in \
   test_land_requires_opt_in_but_always_cleans_parked \

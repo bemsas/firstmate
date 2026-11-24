@@ -111,11 +111,20 @@
 #     a close without merge is reported once (marker
 #     state/.review-park-closed-<id>), and with config/park-on-review a clean
 #     gate parks it.
-# Relaunch triggers on a parked lane: the head moved, checks failing, changes
-# requested, a merge conflict, any unresolved review thread, or any new
-# comment (inline review-thread replies included), review or note created or
-# edited after the park (an approval with
-# no body is not a comment). A branch merely behind its base is not a trigger. It
+# Relaunch triggers on a parked lane: the head moved, changes requested, a
+# merge conflict, any unresolved review thread, or any new comment (inline
+# review-thread replies included), review or note created or edited after the
+# park (an approval with no body is not a comment). A branch merely behind its
+# base is not a trigger. Failing checks are never an automatic relaunch: a
+# failed or timed-out check or review lane (GitHub rollup FAILURE or ERROR,
+# which covers a timed-out check run; GitLab pipeline failed or canceled) is
+# recorded once as one episode - held= and held_reason= on the park record,
+# one `held` outcome line and one paused: status line - and the lane stays
+# parked with its agent stopped, so a failing lane can never relaunch a worker
+# per tick. Every later tick leaves a held lane alone except for reporting a
+# close; bin/fm-park.sh resume <id> --trigger <text> is the deliberate manual
+# recovery and relaunches it exactly as before. Whatever other triggers were
+# present at the same read are named in that one episode. It
 # records its outcome and close lines as one check park-on-review wake before
 # it removes the reports they came from or marks a close as reported, then
 # prints them for the watcher to ring; when the wake cannot be recorded it
@@ -144,7 +153,8 @@
 # list prints each parked lane: id, PR, parked head, and when it parked.
 #
 # The record is key=value lines (pr, head, parked_at, slot_leased, pending
-# until the stop is confirmed, and resume_error after a failed relaunch), mode
+# until the stop is confirmed, resume_error after a failed relaunch, and held
+# with held_reason once failing checks stopped automatic relaunch), mode
 # 0600, published by rename.
 # GraphQL and jq programs below are literal, not shell expressions.
 # shellcheck disable=SC2016
@@ -487,9 +497,9 @@ TRIGGER_PROGRAM="$JQ_TIME"'
   . as $s
   | {
       state: $s.state,
+      failing: (if $s.ci == "failure" then "checks are failing on \($s.head[0:12])" else null end),
       triggers: [
         (if $s.head != $head then "the head moved to \($s.head[0:12])" else empty end),
-        (if $s.ci == "failure" then "checks are failing on \($s.head[0:12])" else empty end),
         (if $s.changes_requested then "changes were requested" else empty end),
         (if $s.conflict == "conflict" then "the PR has merge conflicts" else empty end),
         (if $s.threads_unresolved > 0 then "\($s.threads_unresolved) review thread(s) unresolved" else empty end),
@@ -774,7 +784,7 @@ closed_once() {  # <id> <pr>
 }
 
 watch_parked() {  # <id>
-  local id=$1 pr head parked snap result state triggers
+  local id=$1 pr head parked snap result state triggers failing
   ! lane_busy "$id" || return 0
   if [ -n "$(record_get "$id" pending)" ]; then
     ( LOCKS_HELD=; trap release_locks EXIT; settle_pending "$id" ) || true
@@ -782,6 +792,7 @@ watch_parked() {  # <id>
     [ -e "$(record_path "$id")" ] && [ -z "$(record_get "$id" pending)" ] || return 0
   fi
   [ -z "$(record_get "$id" resume_error)" ] || return 0
+  [ -z "$(record_get "$id" held)" ] || { watch_held "$id"; return 0; }
   pr=$(record_get "$id" pr)
   head=$(record_get "$id" head)
   parked=$(record_get "$id" parked_at)
@@ -793,9 +804,39 @@ watch_parked() {  # <id>
     merged) return 0 ;;
     closed) closed_once "$id" "$pr"; return 0 ;;
   esac
+  failing=$(printf '%s' "$result" | jq -r '.failing // empty')
   triggers=$(printf '%s' "$result" | jq -r '.triggers | join("; ")')
+  if [ -n "$failing" ]; then
+    ( LOCKS_HELD=; trap release_locks EXIT; hold_failing "$id" "$failing${triggers:+; $triggers}" ) || true
+    return 0
+  fi
   [ -n "$triggers" ] || return 0
   action_start "$id" resume --trigger "$triggers"
+}
+
+# A held lane is never relaunched by tick; only a close is still reported.
+watch_held() {  # <id>
+  local id=$1 pr snap
+  pr=$(record_get "$id" pr)
+  snap=$(snapshot "$pr") || return 0
+  [ "$(printf '%s' "$snap" | jq -r .state)" != closed ] || closed_once "$id" "$pr"
+}
+
+# Record the one episode of a parked lane whose checks are failing and keep it
+# parked, under the lane lock so it never races a resume or land.
+hold_failing() {  # <id> <reason>
+  local id=$1 reason=$2 line now
+  lock_try "$(lane_lock "$id")" || return 0
+  [ -e "$(record_path "$id")" ] && [ -z "$(record_get "$id" held)" ] || return 0
+  [ -z "$(record_get "$id" pending)" ] && [ -z "$(record_get "$id" resume_error)" ] || return 0
+  now=$(date +%s)
+  record_write "$id" "pr=$(record_get "$id" pr)" "head=$(record_get "$id" head)" \
+    "parked_at=$(record_get "$id" parked_at)" "slot_leased=$(record_get "$id" slot_leased)" \
+    "held=$now" "held_reason=$reason" || return 1
+  line="paused [at=$now]: parked on review and held: PR $(record_get "$id" pr) - $reason; automatic relaunch stopped, run bin/fm-park.sh resume $id --trigger <text> to relaunch"
+  status_append "$id" "$line"
+  fm_parent_channel_report "$FM_HOME" "$STATE" "$line" >/dev/null 2>&1 || true
+  report_write "$id" "held $id: PR $(record_get "$id" pr) - $reason; automatic relaunch stopped and the lane stays parked; resume it by hand with bin/fm-park.sh resume $id --trigger <text>"
 }
 
 watch_unparked() {  # <id>
@@ -920,7 +961,7 @@ cmd_list() {
     printf '%s\tPR %s\thead %s\tparked %s%s\n' "$id" "$(record_get "$id" pr)" \
       "$(record_get "$id" head | cut -c1-12)" \
       "$(date -u -r "$(record_get "$id" parked_at)" +%Y-%m-%dT%H:%MZ 2>/dev/null || date -u -d "@$(record_get "$id" parked_at)" +%Y-%m-%dT%H:%MZ 2>/dev/null || record_get "$id" parked_at)" \
-      "$([ -z "$(record_get "$id" pending)" ] || printf '\tparking; stop not yet confirmed')$([ -z "$(record_get "$id" resume_error)" ] || printf '\trelaunch failed; run fm-park.sh resume by hand')"
+      "$([ -z "$(record_get "$id" pending)" ] || printf '\tparking; stop not yet confirmed')$([ -z "$(record_get "$id" resume_error)" ] || printf '\trelaunch failed; run fm-park.sh resume by hand')$([ -z "$(record_get "$id" held)" ] || printf '\theld: %s; run fm-park.sh resume by hand' "$(record_get "$id" held_reason)")"
   done
 }
 

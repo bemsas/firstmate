@@ -3,8 +3,12 @@
 # many workers it admits at once on this machine never gets a fresh worker
 # launched beyond that number (bin/fm-project-capacity-lib.sh owns the
 # contract; bin/fm-spawn.sh runs the check). The opt-in lane capacity spawn
-# gate (config/lane-capacity admit-spawns; bin/fm-capacity.sh owns the verdict)
-# is covered here too, because it defers through the same spawn path.
+# gate (config/lane-capacity admit-spawns; bin/fm-capacity.sh owns the verdict),
+# the always-on host resource gate (bin/fm-capacity.sh --host-gate), and the
+# review-queue cap on publishing ships (bin/fm-review-capacity-lib.sh) are
+# covered here too, because they defer through the same spawn path. The review
+# cases read a fixture of the forge's raw GraphQL answer through a fake gh-axi
+# that applies the real jq reduction the library sends, so no network is used.
 #
 # Every case drives the real bin/fm-spawn.sh against a real project clone with
 # an origin, fake tmux and treehouse binaries that log every call, and a real
@@ -715,6 +719,236 @@ test_lane_capacity_gate_refuses_an_unreadable_opt_in() {
   pass "a malformed lane capacity refuses spawns only when it asks for the gate, and one that cannot be read always refuses"
 }
 
+# --- host resource gate -----------------------------------------------------
+
+# A fixture /proc for the host gate's Linux probes; the core count stays real,
+# so an "above" load is set far beyond 1.5 x any real core count. A dash
+# leaves that probe file out, which reads as unknown.
+host_proc() {  # <case-dir> <name> <load1|-> <mem-avail-pct|->
+  local dir="$1/proc-$2"
+  mkdir -p "$dir"
+  [ "$3" = - ] || printf '%s 0.00 0.00 1/1 1\n' "$3" > "$dir/loadavg"
+  [ "$4" = - ] || printf 'MemTotal: 1000000 kB\nMemAvailable: %s kB\n' "$(( $4 * 10000 ))" > "$dir/meminfo"
+  printf '%s\n' "$dir"
+}
+
+test_host_gate_defers_an_overloaded_host_and_keeps_the_task_queued() {
+  local case_dir home out rc=0 before worktrees proc
+  if [ "$(uname -s)" != Linux ]; then
+    pass "host gate spawn deferral (skipped: its fixture replaces the Linux /proc probes; the verdict itself is covered portably by tests/fm-capacity.test.sh)"
+    return 0
+  fi
+  case_dir=$(make_case host-gate task-c task-d task-e task-f)
+  home="$case_dir/home"
+  before=$(call_count "$case_dir")
+  worktrees=$(worktree_list "$case_dir")
+  proc=$(host_proc "$case_dir" load 100000.00 60)
+  out=$(FM_PROC_ROOT_OVERRIDE=$proc spawn_ship "$case_dir" task-c "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "a spawn on an overloaded host was not deferred: $out"
+  assert_contains "$out" "deferred: this host is overloaded (1-minute load 100000.00" "the deferral did not name the observed load"
+  assert_contains "$out" "task task-c was not launched and its backlog item stays queued" "the deferral did not say the task stays queued"
+  assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+  rc=0
+  proc=$(host_proc "$case_dir" mem 0.00 19)
+  out=$(FM_PROC_ROOT_OVERRIDE=$proc spawn_ship "$case_dir" task-d "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "a spawn with under 20 percent memory available was not deferred: $out"
+  assert_contains "$out" "available memory 19% against a floor of 20%" "the deferral did not name the memory reading"
+  assert_nothing_created "$case_dir" "$home" task-d "$before" "$worktrees"
+  rc=0
+  proc=$(host_proc "$case_dir" ok 0.00 20)
+  out=$(FM_PROC_ROOT_OVERRIDE=$proc spawn_ship "$case_dir" task-e) || rc=$?
+  expect_code 0 "$rc" "a spawn on a host under both limits was refused: $out"
+  assert_contains "$out" "spawned task-e" "a spawn under both limits did not launch"
+  rc=0
+  proc=$(host_proc "$case_dir" unknown - -)
+  out=$(FM_PROC_ROOT_OVERRIDE=$proc spawn_ship "$case_dir" task-f) || rc=$?
+  expect_code 0 "$rc" "unknown host readings refused a spawn: $out"
+  assert_contains "$out" "warning: host gate: this host's load1,mem_avail_pct reading is unknown, so it was not judged" "unknown readings were not named"
+  assert_contains "$out" "spawned task-f" "a spawn with unknown readings did not launch"
+  pass "the host gate defers a spawn on observed load above 1.5 x cores or memory under 20 percent before anything exists, and names but does not defer on unknown readings"
+}
+
+# --- review capacity --------------------------------------------------------
+
+# Points the case's project at a GitHub publication target without any fetch
+# reaching it: bin/fm-spawn.sh fetches only origin, which stays a local path.
+github_target() {  # <case-dir>
+  git -C "$1/project" remote add upstream https://github.com/acme/widget.git
+}
+
+# Replaces the case's gh-axi with one that logs each call, applies the --jq
+# program the caller sent to the raw GraphQL fixture with the real jq, and
+# answers in gh-axi's api_response shape. FM_FAKE_GH_RC fails the call and
+# FM_FAKE_GH_TRUNCATED reports the body truncated.
+review_forge() {  # <case-dir>
+  cat > "$1/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_GH_LOG"
+if [ "${FM_FAKE_GH_RC:-0}" != 0 ]; then
+  printf 'error: "forge unavailable"\ncode: UNKNOWN\n'
+  exit "$FM_FAKE_GH_RC"
+fi
+expr=
+while [ "$#" -gt 0 ]; do
+  [ "$1" != --jq ] || { expr=$2; shift; }
+  shift
+done
+body=$(jq -r "$expr" "$FM_FAKE_GH_JSON") || exit 1
+printf 'api_response:\n  body: "%s"\n  truncated: %s\n' "$body" "$([ -n "${FM_FAKE_GH_TRUNCATED:-}" ] && echo true || echo false)"
+SH
+  chmod +x "$1/fakebin/gh-axi"
+  : > "$1/gh.log"
+}
+
+# One open pull request node: number, head branch, draft, reviewDecision
+# (null for none) and the head commit an APPROVED review was left on (empty
+# for none). Its own head commit is h<number>.
+pr_node() {  # <number> <head> <draft> <decision|null> [<approved-oid>]
+  jq -cn --argjson n "$1" --arg head "$2" --argjson draft "$3" --arg d "$4" --arg ap "${5:-}" '{
+    number: $n, headRefName: $head, headRefOid: "h\($n)", isDraft: $draft,
+    reviewDecision: (if $d == "null" then null else $d end),
+    latestOpinionatedReviews: {nodes: (if $ap == "" then [] else [{state: "APPROVED", commit: {oid: $ap}}] end)}}'
+}
+
+# The raw GraphQL answer: <total-count>, then one pr_node per open PR listed.
+forge_answer() {  # <case-dir> <total-count> [<node>...]
+  local out="$1/forge.json" total=$2
+  shift 2
+  printf '%s\n' "$@" | jq -s --argjson t "$total" '{data: {repository: {pullRequests: {totalCount: $t, nodes: .}}}}' > "$out"
+}
+
+review_spawn() {  # <case-dir> <id> [pane-path]
+  FM_FAKE_GH_LOG="$1/gh.log" FM_FAKE_GH_JSON="$1/forge.json" spawn_ship "$@"
+}
+
+test_review_capacity_admits_below_the_cap_with_one_bounded_call() {
+  local case_dir out rc=0
+  case_dir=$(make_case review-below task-c)
+  github_target "$case_dir"
+  review_forge "$case_dir"
+  # Two holders: a fleet PR awaiting review and a fleet draft. A human branch,
+  # an approved fleet PR, and a fleet PR approved on its current head hold none.
+  forge_answer "$case_dir" 5 \
+    "$(pr_node 11 fm/a false REVIEW_REQUIRED)" \
+    "$(pr_node 12 fm/b true null)" \
+    "$(pr_node 13 feat/human false null)" \
+    "$(pr_node 14 fm/c false APPROVED)" \
+    "$(pr_node 15 fm/e false null h15)"
+  out=$(review_spawn "$case_dir" task-c) || rc=$?
+  expect_code 0 "$rc" "a spawn below the review cap was refused: $out"
+  assert_contains "$out" "spawned task-c" "a spawn below the review cap did not launch"
+  assert_equals 1 "$(wc -l < "$case_dir/gh.log" | tr -d ' ')" "admission did not make exactly one forge call"
+  assert_contains "$(cat "$case_dir/gh.log")" "api graphql -X POST" "the forge call was not the bounded GraphQL read"
+  assert_contains "$(cat "$case_dir/gh.log")" "owner=acme --field name=widget" "the forge call did not address the publication target"
+  pass "a publishing ship is admitted below the review cap after one bounded forge call; approved, human, and current-head-approved PRs hold no place"
+}
+
+test_review_capacity_defers_a_full_queue_without_leaving_anything_behind() {
+  local case_dir home out rc=0 before worktrees
+  case_dir=$(make_case review-full task-c)
+  home="$case_dir/home"
+  github_target "$case_dir"
+  review_forge "$case_dir"
+  # The third holder is a fleet PR whose only approval is of an older head.
+  forge_answer "$case_dir" 4 \
+    "$(pr_node 11 fm/a false REVIEW_REQUIRED)" \
+    "$(pr_node 12 fm/b true null)" \
+    "$(pr_node 13 fm/d false null h-old)" \
+    "$(pr_node 14 fm/c false CHANGES_REQUESTED)"
+  before=$(call_count "$case_dir")
+  worktrees=$(worktree_list "$case_dir")
+  out=$(review_spawn "$case_dir" task-c "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "a spawn at the review cap was not deferred: $out"
+  assert_contains "$out" "deferred: project project admits 3 open unreviewed fleet PR(s) in github.com/acme/widget and its review queue is full: 4 of 3 places are held (#11, #12, #13, #14)" \
+    "the deferral did not name the cap and its holders"
+  assert_contains "$out" "task task-c was not launched and its backlog item stays queued" "the deferral did not say the task stays queued"
+  assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+  pass "a publishing ship at the review cap is deferred before any record, brief, endpoint, worktree, or backlog move exists; drafts, changes requested, and stale approvals hold places"
+}
+
+test_review_capacity_counts_unpublished_work_once() {
+  local case_dir home out rc=0
+  case_dir=$(make_case review-reserve task-c task-d)
+  home="$case_dir/home"
+  github_target "$case_dir"
+  review_forge "$case_dir"
+  # live-b is PR-ready and its PR is open: counted once, through the forge.
+  # live-c recorded a PR that is no longer open: it has left the queue.
+  write_live "$home" live-b "$case_dir/project" "branch=fm/live-b" "pr=https://github.com/acme/widget/pull/21"
+  write_live "$home" live-c "$case_dir/project" "branch=fm/live-c" "pr=https://github.com/acme/widget/pull/9"
+  forge_answer "$case_dir" 2 \
+    "$(pr_node 20 fm/a false REVIEW_REQUIRED)" \
+    "$(pr_node 21 fm/live-b false REVIEW_REQUIRED)"
+  out=$(review_spawn "$case_dir" task-c) || rc=$?
+  expect_code 0 "$rc" "a PR-ready worker was counted twice or a landed one still held a place: $out"
+  assert_contains "$out" "spawned task-c" "the admitted spawn did not launch"
+  # task-c has not published yet, so it now reserves the third place.
+  rc=0
+  out=$(review_spawn "$case_dir" task-d "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "an unpublished worker did not reserve its place: $out"
+  assert_contains "$out" "3 of 3 places are held (#20, #21, task-c)" "the deferral did not count the unpublished worker as a reservation"
+  assert_absent "$home/state/task-d.meta" "the deferred spawn published a record"
+  pass "an unpublished ship reserves a place, a PR-ready one is counted once through its open PR, and a landed one frees its place"
+}
+
+test_review_capacity_defers_when_the_queue_cannot_be_counted() {
+  local case_dir home out rc=0 before worktrees
+  case_dir=$(make_case review-unknown task-c)
+  home="$case_dir/home"
+  github_target "$case_dir"
+  review_forge "$case_dir"
+  forge_answer "$case_dir" 1 "$(pr_node 11 fm/a false REVIEW_REQUIRED)"
+  before=$(call_count "$case_dir")
+  worktrees=$(worktree_list "$case_dir")
+  out=$(FM_FAKE_GH_RC=1 review_spawn "$case_dir" task-c "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "a spawn whose forge call failed was admitted: $out"
+  assert_contains "$out" "review queue in github.com/acme/widget cannot be counted: the open pull requests could not be observed (the gh-axi call failed with exit 1)" \
+    "the deferral did not name the failed observation"
+  assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+  rc=0
+  out=$(FM_FAKE_GH_TRUNCATED=1 review_spawn "$case_dir" task-c "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "a truncated forge answer was admitted: $out"
+  assert_contains "$out" "gh-axi did not report a complete, untruncated answer" "the deferral did not name the truncated answer"
+  # More open pull requests than one bounded call lists: the count may be low.
+  forge_answer "$case_dir" 250 "$(pr_node 11 fm/a false REVIEW_REQUIRED)"
+  rc=0
+  out=$(review_spawn "$case_dir" task-c "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "an incomplete inventory was admitted: $out"
+  assert_contains "$out" "the repository has 250 open pull requests and one bounded call lists only 100" "the deferral did not name the incomplete inventory"
+  assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+  pass "an unreadable, truncated, or incomplete forge inventory defers with the task still queued"
+}
+
+test_review_capacity_override_and_scope() {
+  local case_dir home out rc=0
+  case_dir=$(make_case review-override task-c task-d task-e)
+  home="$case_dir/home"
+  github_target "$case_dir"
+  review_forge "$case_dir"
+  forge_answer "$case_dir" 3 \
+    "$(pr_node 11 fm/a false REVIEW_REQUIRED)" \
+    "$(pr_node 12 fm/b false REVIEW_REQUIRED)" \
+    "$(pr_node 13 fm/c false REVIEW_REQUIRED)"
+  printf '%s\n' "# widget has two reviewers" "project 4" > "$home/config/review-capacity"
+  out=$(review_spawn "$case_dir" task-c) || rc=$?
+  expect_code 0 "$rc" "a per-project override of 4 did not admit the fourth: $out"
+  printf '%s\n' "project zero" > "$home/config/review-capacity"
+  rc=0
+  out=$(review_spawn "$case_dir" task-d "$case_dir/unused") || rc=$?
+  expect_code 1 "$rc" "a malformed review capacity did not refuse: $out"
+  assert_contains "$out" "the review capacity declaration is unreadable" "the refusal did not name the declaration"
+  assert_absent "$home/state/task-d.meta" "the refused spawn published a record"
+  # A project whose publication target is not GitHub is never judged.
+  printf '%s\n' "project 1" > "$home/config/review-capacity"
+  git -C "$case_dir/project" remote remove upstream
+  : > "$case_dir/gh.log"
+  rc=0
+  out=$(review_spawn "$case_dir" task-e) || rc=$?
+  expect_code 0 "$rc" "a project with no GitHub target was judged: $out"
+  assert_equals 0 "$(wc -l < "$case_dir/gh.log" | tr -d ' ')" "a project with no GitHub target made a forge call"
+  pass "config/review-capacity overrides the default cap per project, a malformed one refuses, and a non-GitHub target is not judged"
+}
+
 test_undeclared_capacity_keeps_dispatch_uncapped
 test_available_capacity_admits_the_worker
 test_exhausted_capacity_defers_without_leaving_anything_behind
@@ -734,3 +968,9 @@ test_orca_spawn_is_admitted_under_the_shared_project_lock
 test_lane_capacity_gate_is_opt_in
 test_lane_capacity_gate_defers_without_leaving_anything_behind
 test_lane_capacity_gate_refuses_an_unreadable_opt_in
+test_host_gate_defers_an_overloaded_host_and_keeps_the_task_queued
+test_review_capacity_admits_below_the_cap_with_one_bounded_call
+test_review_capacity_defers_a_full_queue_without_leaving_anything_behind
+test_review_capacity_counts_unpublished_work_once
+test_review_capacity_defers_when_the_queue_cannot_be_counted
+test_review_capacity_override_and_scope

@@ -241,6 +241,23 @@
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
 #   contention refuses rather than waits.
+#   Host resources: every fresh ship or scout spawn first asks
+#   `fm-capacity.sh --host-gate` (that script owns the probes, the fixed
+#   limits - 1-minute load above 1.5 x online cores, or available memory under
+#   20 percent - and why an unknown reading does not defer by itself) before
+#   any lock, brief render, endpoint, worktree, record, or backlog move; a
+#   deferral prints `deferred:` and exits 75 with the task exactly as queued.
+#   Review capacity: a fresh publishing ship (no-mistakes or direct-PR) whose
+#   project publishes to a GitHub repository is deferred while that project
+#   already has its cap (config/review-capacity, default 3) of open fleet PRs
+#   without an approving review plus this machine's unpublished ship
+#   reservations, or while that queue cannot be counted;
+#   bin/fm-review-capacity-lib.sh owns which spawns are judged, what holds a
+#   place, the one bounded gh-axi observation, and its cross-host limit. It makes
+#   that call before the project-identity lock below and counts reservations
+#   while holding it, which it takes on every backend when it judges a spawn. A
+#   deferral prints `deferred:` and exits 75 with the task exactly as queued;
+#   an unreadable declaration refuses with exit 1.
 #   Project capacity: when this machine declares how many workers a project
 #   admits at once (config/project-capacity; bin/fm-project-capacity-lib.sh owns
 #   the declaration, what holds a place, and the race argument), a fresh ship or
@@ -1010,6 +1027,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-project-capacity-lib.sh
 . "$SCRIPT_DIR/fm-project-capacity-lib.sh"
+# shellcheck source=bin/fm-review-capacity-lib.sh
+. "$SCRIPT_DIR/fm-review-capacity-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # shellcheck source=bin/fm-omp-profile-lib.sh
@@ -4274,6 +4293,27 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
   echo "error: spawn refused: project $PROJ_ABS has no commit yet (unborn HEAD), so there is nothing to branch a worktree from; make one commit in the project, for example 'git -C $PROJ_ABS commit --allow-empty -m \"chore: initial commit\"', then spawn again" >&2
   exit 1
 fi
+# Host resource admission (bin/fm-capacity.sh --host-gate owns the probes, the
+# fixed limits, and how unknown readings are treated). Every fresh ship or scout
+# asks it first, before any lock, brief render, endpoint, worktree, record, or
+# backlog move exists, so an overloaded host defers the task exactly as queued
+# as it was. A relaunch and a secondmate spawn are not asked, like the capacity
+# gates below.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  SPAWN_HOST_GATE_RC=0
+  "$SCRIPT_DIR/fm-capacity.sh" --host-gate </dev/null >/dev/null || SPAWN_HOST_GATE_RC=$?
+  case "$SPAWN_HOST_GATE_RC" in
+    0) ;;
+    75)
+      echo "deferred: task $ID was not launched and its backlog item stays queued - dispatch it again once this host's load and memory are back under the host gate's limits (bin/fm-capacity.sh --host-gate)" >&2
+      exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
+      ;;
+    *)
+      echo "error: spawn refused: the host resource gate could not run (bin/fm-capacity.sh --host-gate exited $SPAWN_HOST_GATE_RC)" >&2
+      exit 1
+      ;;
+  esac
+fi
 # Project capacity admission (bin/fm-project-capacity-lib.sh owns the
 # declaration, what holds a place, and why this is race-safe). A fresh worker
 # for a project whose declared capacity is already held is deferred here, before
@@ -4293,9 +4333,32 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   fi
   SPAWN_PROJECT_CAPACITY=$FM_PROJECT_CAPACITY
   SPAWN_PROJECT_CAPACITY_ANY=$FM_PROJECT_CAPACITY_ANY
+  SPAWN_PROJECT_CAPACITY_FILE=$FM_PROJECT_CAPACITY_FILE
+fi
+# Review capacity admission (bin/fm-review-capacity-lib.sh owns which spawns
+# are judged, the cap, what holds a place, the forge observation, and why an
+# unknown or incomplete observation defers). The one bounded forge call is made
+# here, before the project lock, so no lock is held across the network; the
+# local reservations are counted below while that lock is held through
+# metadata publication.
+SPAWN_REVIEW_CAP=
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ] && [ "$MODE" != local-only ] &&
+  SPAWN_REVIEW_FORGE=$("$FM_ROOT/bin/fm-project-mode.sh" --forge "$(basename "$PROJ_ABS")" 2>/dev/null) &&
+  [ "${SPAWN_REVIEW_FORGE:-none}" = none ] &&
+  fm_review_capacity_target "$PROJ_ABS" "$UPSTREAM_CONSENT"; then
+  if ! fm_project_capacity_lookup "$SPAWN_CAPACITY_CONFIG" "$(basename "$PROJ_ABS")" review-capacity; then
+    echo "error: spawn refused: the review capacity declaration is unreadable ($FM_PROJECT_CAPACITY_ERROR); fix it so the captain's review-queue limits are known (docs/configuration.md \"Review capacity\")" >&2
+    exit 1
+  fi
+  SPAWN_REVIEW_CAP=${FM_PROJECT_CAPACITY:-$FM_REVIEW_CAPACITY_DEFAULT}
+  SPAWN_REVIEW_CAP_FILE=$FM_PROJECT_CAPACITY_FILE
+  SPAWN_REVIEW_PREFIXES="$BRANCH_PREFIX $("$FM_ROOT/bin/fm-project-mode.sh" --branch-prefix "$(basename "$PROJ_ABS")" 2>/dev/null || true) fm/"
+  SPAWN_REVIEW_OBSERVED=0
+  fm_review_capacity_observe "$FM_REVIEW_TARGET_HOST" "$FM_REVIEW_TARGET_OWNER" "$FM_REVIEW_TARGET_REPO" ||
+    SPAWN_REVIEW_OBSERVED=1
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
-  { [ "$BACKEND" != orca ] || [ -n "$SPAWN_PROJECT_CAPACITY_ANY" ]; }; then
+  { [ "$BACKEND" != orca ] || [ -n "$SPAWN_PROJECT_CAPACITY_ANY" ] || [ -n "$SPAWN_REVIEW_CAP" ]; }; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
     exit 1
@@ -4316,9 +4379,26 @@ if [ -n "$SPAWN_PROJECT_CAPACITY" ]; then
     exit 1
   fi
   if [ "$FM_PROJECT_CAPACITY_OCCUPANTS" -ge "$SPAWN_PROJECT_CAPACITY" ]; then
-    echo "deferred: project $(basename "$PROJ_ABS") admits $SPAWN_PROJECT_CAPACITY worker(s) at once on this machine ($FM_PROJECT_CAPACITY_FILE) and $FM_PROJECT_CAPACITY_OCCUPANTS already hold a place ($FM_PROJECT_CAPACITY_OCCUPANT_IDS); task $ID was not launched and its backlog item stays queued - dispatch it again once one of them records its ready PR or is cleaned up" >&2
+    echo "deferred: project $(basename "$PROJ_ABS") admits $SPAWN_PROJECT_CAPACITY worker(s) at once on this machine ($SPAWN_PROJECT_CAPACITY_FILE) and $FM_PROJECT_CAPACITY_OCCUPANTS already hold a place ($FM_PROJECT_CAPACITY_OCCUPANT_IDS); task $ID was not launched and its backlog item stays queued - dispatch it again once one of them records its ready PR or is cleaned up" >&2
     exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
   fi
+fi
+if [ -n "$SPAWN_REVIEW_CAP" ]; then
+  if ! fm_review_capacity_judge "$SPAWN_REVIEW_CAP" "$SPAWN_REVIEW_OBSERVED" "$SPAWN_REVIEW_PREFIXES" \
+    "$SPAWN_TREEHOUSE_PROJECT_LOCK" "$PROJ_ABS" "$STATE" "$ID"; then
+    echo "error: spawn refused: project $(basename "$PROJ_ABS") has a review-queue cap of $SPAWN_REVIEW_CAP, but this machine's task records cannot all be read to count it ($FM_REVIEW_ERROR)" >&2
+    exit 1
+  fi
+  case "$FM_REVIEW_VERDICT" in
+    full)
+      echo "deferred: project $(basename "$PROJ_ABS") admits $SPAWN_REVIEW_CAP open unreviewed fleet PR(s) in $FM_REVIEW_TARGET_HOST/$FM_REVIEW_TARGET_OWNER/$FM_REVIEW_TARGET_REPO and its review queue is full: $FM_REVIEW_WHY; task $ID was not launched and its backlog item stays queued - dispatch it again once one of them is approved, merged, or closed (cap from ${SPAWN_REVIEW_CAP_FILE} or the default of $FM_REVIEW_CAPACITY_DEFAULT)" >&2
+      exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
+      ;;
+    unknown)
+      echo "deferred: project $(basename "$PROJ_ABS")'s review queue in $FM_REVIEW_TARGET_HOST/$FM_REVIEW_TARGET_OWNER/$FM_REVIEW_TARGET_REPO cannot be counted: $FM_REVIEW_WHY; task $ID was not launched and its backlog item stays queued - dispatch it again once the open pull requests can be read" >&2
+      exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
+      ;;
+  esac
 fi
 # Lane capacity admission (opt-in; bin/fm-capacity.sh owns the verdict and
 # --spawn-gate exits 0 unless config/lane-capacity declares admit-spawns). A

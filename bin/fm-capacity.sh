@@ -11,6 +11,8 @@
 #                             declares admit-spawns (bin/fm-spawn.sh's check)
 #   fm-capacity.sh --spawn-gate-enabled  exit 0 when --spawn-gate would judge
 #                             a spawn, 1 when it would admit unconditionally
+#   fm-capacity.sh --host-gate  the always-on host resource verdict that
+#                             bin/fm-spawn.sh asks before any fresh worker
 #
 # It reads this home's state/*.meta, the optional config/lane-capacity, the
 # pressure files and reserve flags that file names, and the host's own probes.
@@ -226,9 +228,31 @@
 # the cache, so the host-memory gate's reopen count never reads one sample
 # three times.
 #
+# --host-gate needs no config and reads nothing but this host's own load,
+# core, and memory probes above (config/lane-capacity is not even parsed, so a
+# malformed one cannot open or close it). It prints one line on stdout:
+#   host-gate: verdict=<admit|defer> load1=<X|unknown> cores=<N|unknown>
+#     load_limit=<X|unknown> mem_avail_pct=<N|unknown> mem_min_pct=20
+#     reasons=<cpu,memory|none> unknown=<load1,cores,mem_avail_pct|none>
+# (one physical line) and defers when an OBSERVED reading crosses a limit:
+#   cpu     the 1-minute load average is above 1.5 x the online logical cores
+#           (getconf _NPROCESSORS_ONLN, else sysctl hw.logicalcpu; a cgroup or
+#           container CPU quota is not read)
+#   memory  available memory is under 20 percent of total (Linux
+#           MemAvailable/MemTotal; Darwin kern.memorystatus_level)
+# Both limits are fixed; a stricter configured protection (config/lane-capacity
+# admit-spawns with max-load1, min-avail-gb, or an auto budget) is a separate
+# gate bin/fm-spawn.sh still asks afterwards, so this one can only add a
+# refusal, never remove one. An unknown reading is not an observation: it is
+# printed as unknown, named on stderr as a warning, and does not defer by
+# itself, so a host whose probes are unavailable (native Windows, a missing
+# /proc) is not refused every spawn; the other reading still judges. A
+# deferral prints one `deferred:` line on stderr naming the readings and
+# exits 75.
+#
 # Exit status: 0 on a report, 1 on an invalid config/lane-capacity (report,
 # --json, --admit), 2 on a usage error or --json without jq, 75 on an --admit
-# deferral.
+# or --host-gate deferral.
 set -u
 export LC_ALL=C
 
@@ -258,9 +282,10 @@ case "${1:-}" in
   --admit) mode=admit ;;
   --spawn-gate) mode=spawn_gate ;;
   --spawn-gate-enabled) mode=spawn_gate_enabled ;;
-  *) echo "usage: fm-capacity.sh [--json|--publish|--admit|--spawn-gate|--spawn-gate-enabled|--help]" >&2; exit 2 ;;
+  --host-gate) mode=host_gate ;;
+  *) echo "usage: fm-capacity.sh [--json|--publish|--admit|--spawn-gate|--spawn-gate-enabled|--host-gate|--help]" >&2; exit 2 ;;
 esac
-[ "$#" -le 1 ] || { echo "usage: fm-capacity.sh [--json|--publish|--admit|--spawn-gate|--spawn-gate-enabled|--help]" >&2; exit 2; }
+[ "$#" -le 1 ] || { echo "usage: fm-capacity.sh [--json|--publish|--admit|--spawn-gate|--spawn-gate-enabled|--host-gate|--help]" >&2; exit 2; }
 
 is_uint() {
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
@@ -424,7 +449,7 @@ parse_lane_config() {
   done < "$LANE_CONFIG"
   [ -n "$target" ] || { config_error - "no lane cap: the first line must be one non-negative integer"; return 1; }
 }
-if [ -e "$LANE_CONFIG" ]; then
+if [ "$mode" != host_gate ] && [ -e "$LANE_CONFIG" ]; then
   if [ ! -r "$LANE_CONFIG" ] || ! parse_lane_config; then
     [ -n "$target_error" ] || config_error - "unreadable"
     target_error="config/lane-capacity: $target_error"
@@ -499,6 +524,36 @@ is_uint "$v" && disk_free_mb=$v
 probe_disks=
 [ "$disk_free_mb" = unknown ] || probe_disks="home	$(awk -v m="$disk_free_mb" 'BEGIN{printf "%.1f", m / 1024}')
 "
+
+# --- host gate (--host-gate) ------------------------------------------------
+HOST_GATE_LOAD_FACTOR=1.5
+HOST_GATE_MEM_MIN_PCT=20
+if [ "$mode" = host_gate ]; then
+  hg_reasons='' hg_unknown='' hg_limit=unknown
+  [ "$load1" != unknown ] || hg_unknown="${hg_unknown:+$hg_unknown,}load1"
+  [ "$cores" != unknown ] || hg_unknown="${hg_unknown:+$hg_unknown,}cores"
+  [ "$mem_free_pct" != unknown ] || hg_unknown="${hg_unknown:+$hg_unknown,}mem_avail_pct"
+  if [ "$cores" != unknown ]; then
+    hg_limit=$(awk -v c="$cores" -v f="$HOST_GATE_LOAD_FACTOR" 'BEGIN{printf "%.2f", c * f}')
+    if [ "$load1" != unknown ] && awk -v l="$load1" -v m="$hg_limit" 'BEGIN{exit !(l > m)}'; then
+      hg_reasons=cpu
+    fi
+  fi
+  if [ "$mem_free_pct" != unknown ] && [ "$mem_free_pct" -lt "$HOST_GATE_MEM_MIN_PCT" ]; then
+    hg_reasons="${hg_reasons:+$hg_reasons,}memory"
+  fi
+  hg_verdict=admit
+  [ -z "$hg_reasons" ] || hg_verdict=defer
+  printf 'host-gate: verdict=%s load1=%s cores=%s load_limit=%s mem_avail_pct=%s mem_min_pct=%s reasons=%s unknown=%s\n' \
+    "$hg_verdict" "$load1" "$cores" "$hg_limit" "$mem_free_pct" "$HOST_GATE_MEM_MIN_PCT" "${hg_reasons:-none}" "${hg_unknown:-none}"
+  [ -z "$hg_unknown" ] ||
+    echo "warning: host gate: this host's $hg_unknown reading is unknown, so it was not judged; only observed readings can defer a spawn" >&2
+  if [ "$hg_verdict" = defer ]; then
+    echo "deferred: this host is overloaded (1-minute load $load1 against a limit of $hg_limit for $cores cores; available memory ${mem_free_pct}% against a floor of ${HOST_GATE_MEM_MIN_PCT}%; over: $hg_reasons)" >&2
+    exit 75
+  fi
+  exit 0
+fi
 
 # --- pressure ---------------------------------------------------------------
 level_rank() {

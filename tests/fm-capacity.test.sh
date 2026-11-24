@@ -63,6 +63,50 @@ run_capacity() {  # <home> <fakebin>
   PATH="$2:$BASE_PATH" FM_HOME="$1" "$CAPACITY" 2>&1
 }
 
+# --host-gate: above, below, at, and missing evidence for each limit, with no
+# config needed and a malformed config/lane-capacity ignored.
+test_host_gate_judges_observed_load_and_memory_only() {
+  local home fakebin out rc
+  home=$(make_home host-gate 0 0)
+  printf 'not a lane cap\n' > "$home/config/lane-capacity"
+  host_gate() {  # <label> <load1> <mem-pct> <cores> -> sets out rc
+    fakebin=$(make_probes "$TMP_ROOT/p-host-gate-$1" "$2" "$3" "$4" 20971520)
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$CAPACITY" --host-gate 2>&1); rc=$?
+  }
+  host_gate below 11.90 21 8
+  expect_code 0 "$rc" "host gate below both limits"
+  assert_contains "$out" 'host-gate: verdict=admit load1=11.90 cores=8 load_limit=12.00 mem_avail_pct=21 mem_min_pct=20 reasons=none unknown=none' "below: report line"
+  host_gate at-limits 12.00 20 8
+  expect_code 0 "$rc" "load exactly 1.5 x cores and memory exactly 20 percent are not over"
+  host_gate load-above 12.01 60 8
+  expect_code 75 "$rc" "load above 1.5 x cores defers"
+  assert_contains "$out" 'verdict=defer load1=12.01 cores=8 load_limit=12.00' "load-above: report"
+  assert_contains "$out" 'reasons=cpu unknown=none' "load-above: reason"
+  assert_contains "$out" 'deferred: this host is overloaded' "load-above: deferred line"
+  host_gate mem-below 0.10 19 8
+  expect_code 75 "$rc" "available memory under 20 percent defers"
+  assert_contains "$out" 'reasons=memory unknown=none' "mem-below: reason"
+  host_gate both 99.00 5 8
+  expect_code 75 "$rc" "both over"
+  assert_contains "$out" 'reasons=cpu,memory' "both: reasons"
+  host_gate load-missing '' 50 8
+  expect_code 0 "$rc" "a missing load reading does not defer by itself"
+  assert_contains "$out" 'load1=unknown cores=8 load_limit=12.00 mem_avail_pct=50' "load-missing: report"
+  assert_contains "$out" 'unknown=load1' "load-missing: named unknown"
+  assert_contains "$out" 'warning: host gate: this host'"'"'s load1 reading is unknown, so it was not judged' "load-missing: warning"
+  host_gate cores-missing 500.00 50 ''
+  expect_code 0 "$rc" "without a core count the load cannot be judged"
+  assert_contains "$out" 'load_limit=unknown' "cores-missing: limit unknown"
+  assert_contains "$out" 'unknown=cores' "cores-missing: named unknown"
+  host_gate mem-missing-load-high 99.00 '' 8
+  expect_code 75 "$rc" "an unknown memory reading never hides an observed overload"
+  assert_contains "$out" 'reasons=cpu unknown=mem_avail_pct' "mem-missing: cpu still judged"
+  host_gate all-missing '' '' ''
+  expect_code 0 "$rc" "no observation at all admits and says so"
+  assert_contains "$out" 'unknown=load1,cores,mem_avail_pct' "all-missing: named unknowns"
+  pass "--host-gate defers only on an observed load above 1.5 x cores or memory under 20 percent, names unknown readings without deferring on them, and ignores lane config"
+}
+
 test_no_target_prints_counts_only() {
   local home fakebin out rc
   home=$(make_home no-target 3 1)
@@ -558,6 +602,7 @@ test_watcher_publishes_only_when_opted_in() {
   pass "the watcher publishes lane facts only for an opted-in home"
 }
 
+test_host_gate_judges_observed_load_and_memory_only
 test_no_target_prints_counts_only
 test_no_target_never_prints_constrained_line
 test_target_yields_open_lanes_and_full
