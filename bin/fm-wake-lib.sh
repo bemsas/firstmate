@@ -2951,6 +2951,30 @@ fm_wake_commit_secondmate_stall_receipts_through() { # <cutoff> [<rows-file>]
   ' "$FM_WAKE_QUEUE" 2>/dev/null)
 }
 
+# Commit the receipt of every held review-park outcome an acknowledgement is
+# about to consume, under the queue lock and before its row is removed, so a
+# park tick interrupted after its append never publishes that episode again
+# (bin/fm-park.sh owns the key and reads the receipts). One line per episode.
+fm_wake_commit_park_held_receipts_through() { # <cutoff> [<rows-file>]
+  local cutoff=$1 rows=${2:-} key task episode receipt
+  while IFS= read -r key; do
+    key=${key#review-park-held:}
+    episode=${key##*:}
+    task=${key%:*}
+    receipt="$STATE/.review-park-held-acked-$task"
+    if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+      [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+    fi
+    ! grep -qxF "$episode" "$receipt" 2>/dev/null || continue
+    ( umask 077; printf '%s\n' "$episode" >> "$receipt" ) || return 1
+  done < <(awk -F '\t' -v cutoff="$cutoff" -v rows="$rows" '
+    BEGIN { if (rows != "") while ((getline line < rows) > 0) owned[line]=1 }
+    NF >= 5 && $2 ~ /^[0-9]+$/ && $2 <= cutoff \
+      && (rows == "" || ($2 in owned)) && $3 == "check" \
+      && $4 ~ /^review-park-held:[A-Za-z0-9._-]+:[0-9]+-[0-9]+$/ { print $4 }
+  ' "$FM_WAKE_QUEUE" 2>/dev/null)
+}
+
 fm_wake_restore_queue() {
   local drained=$1 restore
   restore="$STATE/.wake-queue.restore.$(fm_current_pid)"

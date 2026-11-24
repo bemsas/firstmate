@@ -1708,10 +1708,14 @@ test_branch_ack_commits_secondmate_stall_receipts() {
   append_wake "$state" check "secondmate-wake-loop-mate-$epoch-9" \
     "check: secondmate wake-loop stalled: mate=mate row=9 idle=3s" \
     || fail "could not seed the ungranted stall publication"
+  append_wake "$state" check "review-park-held:lane.a:100-200" "check: park-on-review: held lane.a" \
+    || fail "could not seed the held park publication"
+  append_wake "$state" check "review-park-held:lane.b:100-300" "check: park-on-review: held lane.b" \
+    || fail "could not seed the ungranted held park publication"
 
   FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" branch-stall \
     || fail "branch owner activation failed"
-  FM_STATE_OVERRIDE="$state" "$GRANT" publish branch-stall 1 \
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish branch-stall 1 3 \
     || fail "branch grant publication failed"
 
   FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/branch.out" 2> "$dir/branch.err" \
@@ -1729,7 +1733,11 @@ test_branch_ack_commits_secondmate_stall_receipts() {
   receipt="$state/.secondmate-wake-stall-receipts/mate/$epoch-9"
   [ ! -e "$receipt" ] \
     || fail "branch acknowledgement committed a stall receipt for a row outside its grant"
-  pass "a branch-actor acknowledgement commits secondmate stall receipts for exactly its granted rows"
+  [ "$(cat "$state/.review-park-held-acked-lane.a" 2>/dev/null || true)" = 100-200 ] \
+    || fail "branch acknowledgement did not commit the consumed held park row's receipt"
+  [ ! -e "$state/.review-park-held-acked-lane.b" ] \
+    || fail "branch acknowledgement committed a held park receipt for a row outside its grant"
+  pass "a branch-actor acknowledgement commits secondmate stall and held review-park receipts for exactly its granted rows"
 }
 
 # The pending-warning condition and what a drain can actually present must name
