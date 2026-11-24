@@ -222,7 +222,8 @@
 #
 # Environment: FM_HOME, FM_STATE_OVERRIDE, FM_CONFIG_OVERRIDE, and
 # FM_PROJECTS_OVERRIDE resolve the home exactly as the other bin/ scripts do.
-# FM_PROC_ROOT_OVERRIDE replaces /proc for every Linux read (tests). The cached
+# FM_PROC_ROOT_OVERRIDE replaces /proc for every Linux read (tests), and
+# FM_SYS_ROOT_OVERRIDE replaces /sys for --host-gate's cgroup read. The cached
 # Windows host view that --admit, --spawn-gate, --json, and the report use is
 # served for at most 120 s; --publish always queries the host live and rewrites
 # the cache, so the host-memory gate's reopen count never reads one sample
@@ -235,9 +236,12 @@
 #     load_limit=<X|unknown> mem_avail_pct=<N|unknown> mem_min_pct=20
 #     reasons=<cpu,memory|none> unknown=<load1,cores,mem_avail_pct|none>
 # (one physical line) and defers when an OBSERVED reading crosses a limit:
-#   cpu     the 1-minute load average is above 1.5 x the online logical cores
-#           (getconf _NPROCESSORS_ONLN, else sysctl hw.logicalcpu; a cgroup or
-#           container CPU quota is not read)
+#   cpu     the 1-minute load average is above 1.5 x the usable cores: off
+#           Darwin, the CPUs this process may run on (nproc, which honors CPU
+#           affinity), lowered to the tightest cgroup v2 cpu.max quota on this
+#           process's cgroup path; without nproc, the online count (getconf
+#           _NPROCESSORS_ONLN); on Darwin, sysctl hw.logicalcpu. A cgroup v1
+#           quota is not read. The report's cores= is that usable count.
 #   memory  available memory is under 20 percent of total (Linux
 #           MemAvailable/MemTotal; Darwin kern.memorystatus_level)
 # Both limits are fixed; a stricter configured protection (config/lane-capacity
@@ -265,6 +269,7 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 LANE_CONFIG="$CONFIG/lane-capacity"
 PUBLISHED="$STATE/lane-capacity.json"
 PROC_ROOT=${FM_PROC_ROOT_OVERRIDE:-/proc}
+SYS_ROOT=${FM_SYS_ROOT_OVERRIDE:-/sys}
 
 MEM_FREE_MIN_PCT=10
 DISK_FREE_MIN_MB=5120
@@ -528,8 +533,43 @@ probe_disks=
 # --- host gate (--host-gate) ------------------------------------------------
 HOST_GATE_LOAD_FACTOR=1.5
 HOST_GATE_MEM_MIN_PCT=20
+# Usable cores for the host gate. Off Darwin this is the CPUs this process may
+# run on (nproc, which honors CPU affinity; the OpenMP variables it would also
+# honor are cleared), lowered to the tightest cgroup v2 cpu.max quota on this
+# process's cgroup path (quota / period, possibly fractional). Without nproc it
+# is the online count above; on Darwin it is hw.logicalcpu.
+host_gate_usable_cores() {
+  local n quota period path dir limit=
+  if [ "$os" = Darwin ]; then
+    printf '%s\n' "$cores"
+    return 0
+  fi
+  n=$(env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc 2>/dev/null) || n=
+  is_uint "$n" && [ "$n" -gt 0 ] || n=$cores
+  [ "$n" != unknown ] || { printf 'unknown\n'; return 0; }
+  path=$(sed -n 's/^0:://p' "$PROC_ROOT/self/cgroup" 2>/dev/null | head -n 1)
+  case "$path" in /*) ;; *) path= ;; esac
+  dir="$SYS_ROOT/fs/cgroup$path"
+  while [ -n "$path" ] || [ "$dir" = "$SYS_ROOT/fs/cgroup" ]; do
+    if { read -r quota period < "$dir/cpu.max"; } 2>/dev/null && is_uint "$quota" && is_uint "$period" && [ "$period" -gt 0 ]; then
+      if [ -z "$limit" ] || num_lt "$(awk -v q="$quota" -v p="$period" 'BEGIN{printf "%.2f", q / p}')" "$limit"; then
+        limit=$(awk -v q="$quota" -v p="$period" 'BEGIN{printf "%.2f", q / p}')
+      fi
+    fi
+    [ -n "$path" ] || break
+    path=${path%/*}
+    dir="$SYS_ROOT/fs/cgroup$path"
+  done
+  if [ -n "$limit" ] && num_lt "$limit" "$n"; then
+    printf '%s\n' "$limit"
+  else
+    printf '%s\n' "$n"
+  fi
+}
+
 if [ "$mode" = host_gate ]; then
   hg_reasons='' hg_unknown='' hg_limit=unknown
+  cores=$(host_gate_usable_cores)
   [ "$load1" != unknown ] || hg_unknown="${hg_unknown:+$hg_unknown,}load1"
   [ "$cores" != unknown ] || hg_unknown="${hg_unknown:+$hg_unknown,}cores"
   [ "$mem_free_pct" != unknown ] || hg_unknown="${hg_unknown:+$hg_unknown,}mem_avail_pct"

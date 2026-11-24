@@ -422,6 +422,47 @@ SH
   pass "fm-control relaunch: a recorded PR stays valid to the armed merge poll"
 }
 
+# An overloaded host defers every launch path with exit 75 before anything
+# changes: fm-control relaunch before the old agent is checkpointed or stopped,
+# a direct fm-spawn --relaunch before its record is touched, and a fresh local
+# secondmate spawn before its home is validated, synced, or inherited. A fixture
+# /proc carries the load (the host gate's Linux probe), so this runs on Linux.
+test_overloaded_host_defers_relaunch_and_secondmate_launch_before_any_change() {
+  local dir out rc meta_before proc
+  if [ "$(uname -s)" != Linux ]; then
+    pass "host gate relaunch and secondmate deferral (skipped: the fixture replaces the Linux /proc probes; the verdict is covered portably by tests/fm-capacity.test.sh)"
+    return 0
+  fi
+  dir=$(new_case host-gate rl91)
+  add_ship_task "$dir" rl91 claude
+  proc="$dir/proc"
+  mkdir -p "$proc"
+  printf '100000.00 0.00 0.00 1/1 1\n' > "$proc/loadavg"
+  printf 'MemTotal: 1000000 kB\nMemAvailable: 600000 kB\n' > "$proc/meminfo"
+  meta_before=$(cat "$dir/home/state/rl91.meta")
+
+  out=$(FM_PROC_ROOT_OVERRIDE=$proc run_control "$dir" rl91 relaunch --note "retry after the host settles"); rc=$?
+  expect_code 75 "$rc" "fm-control relaunch on an overloaded host must defer: $out"
+  assert_contains "$out" "deferred: rl91 was not relaunched and its agent and record are unchanged" "the relaunch deferral did not say nothing changed"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a deferred relaunch stopped the old agent"
+  assert_no_grep "/exit" "$dir/fake/literal" "a deferred relaunch typed an exit command"
+  assert_equals "$meta_before" "$(cat "$dir/home/state/rl91.meta")" "a deferred relaunch changed the task record"
+
+  out=$(FM_PROC_ROOT_OVERRIDE=$proc run_spawn "$dir" rl91 --relaunch); rc=$?
+  expect_code 75 "$rc" "a direct fm-spawn --relaunch on an overloaded host must defer: $out"
+  assert_contains "$out" "deferred: rl91 was not launched" "the direct relaunch deferral was not reported"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a deferred direct relaunch replaced the agent"
+  assert_equals "$meta_before" "$(cat "$dir/home/state/rl91.meta")" "a deferred direct relaunch changed the task record"
+
+  mkdir -p "$dir/mate-home"
+  out=$(FM_PROC_ROOT_OVERRIDE=$proc run_spawn "$dir" mate91 "$dir/mate-home" --secondmate); rc=$?
+  expect_code 75 "$rc" "a fresh secondmate spawn on an overloaded host must defer: $out"
+  assert_contains "$out" "deferred: mate91 was not launched" "the secondmate deferral was not reported"
+  [ ! -e "$dir/home/state/mate91.meta" ] || fail "a deferred secondmate spawn published a record"
+  [ -z "$(ls -A "$dir/mate-home")" ] || fail "a deferred secondmate spawn wrote into its home: $(ls -A "$dir/mate-home")"
+  pass "an overloaded host defers fm-control relaunch before the stop, fm-spawn --relaunch before the record, and a fresh secondmate before its home is touched"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -3386,6 +3427,7 @@ test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server
 test_herdr_rebind_stays_in_the_recorded_session
 test_herdr_reclaim_refuses_an_agent_that_came_back
 test_herdr_reclaim_keeps_the_task_whole
+test_overloaded_host_defers_relaunch_and_secondmate_launch_before_any_change
 test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it

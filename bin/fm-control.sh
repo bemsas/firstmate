@@ -145,6 +145,8 @@
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
+#              Asks bin/fm-capacity.sh --host-gate first: an overloaded host
+#              exits 75 with nothing checkpointed or stopped.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
@@ -1563,8 +1565,23 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line host_gate_rc=0
   local -a spawn_args
+
+  # A relaunch starts a new agent process, so it asks the host resource gate
+  # (bin/fm-capacity.sh --host-gate) before anything is checkpointed or
+  # stopped: an overloaded host defers with exit 75 and leaves the running
+  # agent and its record exactly as they were. exit, stop, and interrupt start
+  # nothing and are never gated.
+  "$SCRIPT_DIR/fm-capacity.sh" --host-gate </dev/null >/dev/null || host_gate_rc=$?
+  case "$host_gate_rc" in
+    0) ;;
+    75)
+      echo "deferred: $ID was not relaunched and its agent and record are unchanged - relaunch it again once this host's load and memory are back under the host gate's limits (bin/fm-capacity.sh --host-gate)" >&2
+      exit 75
+      ;;
+    *) die "the host resource gate could not run (bin/fm-capacity.sh --host-gate exited $host_gate_rc); task $ID was not relaunched" ;;
+  esac
 
   if [ "$BACKEND" = acp ]; then
     # This pilot path intentionally does not enable pane exit/stop capabilities

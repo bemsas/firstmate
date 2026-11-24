@@ -2151,9 +2151,11 @@ The optional local, gitignored `config/review-capacity` lives in the machine's r
 my-project 5
 ```
 
-A fleet pull request is one whose head branch starts with the spawn's ship-branch prefix, the project's registered prefix, or `fm/`, or is exactly the branch a local task records.
-Drafts, pull requests with changes requested, and pull requests whose only approval is of an older head commit all hold a place, on any base branch.
+A fleet pull request is one whose head branch starts with the spawn's ship-branch prefix, the project's registered prefix, or `fm/`, or is exactly the branch a local task records, compared exactly whatever valid characters the branch name uses.
+When GitHub reports a review decision for a pull request, `APPROVED` frees its place, draft or not, while changes requested or review required holds it.
+When GitHub reports no review decision, only an approval of the current head commit frees the place, so a draft or a pull request whose only approval is of an older head commit holds it, on any base branch.
 A worker keeps its place when it reports its pull request ready: the place frees only when that pull request is approved, merged, or closed.
+Local workers count by the repository they publish to, so clones of one project with different origins share one queue, and a worker that reports its pull request ready while the forge read is in flight keeps its place.
 An unreadable, timed-out, or truncated forge read, or a repository with more open pull requests than one read lists, defers the spawn rather than admitting it on a count that may be low.
 A malformed or unreadable file refuses every fresh publishing ship until it is fixed.
 Only fresh no-mistakes and direct-PR ships whose publication target is a GitHub repository are judged; scouts, local-only ships, relaunches, Gerrit, Forgejo, and external-review projects, and local-path or non-GitHub remotes are not, and a relaunch remains the way to continue an existing pull request.
@@ -2162,12 +2164,13 @@ A worker on another machine that has not opened its pull request yet is invisibl
 
 ## Host resource gate
 
-Every fresh ship or scout spawn first asks `bin/fm-capacity.sh --host-gate`, which needs no configuration.
-It defers the spawn when this host's 1-minute load average is above 1.5 times its online logical cores, or when available memory is below 20 percent of total.
-A deferral launches nothing, creates no record, leaves the backlog item queued, prints one `deferred:` line naming the readings, and exits 75.
+Every local launch - a fresh ship or scout spawn, a local secondmate spawn, and a relaunch through `bin/fm-spawn.sh --relaunch` or `bin/fm-control.sh <task-id> relaunch` - first asks `bin/fm-capacity.sh --host-gate`, which needs no configuration.
+It defers the launch when this host's 1-minute load average is above 1.5 times its usable cores, or when available memory is below 20 percent of total.
+Usable cores are the CPUs the process may run on, lowered to any cgroup v2 CPU quota, so a container or a pinned process is judged against what it can actually use.
+A deferral launches nothing, creates no record, leaves the backlog item queued, prints one `deferred:` line naming the readings, and exits 75; a relaunch defers before the running agent is stopped.
 A reading the host cannot provide, such as on native Windows or without `/proc`, is printed as unknown with a warning and does not defer the spawn by itself, while the other reading is still judged.
 The limits are fixed; [Lane capacity](#lane-capacity-configlane-capacity) `admit-spawns` can only add stricter refusals after it.
-A relaunch and a secondmate spawn are not gated.
+A remote secondmate is judged on its own host, and `exit`, `stop`, and `interrupt` start nothing and are never gated.
 `bin/fm-capacity.sh --help` owns the exact probes and report line.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)

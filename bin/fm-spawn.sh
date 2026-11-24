@@ -241,12 +241,14 @@
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
 #   contention refuses rather than waits.
-#   Host resources: every fresh ship or scout spawn first asks
-#   `fm-capacity.sh --host-gate` (that script owns the probes, the fixed
-#   limits - 1-minute load above 1.5 x online cores, or available memory under
-#   20 percent - and why an unknown reading does not defer by itself) before
-#   any lock, brief render, endpoint, worktree, record, or backlog move; a
-#   deferral prints `deferred:` and exits 75 with the task exactly as queued.
+#   Host resources: every local launch - a fresh ship or scout, a local
+#   secondmate, and a --relaunch - asks `fm-capacity.sh --host-gate` (that
+#   script owns the probes, the fixed limits - 1-minute load above 1.5 x usable
+#   cores, or available memory under 20 percent - and why an unknown reading
+#   does not defer by itself) before backend selection, the per-task lock, any
+#   brief render, endpoint, worktree, record, inheritance or sync step, or
+#   backlog move; a deferral prints `deferred:` and exits 75 with everything
+#   exactly as it was. A remote secondmate is judged on its own host.
 #   Review capacity: a fresh publishing ship (no-mistakes or direct-PR) whose
 #   project publishes to a GitHub repository is deferred while that project
 #   already has its cap (config/review-capacity, default 3) of open fleet PRs
@@ -254,10 +256,12 @@
 #   reservations, or while that queue cannot be counted;
 #   bin/fm-review-capacity-lib.sh owns which spawns are judged, what holds a
 #   place, the one bounded gh-axi observation, and its cross-host limit. It makes
-#   that call before the project-identity lock below and counts reservations
-#   while holding it, which it takes on every backend when it judges a spawn. A
-#   deferral prints `deferred:` and exits 75 with the task exactly as queued;
-#   an unreadable declaration refuses with exit 1.
+#   that call before any lock, reaches its verdict after the brief and delivery
+#   checks, and counts reservations while holding the machine-wide review
+#   admission lock for the publication target (waiting up to 120 s for it)
+#   through metadata publication. A deferral prints `deferred:` and exits 75
+#   with the task exactly as queued; an unreadable declaration refuses with
+#   exit 1.
 #   Project capacity: when this machine declares how many workers a project
 #   admits at once (config/project-capacity; bin/fm-project-capacity-lib.sh owns
 #   the declaration, what holds a place, and the race argument), a fresh ship or
@@ -1763,6 +1767,8 @@ SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_LANE_ADMISSION_LOCK=
 SPAWN_LANE_ADMISSION_LOCK_HELD=0
+SPAWN_REVIEW_LOCK=
+SPAWN_REVIEW_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
 SPAWN_FRESH_ENDPOINT_OPENED=0
 SPAWN_FRESH_WIRING_PENDING=0
@@ -2069,6 +2075,10 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_LANE_ADMISSION_LOCK_HELD" = 1 ]; then
     SPAWN_LANE_ADMISSION_LOCK_HELD=0
     fm_lock_release "$SPAWN_LANE_ADMISSION_LOCK" || true
+  fi
+  if [ "$SPAWN_REVIEW_LOCK_HELD" = 1 ]; then
+    SPAWN_REVIEW_LOCK_HELD=0
+    fm_lock_release "$SPAWN_REVIEW_LOCK" || true
   fi
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_SET_LOCK_HELD=0
@@ -2420,6 +2430,31 @@ if [ "$KIND" = secondmate ]; then
   fi
   [ "$remote_spawn_rc" -eq 3 ] || exit "$remote_spawn_rc"
 fi
+# Host resource admission (bin/fm-capacity.sh --host-gate owns the probes, the
+# fixed limits, and how unknown readings are treated). Every local launch asks
+# it - a fresh ship or scout, a local secondmate, and a --relaunch - before
+# backend selection, the per-task lock, any brief render, endpoint, worktree,
+# record, inheritance or sync step, or backlog move exists, so an overloaded
+# host defers the launch with everything exactly as it was. A remote secondmate
+# was handed to its own host above, whose host-local leg of this script asks
+# the gate about that host.
+SPAWN_HOST_GATE_RC=0
+"$SCRIPT_DIR/fm-capacity.sh" --host-gate </dev/null >/dev/null || SPAWN_HOST_GATE_RC=$?
+case "$SPAWN_HOST_GATE_RC" in
+  0) ;;
+  75)
+    if [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; then
+      echo "deferred: $ID was not launched - launch it again once this host's load and memory are back under the host gate's limits (bin/fm-capacity.sh --host-gate)" >&2
+    else
+      echo "deferred: task $ID was not launched and its backlog item stays queued - dispatch it again once this host's load and memory are back under the host gate's limits (bin/fm-capacity.sh --host-gate)" >&2
+    fi
+    exit 75
+    ;;
+  *)
+    echo "error: spawn refused: the host resource gate could not run (bin/fm-capacity.sh --host-gate exited $SPAWN_HOST_GATE_RC)" >&2
+    exit 1
+    ;;
+esac
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
 # default tmux (fm_backend_name). fm_backend_validate_spawn refuses unknown or
@@ -4293,27 +4328,6 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
   echo "error: spawn refused: project $PROJ_ABS has no commit yet (unborn HEAD), so there is nothing to branch a worktree from; make one commit in the project, for example 'git -C $PROJ_ABS commit --allow-empty -m \"chore: initial commit\"', then spawn again" >&2
   exit 1
 fi
-# Host resource admission (bin/fm-capacity.sh --host-gate owns the probes, the
-# fixed limits, and how unknown readings are treated). Every fresh ship or scout
-# asks it first, before any lock, brief render, endpoint, worktree, record, or
-# backlog move exists, so an overloaded host defers the task exactly as queued
-# as it was. A relaunch and a secondmate spawn are not asked, like the capacity
-# gates below.
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  SPAWN_HOST_GATE_RC=0
-  "$SCRIPT_DIR/fm-capacity.sh" --host-gate </dev/null >/dev/null || SPAWN_HOST_GATE_RC=$?
-  case "$SPAWN_HOST_GATE_RC" in
-    0) ;;
-    75)
-      echo "deferred: task $ID was not launched and its backlog item stays queued - dispatch it again once this host's load and memory are back under the host gate's limits (bin/fm-capacity.sh --host-gate)" >&2
-      exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
-      ;;
-    *)
-      echo "error: spawn refused: the host resource gate could not run (bin/fm-capacity.sh --host-gate exited $SPAWN_HOST_GATE_RC)" >&2
-      exit 1
-      ;;
-  esac
-fi
 # Project capacity admission (bin/fm-project-capacity-lib.sh owns the
 # declaration, what holds a place, and why this is race-safe). A fresh worker
 # for a project whose declared capacity is already held is deferred here, before
@@ -4366,7 +4380,7 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ] && [ "$MODE" != local-only ] &&
     SPAWN_REVIEW_OBSERVED=1
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
-  { [ "$BACKEND" != orca ] || [ -n "$SPAWN_PROJECT_CAPACITY_ANY" ] || [ -n "$SPAWN_REVIEW_CAP" ]; }; then
+  { [ "$BACKEND" != orca ] || [ -n "$SPAWN_PROJECT_CAPACITY_ANY" ]; }; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
     exit 1
@@ -4693,16 +4707,31 @@ if [ "$KIND" = ship ]; then
   fi
 fi
 
-# Review capacity verdict (the observation was made before the project lock
-# above, which is still held). Every check before this point only validates, so
-# the one artifact a deferral could leave is the launch brief this spawn
-# rendered; it is removed unless an earlier run had already left one.
+# Review capacity verdict. The observation was made before any lock; the
+# reservations are counted while holding this machine's review-admission lock
+# for the publication target (fm_review_capacity_lock_path), kept through
+# metadata publication, so clones with different origins that publish to one
+# repository can never both admit from one count. Every check before this point
+# only validates, so the one artifact a deferral could leave is the launch
+# brief this spawn rendered; it is removed unless an earlier run had already
+# left one.
 spawn_review_defer_cleanup() {
   [ "${SPAWN_LAUNCH_BRIEF_PREEXISTED:-1}" = 1 ] || rm -f -- "$DATA/$ID/launch-brief.md"
 }
 if [ -n "$SPAWN_REVIEW_CAP" ]; then
-  if ! fm_review_capacity_judge "$SPAWN_REVIEW_CAP" "$SPAWN_REVIEW_OBSERVED" "$SPAWN_REVIEW_PREFIXES" \
-    "$SPAWN_TREEHOUSE_PROJECT_LOCK" "$PROJ_ABS" "$STATE" "$ID"; then
+  SPAWN_REVIEW_LOCK=$(fm_review_capacity_lock_path "$FM_HOME" "$FM_REVIEW_TARGET_HOST" "$FM_REVIEW_TARGET_OWNER" "$FM_REVIEW_TARGET_REPO") || {
+    echo "error: could not resolve the root Firstmate home that holds the review admission lock for $FM_HOME" >&2
+    exit 1
+  }
+  if ! fm_lock_acquire_wait_max "$SPAWN_REVIEW_LOCK" 120; then
+    spawn_review_defer_cleanup
+    echo "deferred: another spawn on this machine held the review admission lock for $FM_REVIEW_TARGET_HOST/$FM_REVIEW_TARGET_OWNER/$FM_REVIEW_TARGET_REPO for 120 s; task $ID was not launched and its backlog item stays queued - dispatch it again" >&2
+    exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
+  fi
+  SPAWN_REVIEW_LOCK_HELD=1
+  SPAWN_REVIEW_TARGET=$(printf '%s/%s/%s' "$FM_REVIEW_TARGET_HOST" "$FM_REVIEW_TARGET_OWNER" "$FM_REVIEW_TARGET_REPO" | tr '[:upper:]' '[:lower:]')
+  if ! fm_review_capacity_judge "$SPAWN_REVIEW_CAP" "$SPAWN_REVIEW_OBSERVED" "$SPAWN_REVIEW_TARGET" \
+    "$SPAWN_REVIEW_PREFIXES" "$STATE" "$ID"; then
     echo "error: spawn refused: project $(basename "$PROJ_ABS") has a review-queue cap of $SPAWN_REVIEW_CAP, but this machine's task records cannot all be read to count it ($FM_REVIEW_ERROR)" >&2
     exit 1
   fi
@@ -7870,6 +7899,10 @@ fi
 if [ "$SPAWN_LANE_ADMISSION_LOCK_HELD" = 1 ]; then
   SPAWN_LANE_ADMISSION_LOCK_HELD=0
   fm_lock_release "$SPAWN_LANE_ADMISSION_LOCK" || true
+fi
+if [ "$SPAWN_REVIEW_LOCK_HELD" = 1 ]; then
+  SPAWN_REVIEW_LOCK_HELD=0
+  fm_lock_release "$SPAWN_REVIEW_LOCK" || true
 fi
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown

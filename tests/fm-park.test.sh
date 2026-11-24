@@ -824,6 +824,25 @@ test_failing_checks_hold_the_lane_once_and_resume_by_hand() {
   head -1 "$w/control.log" | grep -q "^lane relaunch --note-file " || fail "hold: manual resume made no relaunch call"
   [ ! -e "$w/state/lane.review-park" ] || fail "hold: record kept after the manual resume"
 
+
+  # A held episode whose outcome line was never published (its report write
+  # failed) stays pending: a later tick publishes it once, without relaunching.
+  w=$(make_world hold-pending-report "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" 'rollup="ERROR"'
+  run_park "$w" tick >/dev/null 2>&1; run_park "$w" tick >/dev/null 2>&1
+  grep -qx 'held_reported=1' "$w/state/lane.review-park" || fail "hold-pending: a published held outcome was not marked reported"
+  grep -v '^held_reported=' "$w/state/lane.review-park" > "$w/rec.tmp" && mv "$w/rec.tmp" "$w/state/lane.review-park"
+  lines=$(wc -l < "$w/state/lane.status")
+  out=$(run_park "$w" tick 2>&1; run_park "$w" tick 2>&1)
+  case "$out" in *"held lane: PR $GH_URL - checks are failing on "*) ;; *) fail "hold-pending: the pending held outcome was not published: $out" ;; esac
+  [ "$(printf '%s\n' "$out" | grep -c '^held lane: ')" = 1 ] || fail "hold-pending: the held outcome was published more than once: $out"
+  grep -qx 'held_reported=1' "$w/state/lane.review-park" || fail "hold-pending: the retried outcome was not marked reported"
+  [ "$(wc -l < "$w/state/lane.status")" = "$lines" ] || fail "hold-pending: the retry recorded a second paused episode"
+  out=$(run_park "$w" tick 2>&1; run_park "$w" tick 2>&1)
+  [ -z "$out" ] || fail "hold-pending: a published held outcome was reported again: $out"
+  for _ in $(seq 1 20); do [ ! -e "$w/control.log" ] || break; sleep 0.1; done
+  [ ! -e "$w/control.log" ] || fail "hold-pending: the retry relaunched the worker: $(cat "$w/control.log")"
+
   # A held lane whose PR is then closed is still reported once.
   w=$(make_world hold-closed "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
   gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
@@ -842,7 +861,7 @@ test_failing_checks_hold_the_lane_once_and_resume_by_hand() {
     for _ in $(seq 1 20); do [ ! -e "$w/control.log" ] || break; sleep 0.1; done
     [ ! -e "$w/control.log" ] || fail "hold-gl-$st: relaunched: $(cat "$w/control.log")"
   done
-  pass "failing or timed-out checks on a parked lane record one held episode, never relaunch automatically, still report a close, and resume by hand"
+  pass "failing, erroring, or timed-out checks on a parked lane record one held episode, publish its outcome once (retrying an unpublished one), never relaunch automatically, still report a close, and resume by hand"
 }
 
 test_edited_comment_beyond_first_hundred_triggers_relaunch() {

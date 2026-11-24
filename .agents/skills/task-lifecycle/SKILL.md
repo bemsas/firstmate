@@ -45,7 +45,8 @@ Record the resulting mode, `yolo` merge posture, and the one-line reason for any
 
 The goal is landed PRs, not busy workers: idling is the right outcome when a project's review queue is full, and a project's default cap is three open unreviewed fleet PRs (`config/review-capacity` overrides it per project).
 Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
-The review-queue cap, the host resource gate, and a project's declared machine capacity (`config/project-capacity`) bound that dispatch: a spawn beyond any of them exits 75 without launching, and its item stays queued rather than blocked.
+The host resource gate bounds every local launch, including a relaunch and a local secondmate; a project's declared machine capacity (`config/project-capacity`) bounds every fresh ship or scout spawn; and the review-queue cap bounds only a fresh ship that will open a GitHub pull request, never a scout, a local-only ship, or a relaunch.
+A spawn beyond any of these limits exits 75 without launching, and its item stays queued rather than blocked.
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
 Write the task-specific brief under section 11 before spawning.
 Fill the task subsections according to section 11.
