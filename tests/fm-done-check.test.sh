@@ -719,19 +719,33 @@ def test_iterator(rows):
     def fallback():
         return "next"
     assert rows.skip(1).first() == fallback()
+
+def test_nonempty():
+    assert [*read_rows()]
+    assert (*read_rows(),)
+    assert {*read_rows()}
+    assert {**read_counts()}
 PY
   cat > "$A_REPO/tests/iterator.test.sh" <<'SH'
 cat > "$temporary_fixture" <<'FIXTURE'
 exit 0
 FIXTURE
 [ "$(selected_value)" = "$expected_value" ] || exit 1
+test true = "$actual" || exit 1
 exit 0
 SH
+  cat > "$A_REPO/src/guide.test.js" <<'JS'
+// Documentation example: test.skip("deferred", check);
+/* Documentation example: test.only("focused", check); */
+test("render test.skip() in the guide", () => expect(guide()).toContain("skip"));
+test(`render test.only() in the guide`, () => expect(guide()).toContain("only"));
+JS
   pin_new_fixture_test tests/test_iterator.py
   pin_new_fixture_test tests/iterator.test.sh
+  pin_new_fixture_test src/guide.test.js
   accept_candidate
   accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" pinned-stubs >/dev/null ||
-    fail "benign nested Python and shell stubs should be admitted when pinned"
+    fail "benign assertions, stubs and titles should be admitted when pinned"
 
   local id file reason source
   while IFS='|' read -r id file reason source; do
@@ -744,7 +758,11 @@ SH
 conditional-js|src/iterator.test.js|added skip|it.skipIf(environment)("sample", check);
 focused-js|src/iterator.test.js|added skip|test.only("sample", check);
 focused-concurrent-js|src/iterator.test.js|added skip|test.concurrent.only("sample", check);
+commented-call-js|src/iterator.test.js|added skip|test /* note */ .skip("sample", check);
 literal-js|src/iterator.test.js|added trivial assertion|it("sample", () => expect("ready").toEqual("ready"));
+literal-list-python|tests/test_iterator.py|added trivial assertion|assert [*read_rows(), 1]
+literal-dict-python|tests/test_iterator.py|added trivial assertion|assert {**read_counts(), "key": 1}
+literal-command-shell|tests/iterator.test.sh|added trivial assertion|test true # standalone check
 go-skip|src/iterator_test.go|added skip|package iterator\nfunc TestExample(t *testing.T) { t.Skip("fixture") }
 unittest-skip|tests/test_iterator.py|added skip|from unittest import skipIf as skip_unavailable\n@skip_unavailable(False, "fixture")\ndef test_iterator():\n    assert selected() == expected()
 early-shell|tests/iterator.test.sh|added early-exit marker|exit 0\nassert_value
@@ -1113,18 +1131,24 @@ test_acceptance_entry_points() {
 }
 
 test_acceptance_inspects_pipeline_objects() {
-  local result
+  local result cache="$A_STATE/$A_ID.acceptance-git"
   accept_reset
+  printf 'value = 23\n' > "$A_REPO/app.py"
   accept_candidate
   if git -C "$A/pool" cat-file -e "$A_HEAD" 2>/dev/null; then
     fail "test must start with the pipeline head absent from the worker copy"
+  fi
+  [ -d "$cache" ] || fail "test must start with an existing supervisor cache"
+  if git -C "$cache" cat-file -e "$A_HEAD" 2>/dev/null; then
+    fail "test must start with the pipeline head absent from the supervisor cache"
   fi
   sed "s|^worktree=.*|worktree=$A/pool|;s/^mode=.*/mode=no-mistakes/" "$A_META" > "$A/pipeline.meta"
   mv "$A/pipeline.meta" "$A_META"
   printf 'done: PR %s checks green head %s\n' "$A_URL" "$A_HEAD" > "$A_STATUS"
   result=$(accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" fetched-scout 2>&1) ||
     fail "could not prepare review of fetched pipeline objects: $result"
-  assert_grep " -C $A_STATE/$A_ID.acceptance-git diff " "$result" "review should use the exact fetched objects"
+  assert_grep " -C $cache diff " "$result" "review should use the exact fetched objects"
+  assert_equals commit "$(git -C "$cache" cat-file -t "$A_HEAD")" "review populated the supervisor cache"
   if git -C "$A/pool" cat-file -e "$A_HEAD" 2>/dev/null; then
     fail "fallback fetch wrote objects into the worker copy"
   fi

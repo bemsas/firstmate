@@ -1170,8 +1170,10 @@ Declare additional test and runner paths in the policy where repository conventi
 To add a new test, pin the supervisor-approved bytes in optional `new_tests` (a map from relative path to SHA-256), or use the bug regression pin below.
 New Python tests check common collection overrides, returns in the test body, qualified pytest and unittest skip markers, and simple literal assertions.
 New shell tests check common skip markers, early top-level exits, and literal comparisons.
-New JavaScript and TypeScript tests check common skip, focus and todo forms and matching literal expectations. New Go tests check common skip calls.
-These static checks recognize specific patterns. The supervisor and independent reviewer assess the pinned test's behavior.
+New JavaScript and TypeScript tests check common skip, focus and todo calls and matching literal expectations outside comments, quoted strings and plain template strings.
+New Go tests check common skip calls.
+These static checks recognize specific patterns.
+The supervisor and independent reviewer assess the pinned test's behavior.
 
 For a bug fix, add a `regression` object with `path`, `test_sha256` and `runner_sha256`.
 The supervisor approves the bytes of a new test file and of the runner at `data/<task>/regression`.
@@ -1188,8 +1190,10 @@ It supports ordinary files and symlinks in the snapshot, with no submodule mater
 Use `bin/fm-done-check.sh review-brief <task> <pr-url> <fresh-scout-id>` to check the candidate and prepare the reviewer brief.
 The supervisor reads both commits from an owned bare repository populated by a noninteractive fetch of the exact pins from GitHub.
 For private repositories, that fetch uses the supervisor's GitHub CLI credentials for `https://github.com`.
-It uses the supervisor's `GH_CONFIG_DIR` or default GitHub CLI configuration, or a supervisor-provided `GH_TOKEN` or `GITHUB_TOKEN`. Use a configuration directory outside worker-controlled paths.
-The fetch disables redirects and never loads configuration from the worker's repository. Missing credentials, repository access or objects keep the candidate on hold.
+It uses the supervisor's `GH_CONFIG_DIR` or default GitHub CLI configuration, or a supervisor-provided `GH_TOKEN` or `GITHUB_TOKEN`.
+Use a configuration directory outside worker-controlled paths.
+The fetch disables redirects and never loads configuration from the worker's repository.
+Missing credentials, repository access or objects keep the candidate on hold.
 Use the native `bin/fm-spawn.sh` scout path with a new ID and an explicit Codex GPT or Claude model from a provider absent from the builder's complete dispatch lineage.
 Each native dispatch appends its identity to the lineage, including on a harness switch or relaunch.
 Missing, implicit, ambiguous or unavailable model history leaves the candidate on hold, as does a lineage that has used both supported providers.

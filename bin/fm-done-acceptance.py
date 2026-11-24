@@ -401,9 +401,9 @@ def trivial(node):
     if isinstance(node, ast.Constant):
         return bool(node.value)
     if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
-        return bool(node.elts)
+        return any(not isinstance(element, ast.Starred) for element in node.elts)
     if isinstance(node, ast.Dict):
-        return bool(node.keys)
+        return any(key is not None for key in node.keys)
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not) and isinstance(node.operand, ast.Constant):
         return not node.operand.value
     if isinstance(node, ast.BoolOp):
@@ -509,7 +509,7 @@ def shell_signals(data, _path):
                 index == 0 or index < len(lines) - 1 or any(parts[part_index + 1:])
             ):
                 return "added early-exit marker"
-            if re.match(r"(?:assert(?:_true)?\s+(?:true|1)|test\s+true)(?:\s|$)", part):
+            if re.fullmatch(r"(?:assert(?:_true)?\s+(?:true|1)|test\s+true)(?:\s+#.*)?\s*", part):
                 return "added trivial assertion"
             if re.match(r"(?:test\s+|\[\[?\s+)([\w.-]+)\s+(?:=|==|-eq)\s+\1(?:\s|$)", part):
                 return "added trivial assertion"
@@ -521,15 +521,29 @@ def shell_signals(data, _path):
 
 
 def js_signals(data, _path):
-    text = data.decode()
-    if re.search(
-        r"\b(?:describe|it|test)\s*\.\s*(?:(?:concurrent|sequential)\s*\.\s*)?(?:skip|skipIf|runIf|todo|only)\b"
-        r"|\b(?:xdescribe|xit|xtest|fdescribe|fit)\s*\(", text,
-    ):
-        return "added skip"
-    literal = r"""(?:true|false|null|-?\d+(?:\.\d+)?|'[^'\\\n]*'|"[^"\\\n]*")"""
-    if re.search(rf"\bexpect\(\s*({literal})\s*\)\s*\.\s*to(?:Be|Equal|StrictEqual)\(\s*\1\s*\)", text):
-        return "added trivial assertion"
+    # Consume comments and string tokens before reaching code spelled inside
+    # them. Keep the literal tokens available to the assertion pattern.
+    comment = r"//[^\r\n]*|/\*[\s\S]*?\*/"
+    quoted = r"'(?:\\[\s\S]|[^'\\\r\n])*'" r'|"(?:\\[\s\S]|[^"\\\r\n])*"'
+    template = r"`(?:\\[\s\S]|[^\\`$]|\$(?!\{))*`"
+    gap = rf"(?:\s|{comment})*"
+    dot = rf"{gap}\.{gap}"
+    modifier = rf"(?:(?:concurrent|sequential){dot})?(?:skip|skipIf|runIf|todo|only)"
+    skip = (
+        rf"\b(?:describe|it|test){dot}{modifier}(?:{dot}each)?{gap}\("
+        rf"|\b(?:xdescribe|xit|xtest|fdescribe|fit){gap}\("
+    )
+    literal = rf"true|false|null|-?\d+(?:\.\d+)?|{quoted}"
+    expect = (
+        rf"\bexpect{gap}\({gap}(?P<expected>{literal}){gap}\){dot}"
+        rf"to(?:Be|Equal|StrictEqual){gap}\({gap}(?P=expected){gap}\)"
+    )
+    signals = rf"{comment}|{quoted}|{template}|(?P<skip>{skip})|(?P<trivial>{expect})"
+    for match in re.finditer(signals, data.decode()):
+        if match.group("skip"):
+            return "added skip"
+        if match.group("trivial"):
+            return "added trivial assertion"
     return None
 
 
