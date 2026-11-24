@@ -1708,14 +1708,20 @@ test_branch_ack_commits_secondmate_stall_receipts() {
   append_wake "$state" check "secondmate-wake-loop-mate-$epoch-9" \
     "check: secondmate wake-loop stalled: mate=mate row=9 idle=3s" \
     || fail "could not seed the ungranted stall publication"
-  append_wake "$state" check "review-park-held:lane.a:100-200" "check: park-on-review: held lane.a" \
-    || fail "could not seed the held park publication"
   append_wake "$state" check "review-park-held:lane.b:100-300" "check: park-on-review: held lane.b" \
     || fail "could not seed the ungranted held park publication"
+  append_wake "$state" check "review-park-held:lane.a:100-200" "check: park-on-review: held lane.a" \
+    || fail "could not seed the held park publication"
+  append_wake "$state" check "review-park-held:lane.gone:100-400" "check: park-on-review: held lane.gone" \
+    || fail "could not seed the held park publication of a lane with no park record"
+  printf 'held=200\n' > "$state/lane.a.review-park"
+  printf 'held=300\n' > "$state/lane.b.review-park"
+  # What a receipt write cut short leaves behind: part of this very episode.
+  printf '100-' > "$state/.review-park-held-acked-lane.a"
 
   FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" branch-stall \
     || fail "branch owner activation failed"
-  FM_STATE_OVERRIDE="$state" "$GRANT" publish branch-stall 1 3 \
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish branch-stall 1 4 5 \
     || fail "branch grant publication failed"
 
   FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/branch.out" 2> "$dir/branch.err" \
@@ -1733,10 +1739,35 @@ test_branch_ack_commits_secondmate_stall_receipts() {
   receipt="$state/.secondmate-wake-stall-receipts/mate/$epoch-9"
   [ ! -e "$receipt" ] \
     || fail "branch acknowledgement committed a stall receipt for a row outside its grant"
-  [ "$(cat "$state/.review-park-held-acked-lane.a" 2>/dev/null || true)" = 100-200 ] \
-    || fail "branch acknowledgement did not commit the consumed held park row's receipt"
+  [ "$(tail -1 "$state/.review-park-held-acked-lane.a" 2>/dev/null || true)" = 100-200 ] \
+    || fail "branch acknowledgement did not commit the consumed held park row's whole receipt: $(cat "$state/.review-park-held-acked-lane.a")"
   [ ! -e "$state/.review-park-held-acked-lane.b" ] \
     || fail "branch acknowledgement committed a held park receipt for a row outside its grant"
+  grep -q 'review-park-held:lane.b:100-300' "$state/.wake-queue" \
+    || fail "branch acknowledgement consumed an ungranted held park row below its cutoff"
+  ! grep -q 'review-park-held:lane.a:\|review-park-held:lane.gone:' "$state/.wake-queue" \
+    || fail "branch acknowledgement left a granted held park row queued"
+  [ ! -e "$state/.review-park-held-acked-lane.gone" ] \
+    || fail "branch acknowledgement created a receipt for a lane with no park record"
+  # The selection fails closed when the rows, the claim or a receipt cannot be
+  # read in full, and an absent claim owns no row.
+  held_receipts() { FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-wake-lib.sh"; fm_wake_commit_park_held_receipts_through 99 ${1:+"$1"}' "$ROOT" "${1:-}" 2>/dev/null; }
+  held_receipts "$state/no-claim" || fail "an absent claim file was treated as a failed read"
+  [ ! -e "$state/.review-park-held-acked-lane.b" ] || fail "an absent claim file selected a row"
+  mkdir "$state/unreadable-claim"
+  if held_receipts "$state/unreadable-claim"; then fail "a claim file that cannot be read was treated as empty"; fi
+  if [ "$(id -u)" -ne 0 ]; then
+    chmod 000 "$state/.wake-queue"
+    if held_receipts; then fail "a queue that cannot be read selected no rows and succeeded"; fi
+    chmod 600 "$state/.wake-queue"
+    : > "$state/.review-park-held-acked-lane.b"
+    chmod 000 "$state/.review-park-held-acked-lane.b"
+    if held_receipts; then fail "a receipt that cannot be read was treated as absent"; fi
+    chmod 600 "$state/.review-park-held-acked-lane.b"
+  fi
+  held_receipts || fail "a readable selection failed"
+  grep -qx '100-300' "$state/.review-park-held-acked-lane.b" || fail "a recovered selection committed no receipt"
+  [ -z "$(compgen -G "$state/.wake-queue.ack.*")" ] || fail "a receipt write left its scratch behind"
   pass "a branch-actor acknowledgement commits secondmate stall and held review-park receipts for exactly its granted rows"
 }
 
@@ -3275,6 +3306,9 @@ test_wake_queue_prune_task() {
   append_wake "$state" stale "test:window-b" "stale: test:window-b"
   append_wake "$state" signal "task-b.status" "signal: $state/task-b.status"
   append_wake "$state" check "$state/task-b.check.sh" "check: $state/task-b.check.sh: merged: https://example.test/pr/2"
+  append_wake "$state" check "review-park-held:task-a:100-200" "check: park-on-review: held task-a"
+  append_wake "$state" check "review-park-held:task-a.b:100-200" "check: park-on-review: held task-a.b"
+  append_wake "$state" check "review-park-held:task-b:100-200" "check: park-on-review: held task-b"
 
   FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-wake-lib.sh"; fm_wake_queue_prune_task "$1" "$2" "$3"' "$ROOT" "$state" "task-a" "test:window-a" \
     || fail "fm_wake_queue_prune_task returned non-zero"
@@ -3286,6 +3320,9 @@ test_wake_queue_prune_task() {
   grep -F 'test:window-b' "$queue" >/dev/null || fail "prune removed stale wake for task-b"
   grep -F 'task-b.status' "$queue" >/dev/null || fail "prune removed status wake for task-b"
   grep -F 'task-b.check.sh' "$queue" >/dev/null || fail "prune removed check wake for task-b"
+  grep -F 'review-park-held:task-a:' "$queue" >/dev/null && fail "prune left held park wake for task-a"
+  grep -F 'review-park-held:task-a.b:' "$queue" >/dev/null || fail "prune removed held park wake for task-a.b"
+  grep -F 'review-park-held:task-b:' "$queue" >/dev/null || fail "prune removed held park wake for task-b"
 
   pass "fm_wake_queue_prune_task: prunes wakes for target task without touching other tasks"
 }

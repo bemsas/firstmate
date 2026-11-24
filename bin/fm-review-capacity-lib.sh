@@ -361,7 +361,7 @@ fm_review_capacity_lock_path() {  # <home> <host> <owner> <repo>
 fm_review_capacity_judge() {  # <cap> <observed> <target> <prefixes> <first-state> <own-id>
   local cap=$1 observed=$2 want=$3 prefixes=$4 first=$5 self=$6
   local state meta text kind mode target id label branch base pr prnum src keys coherent read_rc i entry num verdict hrepo pbase head p fleet
-  local numbers=' ' listed=' ' all_keys=' '
+  local numbers=' ' listed=' ' all_keys=' ' all_nums=' '
   local -a rec_labels=() rec_keys=() rec_prnums=() rec_prs=() rec_mtimes=() rec_coherent=() enc_prefixes=()
   FM_REVIEW_HOLDERS=0 FM_REVIEW_HOLDER_IDS='' FM_REVIEW_VERDICT='' FM_REVIEW_WHY='' FM_REVIEW_ERROR=''
   fm_local_firstmate_state_dirs "$first" || {
@@ -423,6 +423,7 @@ fm_review_capacity_judge() {  # <cap> <observed> <target> <prefixes> <first-stat
           [ "$(printf '%s' "${pr%/pull/*}" | sed 's|^[a-zA-Z]*://||' | tr '[:upper:]' '[:lower:]')" = "$want" ] || prnum=
           ;;
       esac
+      [ -z "$prnum" ] || all_nums="$all_nums$prnum "
       rec_labels+=("$label")
       rec_keys+=("$keys")
       rec_prnums+=("$prnum")
@@ -454,6 +455,7 @@ fm_review_capacity_judge() {  # <cap> <observed> <target> <prefixes> <first-stat
         case "$head" in "$p"*) fleet=1 ;; esac
       done
       case "$all_keys" in *" $hrepo:$head "*) fleet=1 ;; esac
+      case "$all_nums" in *" $num "*) fleet=1 ;; esac
       [ "$fleet" -eq 1 ] || continue
       FM_REVIEW_HOLDERS=$((FM_REVIEW_HOLDERS + 1))
       FM_REVIEW_HOLDER_IDS="${FM_REVIEW_HOLDER_IDS:+$FM_REVIEW_HOLDER_IDS, }#$num"

@@ -4239,6 +4239,9 @@ retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 # retired so its last lines are captured; off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
 teardown_retire_status "$STATE" "$ID" || exit 1
+# The park record goes first: without it no park tick can queue another held
+# wake after the prune, and no acknowledgement can recreate its receipt.
+rm -f "$STATE/$ID.review-park"
 fm_wake_queue_prune_task "$STATE" "$ID" "$T" 2>/dev/null || true
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" \
@@ -4250,7 +4253,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
   "$STATE/$ID.claude-settings.json" "$STATE/$ID.devin-config.json" \
   "$STATE/$ID.polytoken-busy.sh" "$STATE/$ID.polytoken-guardrails.sh" \
-  "$STATE/$ID.pr-register-refused" "$STATE/$ID.review-park" "$STATE/.review-park-closed-$ID" \
+  "$STATE/$ID.pr-register-refused" "$STATE/.review-park-closed-$ID" \
   "$STATE/.review-park-held-acked-$ID" \
   "$STATE/$ID.pr-register-timed-out" \
   "$STATE/.$ID.branch-outcome-index" "$STATE/$ID.done-check" \

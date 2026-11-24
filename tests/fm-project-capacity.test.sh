@@ -988,6 +988,30 @@ test_review_capacity_matches_exact_identity_and_reads_records_coherently() {
   out=$(review_spawn "$case_dir" task-c) || rc=$?
   expect_code 0 "$rc" "the worker's own approved pull request did not free its place: $out"
 
+  # A pull request a local record names is that worker's even when the forge no
+  # longer says which repository its branch lives in: unapproved it holds one
+  # place, approved it frees it.
+  case_dir=$(make_case review-no-headrepo task-c)
+  home="$case_dir/home"
+  github_target "$case_dir"
+  review_forge "$case_dir"
+  printf '%s\n' "project 1" > "$home/config/review-capacity"
+  write_live "$home" live-s "$case_dir/project" "branch=patch-1" "pr=https://github.com/acme/widget/pull/60"
+  age_record "$home/state/live-s.meta"
+  forge_answer "$case_dir" 1 "$(pr_node 60 patch-1 false null | jq -c '.headRepository = null')"
+  before=$(call_count "$case_dir")
+  worktrees=$(worktree_list "$case_dir")
+  rc=0
+  out=$(review_spawn "$case_dir" task-c "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "a recorded pull request without its repository held no place: $out"
+  assert_contains "$out" "1 of 1 places are held (#60)" "the deferral did not count the recorded pull request once"
+  assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+  # Control: another open pull request in that state, named by no record, is not fleet work.
+  forge_answer "$case_dir" 2 "$(pr_node 60 patch-1 false APPROVED | jq -c '.headRepository = null')" "$(pr_node 61 patch-1 false null | jq -c '.headRepository = null')"
+  rc=0
+  out=$(review_spawn "$case_dir" task-c) || rc=$?
+  expect_code 0 "$rc" "the recorded pull request's approval did not free its place, or an unrecorded one was counted: $out"
+
   # One branch can have open pull requests into several bases. Before its
   # handoff a worker's is the one into its intended base: the recorded
   # base_branch, else the default branch; an unknown base matches nothing.
