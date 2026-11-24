@@ -1025,7 +1025,25 @@ SH
   expect_code "$DEFER_EXIT" "$rc" "a handoff renamed in mid-read released its place: $out"
   assert_contains "$out" "1 of 1 places are held (live-r)" "the deferral did not keep the renamed record's place"
   assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
-  pass "review capacity matches a worker's exact pull request (another fork's lookalike never releases it) and reads each record as one generation across a rename"
+  # A record that is present but whose text cannot be read is never skipped.
+  case_dir=$(make_case review-unreadable task-c)
+  home="$case_dir/home"
+  github_target "$case_dir"
+  review_forge "$case_dir"
+  write_live "$home" live-u "$case_dir/project" "branch=fm/live-u"
+  cat > "$case_dir/fakebin/cat" <<SH
+#!/usr/bin/env bash
+[ "\$*" != "-- $home/state/live-u.meta" ] || exit 1
+PATH=/usr/bin:/bin exec cat "\$@"
+SH
+  chmod +x "$case_dir/fakebin/cat"
+  forge_answer "$case_dir" 0
+  rc=0
+  out=$(review_spawn "$case_dir" task-c "$case_dir/unused") || rc=$?
+  expect_code 1 "$rc" "an unreadable task record was skipped instead of refusing admission: $out"
+  assert_contains "$out" "task record $home/state/live-u.meta cannot be read" "the refusal did not name the unreadable record"
+  assert_absent "$home/state/task-c.meta" "a spawn refused on an unreadable record published one"
+  pass "review capacity matches a worker's exact pull request (another fork's lookalike never releases it), reads each record as one generation across a rename, and refuses when a record cannot be read"
 }
 
 test_review_capacity_defers_when_the_queue_cannot_be_counted() {

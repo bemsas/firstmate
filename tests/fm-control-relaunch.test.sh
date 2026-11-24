@@ -472,12 +472,26 @@ test_overloaded_host_defers_relaunch_and_secondmate_launch_before_any_change() {
   printf 'MemTotal: 1000000 kB\nMemAvailable: 600000 kB\n' > "$proc/meminfo"
   printf "printf '100000.00 0.00 0.00 1/1 1\\n' > '%s'\n" "$proc/loadavg" > "$dir/fake/on-exit.sh"
   meta_before=$(cat "$dir/home/state/rl92.meta")
+  printf 'unlanded work\n' > "$dir/wt/unlanded.txt"
   out=$(FM_PROC_ROOT_OVERRIDE=$proc run_control "$dir" rl92 relaunch --note "recheck load during relaunch"); rc=$?
   expect_code 75 "$rc" "a replacement deferred after the stop must still exit 75: $out"
   assert_contains "$out" "deferred: rl92's agent was stopped, but this host became overloaded before its replacement launched; no agent is running, its record and work are kept, and nothing retries it automatically" \
     "the late deferral did not say the lane is left without an agent"
   [ "$(cat "$dir/fake/command")" = zsh ] || fail "the late-deferral fixture did not stop the old agent"
   assert_equals "$meta_before" "$(cat "$dir/home/state/rl92.meta")" "a late deferral changed the prior task record"
+  assert_equals "unlanded work" "$(cat "$dir/wt/unlanded.txt")" "a late deferral lost uncommitted work"
+  grep -rqF "recheck load during relaunch" "$dir/home/data/rl92" "$dir/home/state" || fail "a late deferral lost the progress note"
+  # Nothing relaunched by itself; a deliberate relaunch on the recovered host
+  # brings the same task back in the same copy.
+  [ "$(cat "$dir/fake/command")" = zsh ] || fail "a late deferral restarted an agent by itself"
+  rm -f "$dir/fake/on-exit.sh"
+  printf '0.00 0.00 0.00 1/1 1\n' > "$proc/loadavg"
+  out=$(FM_PROC_ROOT_OVERRIDE=$proc run_control "$dir" rl92 relaunch --note "host recovered"); rc=$?
+  expect_code 0 "$rc" "a deliberate relaunch after a late deferral must recover the lane: $out"
+  assert_contains "$out" "relaunched rl92" "the recovery relaunch was not reported"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the recovery relaunch did not bring the agent back"
+  assert_equals "$dir/wt" "$(meta_field "$dir" rl92 worktree)" "the recovery relaunch moved to another copy"
+  assert_equals "unlanded work" "$(cat "$dir/wt/unlanded.txt")" "the recovery relaunch lost uncommitted work"
   pass "an overloaded host defers fm-control relaunch before the stop, fm-spawn --relaunch before the record, and a fresh secondmate before its home is touched; load rising after the check defers after the stop with exit 75 and the lane left without an agent"
 }
 

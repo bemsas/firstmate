@@ -267,21 +267,24 @@ fm_review_capacity_stat() {  # <file>
 # of the file even while bin/fm-worker-done.sh or bin/fm-pr-check.sh replace it
 # by rename under their own lock. Sets FM_REVIEW_RECORD_TEXT and
 # FM_REVIEW_RECORD_MTIME and returns 0; returns 1 when three attempts never
-# agree, in which case the caller treats the record as changing now.
+# agree, in which case the caller treats the record as changing now, and 2 when
+# its text could not be read at all.
 fm_review_capacity_read_record() {  # <meta>
-  local before after attempt=0
+  local before after attempt=0 text got=2
   FM_REVIEW_RECORD_TEXT='' FM_REVIEW_RECORD_MTIME=''
   while [ "$attempt" -lt 3 ]; do
     attempt=$((attempt + 1))
     before=$(fm_review_capacity_stat "$1") || before=
-    FM_REVIEW_RECORD_TEXT=$(cat -- "$1" 2>/dev/null) || FM_REVIEW_RECORD_TEXT=
+    text=$(cat -- "$1" 2>/dev/null) || continue
+    FM_REVIEW_RECORD_TEXT=$text
+    got=1
     after=$(fm_review_capacity_stat "$1") || after=
     if [ -n "$before" ] && [ "$before" = "$after" ]; then
       FM_REVIEW_RECORD_MTIME=${after#* }
       return 0
     fi
   done
-  return 1
+  return "$got"
 }
 
 # The publication target a task record would open its pull request in, in
@@ -350,7 +353,7 @@ fm_review_capacity_lock_path() {  # <home> <host> <owner> <repo>
 # read, since skipping one could undercount.
 fm_review_capacity_judge() {  # <cap> <observed> <target> <prefixes> <first-state> <own-id>
   local cap=$1 observed=$2 want=$3 prefixes=$4 first=$5 self=$6
-  local state meta text kind mode target id label branch pr prnum src keys coherent i entry num verdict hrepo head p fleet
+  local state meta text kind mode target id label branch pr prnum src keys coherent read_rc i entry num verdict hrepo head p fleet
   local numbers=' ' listed=' ' all_keys=' '
   local -a rec_labels=() rec_keys=() rec_prnums=() rec_prs=() rec_mtimes=() rec_coherent=() enc_prefixes=()
   FM_REVIEW_HOLDERS=0 FM_REVIEW_HOLDER_IDS='' FM_REVIEW_VERDICT='' FM_REVIEW_WHY='' FM_REVIEW_ERROR=''
@@ -371,7 +374,16 @@ fm_review_capacity_judge() {  # <cap> <observed> <target> <prefixes> <first-stat
         return 1
       }
       coherent=1
-      fm_review_capacity_read_record "$meta" || coherent=0
+      read_rc=0
+      fm_review_capacity_read_record "$meta" || read_rc=$?
+      if [ "$read_rc" -eq 2 ]; then
+        # A record removed since the glob was released by its cleanup; one
+        # still present but unreadable could be a holder.
+        [ -e "$meta" ] || continue
+        FM_REVIEW_ERROR="task record $meta cannot be read"
+        return 1
+      fi
+      [ "$read_rc" -eq 0 ] || coherent=0
       text=$FM_REVIEW_RECORD_TEXT
       kind=$(fm_review_capacity_field "$text" kind)
       [ "$kind" = ship ] || continue
