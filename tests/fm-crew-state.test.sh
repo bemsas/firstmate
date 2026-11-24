@@ -2674,6 +2674,53 @@ test_ship_candidate_does_not_read_done() {
   pass "protected status reads keep both a worker done candidate and a pipeline pass unaccepted"
 }
 
+test_protected_run_matches_accepted_head() {
+  reset_fakes
+  local d out run_head candidate url=https://github.com/o/r/pull/1
+  d=$(new_case accepted-run-head)
+  make_repo_on_branch "$d/wt" fm/candidate
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/config/done-acceptance"
+  run_head=$FM_FAKE_RUN_HEAD
+  candidate=$(printf 'different fixture identity\n' | git hash-object --stdin)
+  fm_write_meta "$d/state/candidate.meta" "window=fm:fm-candidate" "kind=ship" \
+    "mode=no-mistakes" "worktree=$d/wt" "project=$d/wt" "harness=claude"
+  # Keep real acceptance coverage in fm-done-check.test.sh. Here both heads
+  # are ordinary fixture values and the offline lookup accepts the named one.
+  cat > "$d/fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */fm-done-acceptance.py ]]; then
+  [ "$#" = 5 ] && [ "$2" = passing ] && [ "$3" = candidate ] &&
+    [ "$4" = https://github.com/o/r/pull/1 ] && [ "$5" = "$FM_FIXTURE_ACCEPTED_HEAD" ]
+  exit
+fi
+exec "$FM_FIXTURE_REAL_PYTHON" "$@"
+SH
+  chmod +x "$d/fakebin/python3"
+  local FM_FIXTURE_REAL_PYTHON
+  FM_FIXTURE_REAL_PYTHON=$(command -v python3)
+  export FM_FIXTURE_REAL_PYTHON
+  arm_idle_record "$d/state" candidate
+  FM_FAKE_AXI_STATUS=$(run_passed fm/candidate)
+
+  printf 'done: PR %s checks green head %s\n' "$url" "$candidate" > "$d/state/candidate.status"
+  out=$(FM_HOME="$d" FM_FIXTURE_ACCEPTED_HEAD="$candidate" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: blocked" "an accepted candidate cannot stand in for a different completed run head"
+  assert_contains "$out" "source: run-step" "the completed run must be attributed for this fixture"
+  assert_contains "$out" "does not match the accepted candidate" "mismatched run head should be visible"
+
+  printf 'done: PR %s checks green head %s\n' "$url" "$run_head" > "$d/state/candidate.status"
+  out=$(FM_HOME="$d" FM_FIXTURE_ACCEPTED_HEAD="$run_head" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: done" "the same full accepted and completed run head remains done"
+  assert_contains "$out" "source: run-step" "the matching run must also be attributed"
+
+  FM_FAKE_AXI_STATUS=$(FM_FAKE_RUN_HEAD="${run_head:0:12}" run_passed fm/candidate)
+  out=$(FM_HOME="$d" FM_FIXTURE_ACCEPTED_HEAD="$run_head" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: blocked" "an abbreviated run head cannot prove exact completion"
+  assert_contains "$out" "source: run-step" "the abbreviated run must also be attributed"
+  pass "protected completed runs require the same full head as the accepted candidate"
+}
+
 test_moved_remote_branch_without_named_head_is_blocked() {
   reset_fakes
   local d main_sha fix_sha out
@@ -6808,6 +6855,11 @@ test_captured_completed_history() {
   pass 'captured completed status yields to synthetic subsequent development'
 }
 
+if [ "${1:-}" = --accepted-run-head ]; then
+  test_protected_run_matches_accepted_head
+  exit
+fi
+
 test_captured_axi_status_shapes
 test_captured_inventory_replay
 test_captured_authority_transition
@@ -6894,6 +6946,7 @@ test_unpushed_ship_done_is_blocked
 test_merged_pr_reads_done_under_captured_meta
 test_no_mistakes_prevalidation_done_stays_done
 test_ship_candidate_does_not_read_done
+test_protected_run_matches_accepted_head
 test_moved_remote_branch_without_named_head_is_blocked
 test_external_review_done_reads_ready
 test_no_run_busy_pane

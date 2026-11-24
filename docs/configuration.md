@@ -1155,6 +1155,7 @@ The worker's ready report submits a candidate with `head <full SHA>` after the U
 Worker completion and legacy checklist results can still be inspected.
 Current-state reads, PR registration and the merge path require acceptance for the candidate.
 The no-mistakes pre-validation handoff can start its ordinary pipeline while current state still shows a candidate awaiting acceptance.
+A protected no-mistakes run reports completed delivery only when its full run head matches the accepted candidate.
 A terminal publishing run without a PR identity remains blocked.
 When the pipeline explicitly skips publication and there is no current PR candidate, it reports a pause and explains what was skipped.
 Registration and merge also check the live PR identity and read the target branch tip directly.
@@ -1162,7 +1163,8 @@ Accepting a candidate confers no merge authority.
 
 The policy contains `repo` (same GitHub owner/repository for source and target), `base_branch`, `base` (full commit), `kind` (`feature` or `bug`), `allow` (allowed repository paths), `tests` (additional test paths, possibly empty), and `criteria` (approved task criteria).
 Path entries match literally, with a trailing slash for a directory prefix.
-Default test locations cover test, spec and end-to-end directories, common framework file names and suffixes, and dedicated runner and collection configuration such as `conftest.py`, `pytest.ini` and `vitest.config.ts`.
+Default test locations cover test, spec and end-to-end directories, common framework file names and suffixes, and dedicated runner and collection configuration such as `conftest.py`, `pytest.ini`, `vitest.config.ts` and `karma.conf.js`.
+Recognized pytest sections in `pyproject.toml` and `setup.cfg` also protect their containing files.
 Recognized in-file declarations in Rust, Go, Python, Java, Kotlin and C# also protect their containing files.
 The scope check compares exact committed tree entries, including gitlinks and both paths of a rename.
 Any change to an existing recognized or declared test entry is held, including mixed application and test files.

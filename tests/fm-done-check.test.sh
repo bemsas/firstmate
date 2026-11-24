@@ -511,28 +511,28 @@ test_top_level_heading_ends_checklist_section() {
   assert_equals pass "$(result_of tests)" 'top-level setup and rules must not become test commands'
   pass 'checklist sections stop at the next top-level heading'
 }
-test_top_level_heading_ends_checklist_section
-test_base_metadata_keys
-
-test_off_by_default_does_nothing
-test_switch_comes_from_config_file_or_env
-test_clean_pr_passes
-test_base_must_match_the_brief
-test_mergeable_uses_forge_and_local_merge
-test_vision_must_be_unchanged_against_base
-test_ai_trailers_fail
-test_scope_follows_the_brief
-test_tests_must_have_run
-test_shadow_logs_and_never_acts
-test_bounces_are_bounded
-test_unconfirmed_steer_is_not_counted
-test_unreadable_facts_never_bounce
-test_pr_check_hook
-
-test_proof_rider_on_ui_prs
-test_auto_records_pr
-test_watcher_runs_done_check on
-test_watcher_runs_done_check shadow
+if [ "${1:-}" != --framework-paths ]; then
+  test_top_level_heading_ends_checklist_section
+  test_base_metadata_keys
+  test_off_by_default_does_nothing
+  test_switch_comes_from_config_file_or_env
+  test_clean_pr_passes
+  test_base_must_match_the_brief
+  test_mergeable_uses_forge_and_local_merge
+  test_vision_must_be_unchanged_against_base
+  test_ai_trailers_fail
+  test_scope_follows_the_brief
+  test_tests_must_have_run
+  test_shadow_logs_and_never_acts
+  test_bounces_are_bounded
+  test_unconfirmed_steer_is_not_counted
+  test_unreadable_facts_never_bounce
+  test_pr_check_hook
+  test_proof_rider_on_ui_prs
+  test_auto_records_pr
+  test_watcher_runs_done_check on
+  test_watcher_runs_done_check shadow
+fi
 
 # Real Git, network-free forge and native scout spawn with a fake terminal.
 # shellcheck source=tests/fixtures.sh
@@ -572,15 +572,19 @@ chmod +x "$A_FAKE/gh-axi"
 
 fm_git_init_commit "$A_REPO"
 git -C "$A_REPO" checkout -qb dev || fail "cannot prepare acceptance base"
-mkdir -p "$A_REPO/tests" "$A_REPO/src/"{__tests__,shop,App.Tests,cypress/e2e,e2e}
+mkdir -p "$A_REPO/tests" "$A_REPO/src/"{__tests__,shop,App.Tests,cypress/e2e,e2e,packaging}
 printf 'def test_contract():\n    assert actual() == 2\n' > "$A_REPO/tests/test_old.py"
 printf 'test_check() { expect_result; }\ntest_check\n' > "$A_REPO/tests/contract.test.sh"
 printf 'it("open", () => expect(state()).toBe("open"));\n' > "$A_REPO/src/__tests__/state.test.ts"
 for runner_path in tests.py shop/tests.py test.js foo.tests.ts FooTest.java App.Tests/FooTests.cs \
-  cypress/e2e/a.cy.ts e2e/login.ts conftest.py vitest.config.ts; do
+  cypress/e2e/a.cy.ts e2e/login.ts conftest.py vitest.config.ts karma.conf.js .pytest.ini pytest.toml; do
   printf 'fixture entry\n' > "$A_REPO/src/$runner_path"
 done
-printf '#[cfg(test)]\nmod tests {}\n' > "$A_REPO/src/lib.rs"
+printf 'fn value() -> u8 { 1 }\n#[cfg(test)]\nmod tests { #[test] fn value_is_positive() { assert!(super::value() > 0); } }\n' \
+  > "$A_REPO/src/lib.rs"
+printf '[tool.pytest.ini_options]\ntestpaths = ["checks"]\n' > "$A_REPO/src/pyproject.toml"
+printf '[tool:pytest]\npython_files = verify_*.py\n' > "$A_REPO/src/setup.cfg"
+printf '[project]\nname = "fixture"\nversion = "1.0"\n' > "$A_REPO/src/packaging/pyproject.toml"
 printf 'value = 1\n' > "$A_REPO/app.py"
 git -C "$A_REPO" add . || fail "cannot stage acceptance base"
 git -C "$A_REPO" commit -qm base || fail "cannot commit acceptance base"
@@ -710,6 +714,29 @@ test_acceptance_test_locations() {
   accept_candidate
   accept_refused "existing test entry changed: 'src/conftest.py'" "$SCRIPT" review-brief "$A_ID" "$A_URL" collection-change
   pass "common test and runner paths and embedded Rust tests are protected by exact Git tree comparison"
+}
+
+test_acceptance_framework_config() {
+  local file
+  for file in karma.conf.js .pytest.ini pytest.toml pyproject.toml setup.cfg; do
+    accept_reset
+    rm "$A_REPO/src/$file"
+    accept_candidate
+    accept_refused "existing test entry changed: 'src/$file'" \
+      "$SCRIPT" review-brief "$A_ID" "$A_URL" "runner-$file"
+  done
+  accept_reset
+  printf '[project]\nname = "fixture"\nversion = "1.1"\n' > "$A_REPO/src/packaging/pyproject.toml"
+  accept_candidate
+  accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" packaging-change >/dev/null ||
+    fail "an in-scope pyproject without pytest configuration should admit"
+
+  accept_reset
+  sed 's/u8 { 1 }/u8 { 2 }/' "$A_REPO/src/lib.rs" > "$A/inline.rs"
+  mv "$A/inline.rs" "$A_REPO/src/lib.rs"
+  accept_candidate
+  accept_refused "existing test entry changed: 'src/lib.rs'" "$SCRIPT" review-brief "$A_ID" "$A_URL" inline-tests
+  pass "default Karma and pytest configs are protected and standalone packaging edits still admit"
 }
 
 test_acceptance_pinned_test_signals() {
@@ -1173,9 +1200,16 @@ test_acceptance_requires_complete_builder_lineage() {
   pass "review dispatch excludes every recorded builder provider"
 }
 
+if [ "${1:-}" = --framework-paths ]; then
+  test_acceptance_test_locations
+  test_acceptance_framework_config
+  exit
+fi
+
 test_acceptance_private_fetch
 test_acceptance_tamper
 test_acceptance_test_locations
+test_acceptance_framework_config
 test_acceptance_pinned_test_signals
 test_acceptance_regression
 test_acceptance_entry_points

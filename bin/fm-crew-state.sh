@@ -309,7 +309,7 @@ emit() {  # <state> <source> [detail]
   exit 0
 }
 
-emit_run() {  # <state> <detail> [pr]
+emit_run() {  # <state> <detail> [pr] [full run head]
   local detail=$2 pr=${3:-${RUN_PR:-}} mode candidate=''
   if [ "$1" = "done" ] && [ "$KIND" = ship ]; then
     mode=$(meta_value mode)
@@ -331,6 +331,9 @@ emit_run() {  # <state> <detail> [pr]
         fm_dod_accept_ship_done "$KIND" "$mode" "$WT" "$(meta_value project)" \
           "$LOG_LINE" "$STATE" "$ID" "$META" >/dev/null; }; then
         emit blocked run-step "ship delivery awaits supervisor acceptance for its exact head"
+      fi
+      if [ "$mode" = no-mistakes ] && [ "${4:-}" != "$FM_DOD_CANDIDATE_HEAD" ]; then
+        emit blocked run-step "completed run head is unavailable or does not match the accepted candidate"
       fi
     fi
   fi
@@ -1369,6 +1372,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATE=working
   RUN_DETAIL=""
   RUN_PR=""
+  RUN_HEAD=""
   RUN_PUBLICATION_SKIPPED=0
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
@@ -1630,7 +1634,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     esac
   fi
 
-  emit_run "$RUN_STATE" "$RUN_DETAIL" "$TERMINAL_PR"
+  emit_run "$RUN_STATE" "$RUN_DETAIL" "$TERMINAL_PR" "$RUN_HEAD"
 fi
 
 # --- fallback: no run attributed to this crew ------------------------------

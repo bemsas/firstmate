@@ -358,8 +358,9 @@ def test_path(path, policy):
     return (contains(path, policy["tests"])
             or bool(re.search(
                 r"(?:^|/)(?:tests?|specs?|__tests__|e2e|[^/]+\.tests?)/"
-                r"|(?:^|/)(?:test_[^/]+|tests?\.[^/]+|conftest\.py|pytest\.ini|tox\.ini|\.mocharc[^/]*)$"
+                r"|(?:^|/)(?:test_[^/]+|tests?\.[^/]+|conftest\.py|\.?pytest\.(?:ini|toml)|tox\.ini|\.mocharc[^/]*)$"
                 r"|(?:^|/)(?:jest|vitest|cypress|playwright|karma|testcafe)\.config\.[^/]+$"
+                r"|(?:^|/)karma\.conf\.(?:js|coffee|ts)$"
                 r"|[._-](?:tests?|specs?|cy)\.[^/]+$"
                 r"|(?:tests?|specs?)\.(?:java|kt|kts|cs|scala|swift)$", path, re.I,
             )))
@@ -374,8 +375,13 @@ EMBEDDED_TEST = {
     ".cs": rb"^\s*\[(?:Fact|Theory|Test|TestCase|TestMethod)\b",
 }
 
+PYTEST_CONFIG = {
+    "pyproject.toml": rb"^[ \t]*\[[ \t]*tool\.pytest(?:\.ini_options)?[ \t]*\]",
+    "setup.cfg": rb"^[ \t]*\[tool:pytest\]",
+}
 
-def embedded_test(identity, entries, path, marker):
+
+def has_test_marker(identity, entries, path, marker):
     if not marker or path not in entries:
         return False
     mode, kind, _ = entries[path]
@@ -560,10 +566,11 @@ def tamper_check(identity, policy, before, after, paths):
         approved[regression["path"]] = regression["test_sha256"]
     for change, path in paths:
         require(relative(path) and contains(path, policy["allow"]), f"out-of-scope change: {path!r}")
-        suffix = PurePosixPath(path).suffix.lower()
-        marker = EMBEDDED_TEST.get(suffix)
+        file = PurePosixPath(path)
+        suffix = file.suffix.lower()
+        marker = PYTEST_CONFIG.get(file.name) or EMBEDDED_TEST.get(suffix)
         if path not in approved and not test_path(path, policy) and not (
-            embedded_test(identity, before, path, marker) or embedded_test(identity, after, path, marker)
+            has_test_marker(identity, before, path, marker) or has_test_marker(identity, after, path, marker)
         ):
             continue
         require(change == "A", f"existing test entry changed: {path!r}")
