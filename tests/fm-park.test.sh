@@ -915,50 +915,45 @@ test_failing_checks_hold_the_lane_once_and_resume_by_hand() {
   pass "failing, erroring, or timed-out checks on a parked lane record one held episode, publish its outcome once (retrying an unpublished one), never relaunch automatically, still report a close, and resume by hand"
 }
 
-# Ticks until the deferred lane's relaunch is reported; a tick that reports one
-# outcome may already have started the next retry, so the outcome can arrive on
-# any of them. Prints everything the ticks printed.
-ticks_until_relaunched() {  # <world> <label>
-  local i out=
-  for i in $(seq 1 60); do
-    out="$out$(run_park "$1" tick 2>&1)"
-    case "$out" in *"relaunched lane: "*) printf '%s\n' "$out"; return 0 ;; esac
-    sleep 0.25
+# A review relaunch the host gate refuses is held: reported once, never retried
+# by any later tick even after the host recovers, and relaunched only by a
+# deliberate resume. Both the park's own check and a 75 from fm-control refuse.
+test_gate_refused_review_relaunch_is_held_until_a_manual_resume() {
+  local w out rc how i calls lines
+  for how in host.overloaded control.defer; do
+    w=$(make_world "resume-refused-$how" "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+    gh_fixture "$w/gh.1.json" decision=CHANGES_REQUESTED
+    : > "$w/$how"
+    out=$(tick_and_report "$w" "refused-$how")
+    case "$out" in "held lane: PR $GH_URL - relaunch refused by the host resource gate (changes were requested)"*"resume it by hand"*) ;; *) fail "refused-$how: tick output: $out" ;; esac
+    grep -q '^held=[0-9]' "$w/state/lane.review-park" || fail "refused-$how: the refusal was not held"
+    ! grep -q '^resume_error=' "$w/state/lane.review-park" || fail "refused-$how: a refusal was recorded as a failed relaunch"
+    tail -1 "$w/state/lane.status" | grep -q '^paused \[at=[0-9]*\]: parked on review and held: ' || fail "refused-$how: no paused episode line: $(tail -1 "$w/state/lane.status")"
+    calls=$(cat "$w/control.log" 2>/dev/null | grep -c ' relaunch ')
+    [ "$how" = control.defer ] || [ "$calls" = 0 ] || fail "refused-$how: an overloaded host still called fm-control"
+    lines=$(wc -l < "$w/state/lane.status")
+
+    # Still refused, then recovered: no tick relaunches or reports again.
+    out=$(for i in 1 2 3; do run_park "$w" tick 2>&1; done)
+    rm -f "$w/$how"
+    out="$out$(for i in 1 2 3; do run_park "$w" tick 2>&1; sleep 0.3; done)"
+    [ -z "$out" ] || fail "refused-$how: a held refusal was reported or acted on again: $out"
+    [ "$(cat "$w/control.log" 2>/dev/null | grep -c ' relaunch ')" = "$calls" ] || fail "refused-$how: a tick retried the refused relaunch: $(cat "$w/control.log")"
+    [ "$(wc -l < "$w/state/lane.status")" = "$lines" ] || fail "refused-$how: a later tick recorded another episode"
+
+    # A manual resume is refused with 75 while the host is still over, adds no
+    # episode, and relaunches once the host has room.
+    : > "$w/$how"
+    rc=0; out=$(run_park "$w" resume lane --trigger "operator retry" 2>&1) || rc=$?
+    expect_code 75 "$rc" "refused-$how: a manual resume on an overloaded host must exit 75: $out"
+    case "$out" in *"deferred: lane was not relaunched"*) ;; *) fail "refused-$how: manual refusal: $out" ;; esac
+    ! compgen -G "$w/state/.review-park-report-*" >/dev/null || fail "refused-$how: a refused manual resume queued a second report"
+    rm -f "$w/$how"
+    out=$(run_park "$w" resume lane --trigger "operator retry" 2>&1) || fail "refused-$how: manual resume failed on a healthy host: $out"
+    case "$out" in *"relaunched lane: PR $GH_URL - operator retry") ;; *) fail "refused-$how: manual resume: $out" ;; esac
+    [ ! -e "$w/state/lane.review-park" ] || fail "refused-$how: the park record outlived its relaunch"
   done
-  fail "$2: the lane did not relaunch within 60 ticks: $out"
-}
-
-# A review relaunch the host gate defers is temporary: the lane stays parked
-# without resume_error, the deferral is reported once, and a later tick
-# relaunches it once the host has room. Both the park's own check and a 75
-# from fm-control are deferrals.
-test_deferred_review_relaunch_stays_parked_and_retries() {
-  local w out
-  w=$(make_world resume-deferred "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
-  gh_fixture "$w/gh.1.json" decision=CHANGES_REQUESTED
-  : > "$w/host.overloaded"
-  out=$(tick_and_report "$w" resume-deferred)
-  case "$out" in "relaunch-deferred lane: PR $GH_URL (changes were requested): this host is overloaded"*) ;; *) fail "resume-deferred: tick output: $out" ;; esac
-  [ ! -e "$w/control.log" ] || fail "resume-deferred: an overloaded host still called fm-control: $(cat "$w/control.log")"
-  ! grep -q '^resume_error=' "$w/state/lane.review-park" || fail "resume-deferred: a deferral was recorded as a failed relaunch"
-  grep -q '^resume_deferred=' "$w/state/lane.review-park" || fail "resume-deferred: the deferral was not recorded"
-  out=$(run_park "$w" tick 2>&1; sleep 1; run_park "$w" tick 2>&1)
-  case "$out" in *relaunch-deferred*) fail "resume-deferred: the deferral was reported twice: $out" ;; esac
-  rm -f "$w/host.overloaded"
-  out=$(ticks_until_relaunched "$w" resume-after)
-  case "$out" in *"relaunched lane: PR "*"changes were requested"*) ;; *) fail "resume-deferred: the lane did not relaunch once the host had room: $out" ;; esac
-  [ "$(grep -c ' relaunch ' "$w/control.log")" = 1 ] || fail "resume-deferred: expected exactly one relaunch: $(cat "$w/control.log")"
-
-  w=$(make_world resume-deferred-control "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
-  gh_fixture "$w/gh.1.json" decision=CHANGES_REQUESTED
-  : > "$w/control.defer"
-  out=$(tick_and_report "$w" resume-deferred-control)
-  case "$out" in "relaunch-deferred lane: "*) ;; *) fail "resume-deferred-control: tick output: $out" ;; esac
-  ! grep -q '^resume_error=' "$w/state/lane.review-park" || fail "resume-deferred-control: a control deferral was recorded as a failed relaunch"
-  rm -f "$w/control.defer"
-  out=$(ticks_until_relaunched "$w" resume-deferred-control-after)
-  [ ! -e "$w/state/lane.review-park" ] || fail "resume-deferred-control: the park record outlived its relaunch"
-  pass "a review relaunch the host gate defers stays parked without a failure mark, is reported once, and relaunches on a later tick"
+  pass "a review relaunch the host gate refuses is held and reported once, no later tick retries it even after recovery, and a manual resume exits 75 while overloaded and relaunches once healthy"
 }
 
 test_edited_comment_beyond_first_hundred_triggers_relaunch() {
@@ -1390,7 +1385,7 @@ fm_test_run \
   test_quiet_parked_lane_and_approval_do_not_relaunch \
   test_failed_relaunch_keeps_record_and_stops_retrying \
   test_failing_checks_hold_the_lane_once_and_resume_by_hand \
-  test_deferred_review_relaunch_stays_parked_and_retries \
+  test_gate_refused_review_relaunch_is_held_until_a_manual_resume \
   test_closed_pr_is_reported_once \
   test_tick_parks_clean_idle_lanes_only_when_opted_in \
   test_land_requires_opt_in_but_always_cleans_parked \

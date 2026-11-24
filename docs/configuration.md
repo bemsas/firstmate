@@ -2169,7 +2169,7 @@ It defers the launch when this host's 1-minute load average is above 1.5 times i
 Usable cores are the CPUs the process may run on, lowered to any cgroup v2 CPU quota; the load average stays host-wide, a deliberately conservative pairing that can refuse a pinned or quota-limited launch on a busy host even while its own CPUs are idle.
 A fresh spawn's deferral launches nothing, creates no record, leaves the backlog item queued, prints one `deferred:` line naming the readings, and exits 75.
 A relaunch deferral leaves the running agent and its record unchanged, except when load rises between `bin/fm-control.sh`'s own check and the replacement launch: then the old agent has already stopped, the command still exits 75 with a `deferred:` line saying so, the record and work are kept, the lane has no running agent, and nothing retries it automatically.
-A parked lane whose review relaunch is deferred stays parked and is retried by a later park check once the host has room.
+A parked lane whose review relaunch is refused by the gate is held and reported once; no later park check retries it, and `bin/fm-park.sh resume <task-id> --trigger <text>` relaunches it by hand once the host has room.
 A reading the host cannot provide, such as on native Windows or without `/proc`, is printed as unknown with a warning and does not defer the spawn by itself, while the other reading is still judged.
 The limits are fixed; [Lane capacity](#lane-capacity-configlane-capacity) `admit-spawns` can only add stricter refusals after it.
 A remote secondmate is judged on its own host, and `exit`, `stop`, and `interrupt` start nothing and are never gated.

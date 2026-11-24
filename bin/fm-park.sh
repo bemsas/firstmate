@@ -77,9 +77,9 @@
 # before the launch, so the fresh worker's own reports always follow it. Success
 # removes the park record; failure keeps it with resume_error=, which crew state
 # reports as blocked and which stops tick retrying until resume runs by hand. A
-# relaunch the host resource gate defers (bin/fm-control.sh exit 75) is not a
-# failure: the record stays parked with resume_deferred=, reported once, and a
-# later tick retries it when its feedback still calls for a relaunch.
+# relaunch the host resource gate refuses exits 75 and holds the lane (held=
+# with the capacity reason, below): reported once, never retried by tick, and
+# relaunched only by a deliberate resume once the host has room.
 #
 # land waits for any other park action on the lane to finish, runs
 # bin/fm-teardown.sh <task-id> (never --force), so every teardown gate still
@@ -161,7 +161,8 @@
 #
 # The record is key=value lines (pr, head, parked_at, slot_leased, pending
 # until the stop is confirmed, resume_error after a failed relaunch, and held
-# with held_reason once failing checks stopped automatic relaunch, plus
+# with held_reason once failing checks or a host resource gate refusal stopped
+# automatic relaunch, plus
 # held_reported once that episode's outcome line is published), mode
 # 0600, published by rename.
 # GraphQL and jq programs below are literal, not shell expressions.
@@ -682,21 +683,28 @@ cmd_park() {
 
 # --- resume ----------------------------------------------------------------
 
-# A relaunch the host resource gate defers - before the attempt here, or inside
-# bin/fm-control.sh, which exits 75 whether it deferred before or after its
-# stop (a parked lane's agent is already stopped) - is temporary: the lane stays
-# parked with no resume_error, so a later tick re-reads its feedback and tries
-# again once the host has room, and the deferral is reported once per episode.
-resume_deferred() {  # <id> <pr> <head> <trigger>
-  [ -z "$(record_get "$1" resume_deferred)" ] || return 0
-  record_write "$1" "pr=$2" "head=$3" "parked_at=$(record_get "$1" parked_at)" \
-    "slot_leased=$(record_get "$1" slot_leased)" "resume_deferred=$(date +%s)" || return 0
-  status_append "$1" "paused [at=$(date +%s)]: parked on review: relaunch deferred by the host resource gate; the lane stays parked and a later tick retries once the host has room"
-  printf 'relaunch-deferred %s: PR %s (%s): this host is overloaded; the lane stays parked and a later tick retries\n' "$1" "$2" "$4"
+# A relaunch the host resource gate refuses - before the attempt here, or inside
+# bin/fm-control.sh, which exits 75 whether it refused before or after its stop
+# (a parked lane's agent is already stopped) - holds the lane like failing
+# checks do: one held episode, published once, and no tick ever retries it, so
+# an overloaded host can never be fed by automatic review relaunches. A lane
+# already held, or already waiting on resume_error, keeps its record as it is.
+# The caller holds the lane lock.
+resume_refused() {  # <id> <trigger>
+  local id=$1 reason now
+  reason="relaunch refused by the host resource gate ($2)"
+  echo "deferred: $id was not relaunched: this host is overloaded; the lane stays parked and held, and nothing retries it - resume it by hand with bin/fm-park.sh resume $id --trigger <text> once the host is back under the host gate's limits (bin/fm-capacity.sh --host-gate)" >&2
+  [ -z "$(record_get "$id" held)" ] && [ -z "$(record_get "$id" resume_error)" ] || return 0
+  now=$(date +%s)
+  record_write "$id" "pr=$(record_get "$id" pr)" "head=$(record_get "$id" head)" \
+    "parked_at=$(record_get "$id" parked_at)" "slot_leased=$(record_get "$id" slot_leased)" \
+    "held=$now" "held_reason=$reason" || return 0
+  status_append "$id" "paused [at=$now]: parked on review and held: PR $(record_get "$id" pr) - $reason; nothing retries it, run bin/fm-park.sh resume $id --trigger <text> once the host has room"
+  publish_held "$id" || return 0
 }
 
 cmd_resume() {
-  local id=${1-} trigger pr head note out rc=0 rec
+  local id=${1-} trigger pr head note out rc=0 gate_rc=0 rec
   task_id_ok "$id" || die "usage: fm-park.sh resume <task-id> --trigger <text>" 2
   shift
   [ "${1-}" = --trigger ] && [ -n "${2-}" ] || die "usage: fm-park.sh resume <task-id> --trigger <text>" 2
@@ -712,18 +720,20 @@ cmd_resume() {
     printf 'You are a fresh agent relaunched in the same local copy on the same branch because: %s.\n' "$trigger"
     printf 'Read the PR and its new review activity, address it on this branch, then report again exactly as your instructions define done.\n'
   } > "$note"
-  # An overloaded host defers before anything is announced or attempted.
-  if ! "$HOST_GATE_BIN" --host-gate </dev/null >/dev/null 2>&1; then
-    resume_deferred "$id" "$pr" "$head" "$trigger"
-    return 0
+  # An overloaded host refuses before anything is announced or attempted. Any
+  # other gate failure is left to bin/fm-control.sh, which refuses with it.
+  "$HOST_GATE_BIN" --host-gate </dev/null >/dev/null 2>&1 || gate_rc=$?
+  if [ "$gate_rc" -eq 75 ]; then
+    resume_refused "$id" "$trigger"
+    return 75
   fi
   # Written before the launch, so the fresh worker's own reports always follow
   # it; while the record stays, crew state still reads the record, not this.
   status_append "$id" "working [at=$(date +%s)]: relaunched from review park: $trigger"
   out=$(FM_HOME=$FM_HOME fm_run_timed "$ACTION_SECS" "$CONTROL_BIN" "$id" relaunch --note-file "$note" 2>&1) || rc=$?
   if [ "$rc" -eq 75 ]; then
-    resume_deferred "$id" "$pr" "$head" "$trigger"
-    return 0
+    resume_refused "$id" "$trigger"
+    return 75
   fi
   if [ "$rc" -ne 0 ]; then
     record_write "$id" "pr=$pr" "head=$head" "parked_at=$(record_get "$id" parked_at)" \
