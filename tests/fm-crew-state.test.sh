@@ -2652,8 +2652,18 @@ test_ship_candidate_does_not_read_done() {
   assert_contains "$out" "state: blocked" "a current PR candidate must count even when the run omits its PR"
   printf 'done: implementation complete\n' > "$d/state/candidate.status"
   out=$(FM_HOME="$d" run_crew_state "$d" candidate)
-  assert_contains "$out" "state: done" "skipping publication leaves no PR to accept"
-  assert_contains "$out" "publication/CI verification skipped" "the run must retain its skip detail"
+  assert_contains "$out" "state: paused" "deliberate publication skip is a separate state"
+  assert_contains "$out" "publication skipped, so there is no PR to accept" "the run must retain its skip detail"
+
+  printf 'working: validating changes\n' > "$d/state/candidate.status"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/candidate)"
+  FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS//https:\/\/github.com\/o\/r\/pull\/1/}
+  out=$(FM_HOME="$d" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: blocked" "terminal publishing run without a PR identity"
+  assert_contains "$out" "run completed without a PR identity" "an unexplained missing PR should be visible"
+  FM_FAKE_AXI_STATUS="$(run_running fm/candidate)"
+  out=$(FM_HOME="$d" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: working" "acceptance must leave pre-publication validation running"
 
   sed 's/^mode=no-mistakes$/mode=local-only/' "$d/state/candidate.meta" > "$d/local.meta"
   mv "$d/local.meta" "$d/state/candidate.meta"

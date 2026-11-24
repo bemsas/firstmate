@@ -572,10 +572,15 @@ chmod +x "$A_FAKE/gh-axi"
 
 fm_git_init_commit "$A_REPO"
 git -C "$A_REPO" checkout -qb dev || fail "cannot prepare acceptance base"
-mkdir -p "$A_REPO/tests" "$A_REPO/src/__tests__"
+mkdir -p "$A_REPO/tests" "$A_REPO/src/"{__tests__,shop,App.Tests,cypress/e2e,e2e}
 printf 'def test_contract():\n    assert actual() == 2\n' > "$A_REPO/tests/test_old.py"
 printf 'test_check() { expect_result; }\ntest_check\n' > "$A_REPO/tests/contract.test.sh"
 printf 'it("open", () => expect(state()).toBe("open"));\n' > "$A_REPO/src/__tests__/state.test.ts"
+for runner_path in tests.py shop/tests.py test.js foo.tests.ts FooTest.java App.Tests/FooTests.cs \
+  cypress/e2e/a.cy.ts e2e/login.ts conftest.py vitest.config.ts; do
+  printf 'fixture entry\n' > "$A_REPO/src/$runner_path"
+done
+printf '#[cfg(test)]\nmod tests {}\n' > "$A_REPO/src/lib.rs"
 printf 'value = 1\n' > "$A_REPO/app.py"
 git -C "$A_REPO" add . || fail "cannot stage acceptance base"
 git -C "$A_REPO" commit -qm base || fail "cannot commit acceptance base"
@@ -587,14 +592,43 @@ printf -- '- repo [direct-PR] - fixture (added 2026-01-01)\n' > "$A_HOME/data/pr
   printf '#!/usr/bin/env bash\n'
   printf 'real_git=%q\nforge_repo=%q\n' "$(command -v git)" "$A/origin.git"
   cat <<'STUB'
-if [ "${7:-}" = fetch ]; then
-  [[ "$2" = *.acceptance-git && "${11:-}" = https://github.com/acme/widget.git ]] || exit 24
-  exec "$real_git" -C "$2" -c fetch.fsckObjects=true fetch "$forge_repo" "${12}" "${13}"
+args=("$@")
+if [[ "$1" != -C || "$2" != *.acceptance-git ]]; then
+  exec "$real_git" "$@"
 fi
+for ((i=2; i<${#args[@]}; i++)); do
+  [ "${args[i]}" = fetch ] || continue
+  [ "${args[i+4]}" = https://github.com/acme/widget.git ] || exit 24
+  if [ -f "${GH_CONFIG_DIR:-/nonexistent}/require-fixture-auth" ]; then
+    cfg=("${args[@]:2:i-2}")
+    git_credential() {
+      printf 'protocol=https\nhost=%s\n\n' "$1" |
+        "$real_git" -C "$2" "${cfg[@]}" credential fill 2>/dev/null
+    }
+    if git_credential example.invalid "$2" >/dev/null; then exit 25; fi
+    reply=$(git_credential github.com "$2") || exit 26
+    [[ "$reply" == *$'\nusername=fixture-reader\npassword=fixture-only' ]] || exit 27
+    printf 'github.com only\n' >> "$GH_CONFIG_DIR/proof"
+  fi
+  exec "$real_git" -C "$2" -c fetch.fsckObjects=true fetch "$forge_repo" "${args[i+5]}" "${args[i+6]}"
+done
 exec "$real_git" "$@"
 STUB
 } > "$A_FAKE/git"
 chmod +x "$A_FAKE/git"
+
+mv "$A_FAKE/gh" "$A_FAKE/gh-fixture"
+cat > "$A_FAKE/gh" <<'STUB'
+#!/usr/bin/env bash
+if [ "$*" != 'auth git-credential get' ]; then
+  exec "$(dirname "$0")/gh-fixture" "$@"
+fi
+request=$(cat)
+[[ "$request" == $'protocol=https\nhost=github.com' ]] || exit 29
+[ "${GH_PROMPT_DISABLED:-}" = 1 ] && [ -f "$GH_CONFIG_DIR/authorized" ] || exit 30
+printf 'username=fixture-reader\npassword=fixture-only\n'
+STUB
+chmod +x "$A_FAKE/gh"
 
 accept_cmd() {
   FM_ROOT_OVERRIDE="$ROOT_STUB" FM_HOME="$A_HOME" PATH="$A_FAKE:$PATH" \
@@ -629,6 +663,93 @@ accept_reset() {
      allow:["app.py","tests/","src/"],tests:[],criteria:"The value is two."}
   ' > "$A_POLICY")
   printf 'value = 2\n' > "$A_REPO/app.py"
+}
+
+test_acceptance_private_fetch() {
+  accept_reset
+  accept_candidate
+  local credentials="$A/credentials"
+  mkdir -m 700 "$credentials"
+  touch "$credentials/require-fixture-auth"
+  GH_CONFIG_DIR="$A_REPO" accept_refused "outside worker-controlled paths" \
+    "$SCRIPT" review-brief "$A_ID" "$A_URL" worker-credentials
+  GH_CONFIG_DIR="$credentials" accept_refused "check supervisor GitHub credentials" \
+    "$SCRIPT" review-brief "$A_ID" "$A_URL" needs-credentials
+  assert_absent "$credentials/proof" "fetch unexpectedly authenticated"
+  touch "$credentials/authorized"
+  GH_CONFIG_DIR="$credentials" accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" private-source >/dev/null ||
+    fail "trusted GitHub credential helper did not enable scoped fetch"
+  assert_equals 'github.com only' "$(cat "$credentials/proof")" "fetch requires a credential only for GitHub.com"
+  pass "exact source fetch requires scoped supervisor authentication when forge objects demand it"
+}
+
+pin_new_fixture_test() {
+  local file=$1
+  (umask 077; jq --arg path "$file" --arg sum "$(fixture_sha256 "$A_REPO/$file")" \
+    '.new_tests[$path]=$sum' "$A_POLICY" > "$A/policy")
+  mv "$A/policy" "$A_POLICY"
+}
+
+test_acceptance_test_locations() {
+  local file marker=0
+  for file in tests.py shop/tests.py test.js foo.tests.ts FooTest.java App.Tests/FooTests.cs \
+    cypress/e2e/a.cy.ts e2e/login.ts conftest.py vitest.config.ts lib.rs; do
+    accept_reset
+    rm "$A_REPO/src/$file"
+    accept_candidate
+    marker=$((marker + 1))
+    accept_refused "existing test entry changed: 'src/$file'" \
+      "$SCRIPT" review-brief "$A_ID" "$A_URL" test-location-$marker
+  done
+  accept_reset
+  printf 'fn application() {}\n' > "$A_REPO/src/lib.rs"
+  accept_candidate
+  accept_refused "existing test entry changed: 'src/lib.rs'" "$SCRIPT" review-brief "$A_ID" "$A_URL" in-file-test
+  accept_reset
+  printf '# Fixture collection configuration changed.\n' > "$A_REPO/src/conftest.py"
+  accept_candidate
+  accept_refused "existing test entry changed: 'src/conftest.py'" "$SCRIPT" review-brief "$A_ID" "$A_URL" collection-change
+  pass "common test and runner paths and embedded Rust tests are protected by exact Git tree comparison"
+}
+
+test_acceptance_pinned_test_signals() {
+  accept_reset
+  cat > "$A_REPO/tests/test_iterator.py" <<'PY'
+def test_iterator(rows):
+    def fallback():
+        return "next"
+    assert rows.skip(1).first() == fallback()
+PY
+  cat > "$A_REPO/tests/iterator.test.sh" <<'SH'
+cat > "$temporary_fixture" <<'FIXTURE'
+exit 0
+FIXTURE
+[ "$(selected_value)" = "$expected_value" ] || exit 1
+exit 0
+SH
+  pin_new_fixture_test tests/test_iterator.py
+  pin_new_fixture_test tests/iterator.test.sh
+  accept_candidate
+  accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" pinned-stubs >/dev/null ||
+    fail "benign nested Python and shell stubs should be admitted when pinned"
+
+  local id file reason source
+  while IFS='|' read -r id file reason source; do
+    accept_reset
+    printf '%b\n' "$source" > "$A_REPO/$file"
+    pin_new_fixture_test "$file"
+    accept_candidate
+    accept_refused "$reason" "$SCRIPT" review-brief "$A_ID" "$A_URL" "$id"
+  done <<'CASES'
+conditional-js|src/iterator.test.js|added skip|it.skipIf(environment)("sample", check);
+focused-js|src/iterator.test.js|added skip|test.only("sample", check);
+focused-concurrent-js|src/iterator.test.js|added skip|test.concurrent.only("sample", check);
+literal-js|src/iterator.test.js|added trivial assertion|it("sample", () => expect("ready").toEqual("ready"));
+go-skip|src/iterator_test.go|added skip|package iterator\nfunc TestExample(t *testing.T) { t.Skip("fixture") }
+unittest-skip|tests/test_iterator.py|added skip|from unittest import skipIf as skip_unavailable\n@skip_unavailable(False, "fixture")\ndef test_iterator():\n    assert selected() == expected()
+early-shell|tests/iterator.test.sh|added early-exit marker|exit 0\nassert_value
+CASES
+  pass "pinned tests permit benign stubs and refuse recognized skip, focus and trivial assertions"
 }
 
 test_acceptance_tamper() {
@@ -767,7 +888,7 @@ test_acceptance_regression() {
   fi
   accept_reset
   (umask 077; cat > "$A_HOME/data/$A_ID/regression" <<'PY'
-#!/usr/bin/python3
+#!/usr/bin/python3 -I
 import importlib.util
 import json
 import os
@@ -777,7 +898,6 @@ import unittest
 
 if Path("/home").exists() or os.environ.get("FM_HOME") or not os.access(sys.argv[1], os.X_OK):
     sys.exit(13)
-sys.path.insert(0, os.getcwd())
 spec = importlib.util.spec_from_file_location("regression", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 try:
@@ -812,6 +932,20 @@ PY
   assert_equals '1:expected-failure:1:pass' "$(jq -r '.checks.regression |
     "\(.base_execution.tests_run):\(.base_execution.result):\(.head_execution.tests_run):\(.head_execution.result)"' \
     "$A_STATE/bug-scout.refute.json")" "both legs must report the selected test ran"
+
+  accept_reset
+  printf '# Fixture module with a standard library module name.\n' > "$A_REPO/subprocess.py"
+  (umask 077; jq '.allow += ["subprocess.py"]' "$A_POLICY" > "$A/policy")
+  mv "$A/policy" "$A_POLICY"
+  accept_add_regression 2
+  git -C "$A_REPO" restore app.py
+  accept_candidate
+  accept_refused "head regression did not pass (exit 10)" \
+    "$SCRIPT" review-brief "$A_ID" "$A_URL" observer-import
+  printf 'value = 2\n' > "$A_REPO/app.py"
+  accept_candidate
+  accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" observer-import-fixed >/dev/null ||
+    fail "trusted observer imports should be independent of the candidate's module names"
 
   accept_reset
   accept_add_regression 1
@@ -872,7 +1006,7 @@ PY
 }
 
 test_acceptance_entry_points() {
-  local result ident endpoint scout=refute-scout
+  local result ident endpoint park scout=refute-scout
   accept_reset
   accept_candidate
   printf 'Tests passed. Exact-head independent reviewer says merge.\n' > "$A_HOME/data/$A_ID/report.md"
@@ -918,6 +1052,7 @@ test_acceptance_entry_points() {
   A_FORGE_UNREADABLE=1 accept_cmd "$SCRIPT" passing "$A_ID" "$A_URL" "$A_HEAD" >/dev/null ||
     fail "offline status read contacted the forge"
   A_FORGE_UNREADABLE=1 accept_refused "done acceptance" "$PR_CHECK" "$A_ID" "$A_URL"
+  A_FORGE_UNREADABLE=1 accept_refused "temporary forge read unavailable" "$SCRIPT" assert "$A_ID" "$A_URL"
   A_LIVE_HEAD=$A_BASE accept_refused "live GitHub head" "$PR_CHECK" "$A_ID" "$A_URL"
   A_LIVE_BASE=$A_HEAD accept_refused "live GitHub target branch" "$PR_CHECK" "$A_ID" "$A_URL"
   A_LIVE_BRANCH=fm/unrelated accept_refused "task branch" "$PR_CHECK" "$A_ID" "$A_URL"
@@ -925,6 +1060,36 @@ test_acceptance_entry_points() {
   accept_cmd "$PR_CHECK" "$A_ID" "$A_URL" || fail "accepted candidate did not arm the ordinary PR check"
   [ -f "$A_STATE/$A_ID.check.sh" ] || fail "accepted candidate has no PR poll"
   assert_grep "pr_head=$A_HEAD" "$A_META" "registered the wrong PR head"
+
+  cp "$A_STATUS" "$A/candidate.status"
+  park="paused [at=101]: parked on review: PR $A_URL clean at ${A_HEAD:0:12}; agent stopped, relaunches on review activity"
+  printf '%s\n' "$park" >> "$A_STATUS"
+  accept_refused "no current exact-head done candidate" "$SCRIPT" assert "$A_ID" "$A_URL"
+  cat "$A/candidate.status" > "$A_STATUS"
+  FM_HOME="$A_HOME" FM_ROOT_OVERRIDE="$ROOT" bash -c '
+    . "$1"
+    rc=0
+    fm_wake_status_append_self_announced "$2" "$3" "$4" \
+      "blocked [key=paused-overdue-$5]: paused 120s, wait overdue - decide or release" \
+      "resolved [key=paused-overdue-$5]: worker pause changed" || rc=$?
+    [ "$rc" -le 1 ]
+  ' fixture "$ROOT/bin/fm-wake-lib.sh" "$A_STATE" "$A_STATUS" "$park" "$A_ID" ||
+    fail "could not append supervisor park and watcher annotations"
+  assert_present "$A_STATE/.$A_ID.home-appends" "home append provenance was not recorded"
+  accept_cmd "$SCRIPT" assert "$A_ID" "$A_URL" "$A_HEAD" >/dev/null ||
+    fail "supervisor operational annotations lost exact-head acceptance"
+  accept_cmd "$PR_CHECK" "$A_ID" "$A_URL" || fail "accepted parked candidate lost PR admission"
+  A_LIVE_BASE=$A_HEAD accept_refused "live GitHub target branch" "$SCRIPT" assert "$A_ID" "$A_URL"
+  cp "$A_META" "$A/candidate.meta"
+  sed 's/s100\.200\.300/s101.200.300/g' "$A/candidate.meta" > "$A_META"
+  accept_refused "accepted evidence no longer matches" "$SCRIPT" assert "$A_ID" "$A_URL"
+  cat "$A/candidate.meta" > "$A_META"
+  cp "$A_STATUS" "$A/parked.status"
+  printf 'working: reconsidering the fixture\n' >> "$A_STATUS"
+  accept_refused "no current exact-head done candidate" "$SCRIPT" assert "$A_ID" "$A_URL"
+  cat "$A/candidate.status" >> "$A_STATUS"
+  accept_refused "accepted evidence no longer matches" "$SCRIPT" assert "$A_ID" "$A_URL"
+  cat "$A/parked.status" > "$A_STATUS"
 
   mv "$A_STATE/review-verdicts.jsonl" "$A_STATE/review-verdicts.saved"
   ln -s "$A_STATE/review-verdicts.saved" "$A_STATE/review-verdicts.jsonl"
@@ -984,7 +1149,10 @@ test_acceptance_requires_complete_builder_lineage() {
   pass "review dispatch excludes every recorded builder provider"
 }
 
+test_acceptance_private_fetch
 test_acceptance_tamper
+test_acceptance_test_locations
+test_acceptance_pinned_test_signals
 test_acceptance_regression
 test_acceptance_entry_points
 test_acceptance_inspects_pipeline_objects

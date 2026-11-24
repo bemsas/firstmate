@@ -303,7 +303,14 @@ record_write() {  # <id> <key=value>...
 }
 
 status_append() {  # <id> <line>
-  printf '%s\n' "$2" >> "$STATE/$1.status"
+  local rc=0
+  if [[ "$2" != paused\ * ]]; then
+    printf '%s\n' "$2" >> "$STATE/$1.status"
+    return
+  fi
+  fm_wake_status_append_self_announced "$STATE" "$STATE/$1.status" "$2" || rc=$?
+  # An append can land before the wake cursor catches up.
+  [ "$rc" -le 1 ]
 }
 
 review_bots_json() {

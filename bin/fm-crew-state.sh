@@ -316,17 +316,22 @@ emit_run() {  # <state> <detail> [pr]
     if [ "$(status_line_verb "$LOG_LINE")" = "done" ]; then
       candidate=$(fm_dod_pr_url_from_done_note "$(status_line_note "$LOG_LINE")") || candidate=
     fi
-    # A terminal run can legitimately skip publication. A PR from either
-    # the run or the current worker report needs acceptance before delivery.
     pr=${pr:-$candidate}
-    if [ "$mode" != local-only ] && [ -n "$pr" ] &&
-      fm_dod_acceptance_required "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$ID" "$pr" &&
-      ! { [ "$pr" = "$candidate" ] &&
+    if [ "$mode" != local-only ] &&
+      fm_dod_acceptance_required "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$ID" "$pr"; then
+      if [ -z "$pr" ]; then
+        if [ "${RUN_PUBLICATION_SKIPPED:-0}" = 1 ]; then
+          emit paused run-step "validation passed; publication skipped, so there is no PR to accept"
+        fi
+        emit blocked run-step "run completed without a PR identity for supervisor acceptance"
+      fi
+      if ! { [ "$pr" = "$candidate" ] &&
         fm_dod_candidate_fields "$(status_line_note "$LOG_LINE")" &&
         fm_dod_should_gate_ship_done "$KIND" "$mode" "$LOG_LINE" &&
         fm_dod_accept_ship_done "$KIND" "$mode" "$WT" "$(meta_value project)" \
           "$LOG_LINE" "$STATE" "$ID" "$META" >/dev/null; }; then
-      emit blocked run-step "ship delivery awaits supervisor acceptance for its exact head"
+        emit blocked run-step "ship delivery awaits supervisor acceptance for its exact head"
+      fi
     fi
   fi
   case "$1" in
@@ -1364,6 +1369,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATE=working
   RUN_DETAIL=""
   RUN_PR=""
+  RUN_PUBLICATION_SKIPPED=0
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
   RUN_STATUS=""
@@ -1417,7 +1423,11 @@ if [ "$HAVE_RUN" = 1 ]; then
     if [ -n "$outcome" ]; then
       case "$outcome" in
         passed|passed-with-override) RUN_STATE="done"; RUN_DETAIL=$(passed_pr_detail) ;;
-        passed-with-skips) RUN_STATE="done"; RUN_DETAIL="$(passed_pr_detail) (publication/CI verification skipped)" ;;
+        passed-with-skips)
+          RUN_STATE="done"; RUN_DETAIL="$(passed_pr_detail) (publication/CI verification skipped)"
+          case "$(strip_quotes "$(nm_field automatic_skips)")" in
+            "publication skipped:"*) RUN_PUBLICATION_SKIPPED=1 ;;
+          esac ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else

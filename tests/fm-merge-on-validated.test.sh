@@ -542,6 +542,40 @@ test_live_reports_a_refused_merge() {
   pass "live mode reports a merge the guarded script refused"
 }
 
+test_live_final_acceptance_read_retries() {
+  local dir
+  dir=$(live_case final-acceptance-read 0)
+  SCAN_BIN="$dir/bin/fm-merge-on-validated.sh"
+  cat >> "$dir/bin/fm-pr-merge.sh.retry" <<'SH'
+#!/usr/bin/env bash
+dir=$(dirname "$(dirname "$0")")
+first="$dir/final-attempt"
+if [ ! -e "$first" ]; then
+  touch "$first"
+  echo 'error: done acceptance: temporary forge read unavailable' >&2
+  exit 1
+fi
+echo 'error: done acceptance: live GitHub target branch differs from the pinned base' >&2
+printf 'second\n' >> "$first"
+exit 1
+SH
+  mv "$dir/bin/fm-pr-merge.sh.retry" "$dir/bin/fm-pr-merge.sh"
+  chmod +x "$dir/bin/fm-pr-merge.sh"
+  prime "$dir"
+  append_status "$dir" "$(validated_line)"
+  scan "$dir"
+  expect_code 0 "$SCAN_RC" "temporary final acceptance read"
+  assert_present "$dir/final-attempt" "validated candidate did not reach the final guard"
+  scan "$dir"
+  expect_code 0 "$SCAN_RC" "permanent final acceptance refusal"
+  assert_equals second "$(cat "$dir/final-attempt")" "temporary final guard refusal lost the validated candidate"
+  scan "$dir"
+  assert_equals second "$(cat "$dir/final-attempt")" "permanent final guard refusal retained the validated candidate"
+  assert_no_grep "pr merge" "$dir/gh.log" "unproved acceptance reached the forge merge"
+  SCAN_BIN=
+  pass "final acceptance forge read failure retries while a permanent mismatch drops the pending line"
+}
+
 test_live_failing_test_never_calls_the_merge() {
   local dir
   dir=$(live_case live-failing-test 0)
@@ -950,5 +984,6 @@ test_unknown_mergeable_is_reread
 test_closed_pull_request_is_not_reread_for_unknown
 test_live_merges_through_fm_pr_merge
 test_live_reports_a_refused_merge
+test_live_final_acceptance_read_retries
 test_live_failing_test_never_calls_the_merge
 test_arm_and_disarm

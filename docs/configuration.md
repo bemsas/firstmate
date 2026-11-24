@@ -1155,24 +1155,29 @@ The worker's ready report submits a candidate with `head <full SHA>` after the U
 Worker completion and legacy checklist results can still be inspected.
 Current-state reads, PR registration and the merge path require acceptance for the candidate.
 The no-mistakes pre-validation handoff can start its ordinary pipeline while current state still shows a candidate awaiting acceptance.
+A terminal publishing run without a PR identity remains blocked.
+When the pipeline explicitly skips publication and there is no current PR candidate, it reports a pause and explains what was skipped.
 Registration and merge also check the live PR identity and read the target branch tip directly.
 Accepting a candidate confers no merge authority.
 
 The policy contains `repo` (same GitHub owner/repository for source and target), `base_branch`, `base` (full commit), `kind` (`feature` or `bug`), `allow` (allowed repository paths), `tests` (additional test paths, possibly empty), and `criteria` (approved task criteria).
 Path entries match literally, with a trailing slash for a directory prefix.
-Ordinary test/spec locations are checked in addition to the declared test paths.
+Default test locations cover test, spec and end-to-end directories, common framework file names and suffixes, and dedicated runner and collection configuration such as `conftest.py`, `pytest.ini` and `vitest.config.ts`.
+Recognized in-file declarations in Rust, Go, Python, Java, Kotlin and C# also protect their containing files.
 The scope check compares exact committed tree entries, including gitlinks and both paths of a rename.
-Existing test entries are held for every format, including changes to an invocation, assertion, collection behavior, mode, or path.
+Any change to an existing recognized or declared test entry is held, including mixed application and test files.
+Declare additional test and runner paths in the policy where repository conventions differ or make classification ambiguous.
 To add a new test, pin the supervisor-approved bytes in optional `new_tests` (a map from relative path to SHA-256), or use the bug regression pin below.
-New Python tests additionally check common collection overrides, returns inside test functions, skip markers and simple literal assertions.
-New shell tests check common skip and early-exit markers and literal comparisons.
-New JavaScript and TypeScript tests check common skip/todo forms and equal-literal expectations.
-An approved byte pin requires an independent assessment of the new test and the remaining review covers behavior beyond these static patterns.
+New Python tests check common collection overrides, returns in the test body, qualified pytest and unittest skip markers, and simple literal assertions.
+New shell tests check common skip markers, early top-level exits, and literal comparisons.
+New JavaScript and TypeScript tests check common skip, focus and todo forms and matching literal expectations. New Go tests check common skip calls.
+These static checks recognize specific patterns. The supervisor and independent reviewer assess the pinned test's behavior.
 
 For a bug fix, add a `regression` object with `path`, `test_sha256` and `runner_sha256`.
 The supervisor approves the bytes of a new test file and of the runner at `data/<task>/regression`.
 The runner receives the relative test path as its sole argument.
 Keep the test observer in trusted code, invoke candidate programs in a child process, and capture their outputs separately from the observer's result.
+For a Python observer, use an isolated interpreter such as `python3 -I` and keep the candidate checkout off the observer's import path.
 For the expected assertion failure, exit 10 and emit one JSON object with `test` set to the supplied path, `tests_run` set to the integer 1, and `result` set to `expected-failure`.
 For a passing execution, exit 0 and use `result: "pass"` with the same path and count.
 Return another exit for skips, unexecuted tests, unexpected failures, and infrastructure or collection errors.
@@ -1182,14 +1187,17 @@ It supports ordinary files and symlinks in the snapshot, with no submodule mater
 
 Use `bin/fm-done-check.sh review-brief <task> <pr-url> <fresh-scout-id>` to check the candidate and prepare the reviewer brief.
 The supervisor reads both commits from an owned bare repository populated by a noninteractive fetch of the exact pins from GitHub.
-Unavailable forge objects keep the candidate on hold.
+For private repositories, that fetch uses the supervisor's GitHub CLI credentials for `https://github.com`.
+It uses the supervisor's `GH_CONFIG_DIR` or default GitHub CLI configuration, or a supervisor-provided `GH_TOKEN` or `GITHUB_TOKEN`. Use a configuration directory outside worker-controlled paths.
+The fetch disables redirects and never loads configuration from the worker's repository. Missing credentials, repository access or objects keep the candidate on hold.
 Use the native `bin/fm-spawn.sh` scout path with a new ID and an explicit Codex GPT or Claude model from a provider absent from the builder's complete dispatch lineage.
 Each native dispatch appends its identity to the lineage, including on a harness switch or relaunch.
 Missing, implicit, ambiguous or unavailable model history leaves the candidate on hold, as does a lineage that has used both supported providers.
 The reviewer receives the approved criteria and pinned commits and tries to refute completion.
 After reading the scout's report, the supervisor records its exact verdict with `bin/fm-review-verdict.sh refute <task> <scout> <reviewed-head>` and verifies with `bin/fm-done-check.sh accept <task> <pr-url>`.
-The acceptance record binds the task incarnation, policy, base, candidate, executed evidence and latest qualifying review.
-A new head, a change to the live base commit, a policy change or a new task incarnation requires fresh review and acceptance.
+The acceptance record binds the task incarnation, policy, base, exact candidate event, executed evidence and latest qualifying review.
+Supervisor-recorded operational pauses, review parks and overdue annotations preserve that event when their append provenance is present.
+A newer worker event, a new head, a change to the live base commit, a policy change or a new task incarnation requires fresh review and acceptance.
 If the target advances, approve and pin the new base, then publish and report an exact-head candidate that includes it before requesting fresh review and acceptance.
 Normal project capacity applies to the reviewer, so leave room for its scout while the candidate ship is still assigned.
 

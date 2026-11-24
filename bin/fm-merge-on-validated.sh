@@ -565,10 +565,12 @@ act_on_verdict() {  # <evaluate-rc> <advance-command...>
     first=$(printf '%s\n' "$out" | grep -m1 -E '^(error|actionable)' | cut -c1-200)
     [ -n "$first" ] || first=$(printf '%s\n' "$out" | head -n 1 | cut -c1-200)
     log_line "merge refused by fm-pr-merge: ${first:-exit $merge_rc} [$EV_URL $EV_SHA]"
-    case "$out" in
-      *UNKNOWN*|*DIRTY*|*[Pp]ending*|*"not green"*|*"head moved"*|*"head changed"*) ;;
-      *) pending_set "" || return 1 ;;
-    esac
+    if ! grep -Fxq 'error: done acceptance: temporary forge read unavailable' <<< "$out"; then
+      case "$out" in
+        *UNKNOWN*|*DIRTY*|*[Pp]ending*|*"not green"*|*"head moved"*|*"head changed"*) ;;
+        *) pending_set "" || return 1 ;;
+      esac
+    fi
     add_wake "fm-pr-merge refused $EV_URL at $EV_SHA (task $EV_TASK): ${first:-exit $merge_rc}"
   fi
 }
