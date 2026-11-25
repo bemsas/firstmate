@@ -1746,6 +1746,7 @@ T3CODE_LAUNCH_UNCONFIRMED=0
 T3CODE_PROJECT_ID=
 T3CODE_MODEL_SELECTION=
 HERDR_LEASED=0
+HERDR_SLOT_MAY_HOLD_WORK=0
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -2031,14 +2032,15 @@ spawn_abort_cleanup() {
   # A durable Herdr lease outlives the pane, unlike the process lease the
   # interactive command used to take, so an abort that leaves no record returns
   # it, whether or not the launch was sent. Only a pane Herdr reports gone and a
-  # copy with no uncommitted work prove nothing is left to inspect there; any
-  # other keeps the lease and names the command, as the pane used to hold the
-  # slot for the operator.
+  # copy with no uncommitted work, whose base was not refused as possibly holding
+  # work, prove nothing is left to inspect there; any other keeps the lease and
+  # names the command, as the pane used to hold the slot for the operator.
   if [ "$HERDR_LEASED" = 1 ] && [ "$status" -ne 0 ] && [ -n "${WT:-}" ] &&
     [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
     HERDR_LEASED=0
     local herdr_slot_status
-    if [ "$SPAWN_ENDPOINT_CLOSED" = 1 ] && fm_backend_herdr_endpoint_confirmed_gone "${T:-}" &&
+    if [ "$HERDR_SLOT_MAY_HOLD_WORK" = 0 ] &&
+      [ "$SPAWN_ENDPOINT_CLOSED" = 1 ] && fm_backend_herdr_endpoint_confirmed_gone "${T:-}" &&
       herdr_slot_status=$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null) &&
       [ -z "$herdr_slot_status" ] &&
       (cd "$PROJ_ABS" && treehouse return --force "$WT") >/dev/null 2>&1; then
@@ -2048,14 +2050,16 @@ spawn_abort_cleanup() {
     fi
   fi
   # A spawn that aborts after claiming its slot but before its record survives
-  # must not leave a claim naming a task no record describes. The release is a
+  # must not leave a claim naming a task no record describes, except on a Herdr
+  # slot refused as possibly holding work: its kept lease and claim are what that
+  # work is recovered by. The release is a
   # read-then-remove, so it runs only while the project lock that wrote the
   # claim is still held (aborts before metadata publication); a later abort has
   # already released that lock and leaves the claim for the next spawn's
   # atomic replacement rather than racing it. A polytoken spawn instead retakes
   # that lock once for a later failure whose record was rolled back. The
   # release itself never removes another task's claim.
-  if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ -n "${WT:-}" ] &&
+  if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ "$HERDR_SLOT_MAY_HOLD_WORK" = 0 ] && [ -n "${WT:-}" ] &&
     [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] &&
     fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
     SPAWN_SLOT_CLAIMED=0
@@ -6480,7 +6484,13 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != t3code ]; then
-  freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || exit 1
+  freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || {
+    # A refused slot that may hold work keeps its durable lease; a forced return discards.
+    if [ "$?" -eq 2 ] && [ "$HERDR_LEASED" = 1 ]; then
+      HERDR_SLOT_MAY_HOLD_WORK=1
+    fi
+    exit 1
+  }
 fi
 
 # Re-assert the durable task copy after either treehouse acquisition or endpoint
