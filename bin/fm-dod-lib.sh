@@ -952,11 +952,51 @@ fm_dod_pr_url_from_done_note() {  # <note>
   printf '%s\n' "$url"
 }
 
+# An enabled home checks GitHub.com candidates, plus any task with a pinned
+# policy even if its ready report omits the URL or reports another forge.
+fm_dod_acceptance_enabled() {  # <config>
+  [ -e "$1/done-acceptance" ] || [ -L "$1/done-acceptance" ]
+}
+
+fm_dod_acceptance_required() {  # <config> <task> <canonical-url>
+  fm_dod_acceptance_enabled "$1" || return 1
+  if ( ! fm_pr_url_parse "$3" || [ "$FM_PR_HOST" = github.com ] ); then return 0; fi
+  [ -e "$1/done-acceptance/$2.json" ] || [ -L "$1/done-acceptance/$2.json" ]
+}
+
+# One immutable lineage entry per native dispatch. Unsupported or implicit
+# identities stay in the history as unknown and cannot later authorize review.
+fm_dod_builder_entry() {  # <generation> <harness> <model> <raw-launch>
+  if [ "$4" = 0 ] && [[ "$2:$3" =~ ^(codex:gpt-[0-9]|claude:claude-[a-z0-9]+-[0-9])[a-z0-9.-]*$ ]]; then
+    printf '%s:%s:%s\n' "$1" "$2" "$3"
+  else
+    printf '%s:unknown:unknown\n' "$1"
+  fi
+}
+
+fm_dod_candidate_note() {  # <config> <mode>
+  if fm_mode_publishes "$2" && fm_dod_acceptance_enabled "$1"; then
+    # shellcheck disable=SC2016 # Backticks are Markdown shown to the worker.
+    printf '\nFor a GitHub.com PR, add `head <full forge head SHA>` to the ready done report after the URL or `checks green`, before any proof rider. This submits the exact candidate for supervisor acceptance.\n'
+  fi
+}
+
+fm_dod_candidate_fields() {  # <note>
+  local pattern='^PR (https://github\.com/[^[:space:]]+/pull/[1-9][0-9]*)( checks green)? head ([0-9a-f]{40})( proof=[^[:space:]]+)?$'
+  [[ "$1" =~ $pattern ]] || return 1
+  FM_DOD_CANDIDATE_URL=${BASH_REMATCH[1]}
+  FM_DOD_CANDIDATE_HEAD=${BASH_REMATCH[3]}
+}
+
 # The URL of a note that is exactly a ready report (`PR <url>`, `PR <url> checks
 # green`, or Gerrit's `PR <url> published for review`), or empty. Anything else
 # around the URL is prose, so the caller claims no delivered PR from it.
 fm_dod_ready_note_url() {  # <note>
   local url=$1
+  if fm_dod_candidate_fields "$url"; then
+    printf '%s\n' "$FM_DOD_CANDIDATE_URL"
+    return
+  fi
   case "$url" in 'PR '*) url=${url#PR } ;; *) return 1 ;; esac
   case "$url" in
     *' checks green') url=${url% checks green} ;;
@@ -1239,7 +1279,28 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # pr_head=, and the merge-notified marker; <meta> may be a captured copy
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> [meta-locked]]
-  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit captured=''
+  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit captured='' script_dir home forge='' config
+  [ "$(status_line_verb "$line")" = "done" ] || return 0
+  [ -z "$meta" ] || forge=$(fm_dod_meta_value "$meta" forge) || forge=
+  if [ "${kind:-ship}" = ship ] && [ "$mode" != local-only ] && [ -n "$state" ] && [ -n "$id" ]; then
+    script_dir=$(dirname "${BASH_SOURCE[0]}")
+    home=${FM_HOME:-${state%/*}}
+    config=${FM_CONFIG_OVERRIDE:-$home/config}
+    url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") || url=
+    if { [ "$forge" != external ] || [ -e "$config/done-acceptance/$id.json" ] ||
+      [ -L "$config/done-acceptance/$id.json" ]; } &&
+      fm_dod_acceptance_required "$config" "$id" "$url"; then
+      if fm_dod_candidate_fields "$(status_line_note "$line")" &&
+        { [ -z "$meta" ] || [ "$meta" = "$state/$id.meta" ] ||
+          [ "$(fm_dod_meta_value "$meta" spawn_gen)" = "$(fm_dod_meta_value "$state/$id.meta" spawn_gen)" ]; } &&
+        FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+          "$script_dir/fm-done-check.sh" passing "$id" "$url" "$FM_DOD_CANDIDATE_HEAD" >/dev/null 2>&1; then
+        return 0
+      fi
+      printf '%s\n' 'worker done is a candidate awaiting supervisor acceptance for its exact head'
+      return 1
+    fi
+  fi
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
   if [ "$mode" = local-only ] && [ -n "$meta" ]; then
     captured=$(cat "$meta") || return 1
@@ -1249,7 +1310,7 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
       return 1
     fi
   fi
-  if [ -n "$meta" ] && [ "$(fm_dod_meta_value "$meta" forge)" = external ]; then
+  if [ "$forge" = external ]; then
     fm_dod_accept_external_review_done "$wt" "$project" "$line" "$meta"
     return
   fi

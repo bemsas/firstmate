@@ -542,6 +542,40 @@ test_live_reports_a_refused_merge() {
   pass "live mode reports a merge the guarded script refused"
 }
 
+test_live_final_acceptance_read_retries() {
+  local dir
+  dir=$(live_case final-acceptance-read 0)
+  SCAN_BIN="$dir/bin/fm-merge-on-validated.sh"
+  cat >> "$dir/bin/fm-pr-merge.sh.retry" <<'SH'
+#!/usr/bin/env bash
+dir=$(dirname "$(dirname "$0")")
+first="$dir/final-attempt"
+if [ ! -e "$first" ]; then
+  touch "$first"
+  echo 'error: done acceptance: temporary forge read unavailable' >&2
+  exit 1
+fi
+echo 'error: done acceptance: live GitHub target branch differs from the pinned base' >&2
+printf 'second\n' >> "$first"
+exit 1
+SH
+  mv "$dir/bin/fm-pr-merge.sh.retry" "$dir/bin/fm-pr-merge.sh"
+  chmod +x "$dir/bin/fm-pr-merge.sh"
+  prime "$dir"
+  append_status "$dir" "$(validated_line)"
+  scan "$dir"
+  expect_code 0 "$SCAN_RC" "temporary final acceptance read"
+  assert_present "$dir/final-attempt" "validated candidate did not reach the final guard"
+  scan "$dir"
+  expect_code 0 "$SCAN_RC" "permanent final acceptance refusal"
+  assert_equals second "$(cat "$dir/final-attempt")" "temporary final guard refusal lost the validated candidate"
+  scan "$dir"
+  assert_equals second "$(cat "$dir/final-attempt")" "permanent final guard refusal retained the validated candidate"
+  assert_no_grep "pr merge" "$dir/gh.log" "unproved acceptance reached the forge merge"
+  SCAN_BIN=
+  pass "final acceptance forge read failure retries while a permanent mismatch drops the pending line"
+}
+
 test_live_failing_test_never_calls_the_merge() {
   local dir
   dir=$(live_case live-failing-test 0)
@@ -648,6 +682,10 @@ test_review_verdict_gate() {
   FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$URL" bad merge >/dev/null 2>&1 || rc=$?
   expect_code 2 "$rc" "bad review head"
   rc=0
+  FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$URL" "$HEAD_A${HEAD_B:0:24}" merge >/dev/null 2>&1 || rc=$?
+  expect_code 2 "$rc" "a 64-hex review head the journal reader would refuse"
+  assert_equals 3 "$(wc -l < "$dir/home/state/review-verdicts.jsonl" | tr -d ' ')" "a refused head was recorded"
+  rc=0
   FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$URL" "$HEAD_A" approve >/dev/null 2>&1 || rc=$?
   expect_code 2 "$rc" "bad verdict"
 
@@ -663,6 +701,17 @@ test_review_verdict_gate() {
   append_status "$dir" "$(validated_line)"
   scan "$dir"
   assert_contains "$(log_of "$dir")" "would merge $URL $HEAD_A" "fresh validation after re-review should pass"
+
+  dir=$(make_case refute-fix-verdict)
+  jq -nc --arg pr "$URL" --arg head "$HEAD_A" \
+    '{pr:$pr,head:$head,verdict:"fix",reviewer:"scout",refute:{}}' >> "$dir/home/state/review-verdicts.jsonl"
+  jq -nc --arg pr "$URL" --arg head "$HEAD_A" \
+    '{pr:$pr,head:$head,verdict:"merge",reviewer:"scout",refute:{}}' >> "$dir/home/state/review-verdicts.jsonl"
+  prime "$dir"
+  append_status "$dir" "$(validated_line)"
+  scan "$dir"
+  assert_contains "$(log_of "$dir")" "second-model review says fix" "legacy merge must retain the refute blocker"
+  assert_not_contains "$(log_of "$dir")" "would merge " "a refute merge row is not ordinary approval"
   pass "second-model review is exact-head, exact-PR, latest-record, and fail-closed"
 }
 
@@ -689,6 +738,31 @@ test_test_only_review_exemption() {
     esac
   done
   pass "only a complete test-only diff exempts missing review; renamed source and unreadable lists fail closed"
+}
+
+test_pending_supervisor_acceptance() {
+  local dir
+  dir=$(live_case protected-pending 0)
+  printf '%s\n' dry-run > "$dir/home/config/merge-on-validated"
+  mkdir "$dir/home/config/done-acceptance"
+  rm "$dir/bin/fm-done-check.sh"
+  cat > "$dir/bin/fm-done-check.sh" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = assert ] && [ "$2" = task-a ] && [ "$3" = https://github.com/example/repo/pull/42 ] &&
+  [ "$4" = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ] &&
+  [ -f "$FM_HOME/state/fixture-accepted" ]
+SH
+  chmod +x "$dir/bin/fm-done-check.sh"
+  SCAN_BIN="$dir/bin/fm-merge-on-validated.sh" prime "$dir"
+  append_status "$dir" "$(validated_line)"
+  SCAN_BIN="$dir/bin/fm-merge-on-validated.sh" scan "$dir"
+  assert_present "$dir/home/state/.merge-on-validated.pending" \
+    "missing acceptance dropped the validated line: $(log_of "$dir") $(cat "$dir/stderr")"
+  assert_contains "$(log_of "$dir")" "missing current supervisor acceptance" "acceptance hold was not visible"
+  : > "$dir/home/state/fixture-accepted"
+  SCAN_BIN="$dir/bin/fm-merge-on-validated.sh" scan "$dir"
+  assert_contains "$(log_of "$dir")" "would merge $URL $HEAD_A" "acceptance did not release the original observation"
+  pass "the exact validated line stays pending and automatically sees later supervisor acceptance"
 }
 
 test_pending_retirement() {
@@ -887,6 +961,7 @@ test_retry_after_unreadable_supporting_facts
 test_pending_live_merge_and_revalidation
 test_review_verdict_gate
 test_test_only_review_exemption
+test_pending_supervisor_acceptance
 test_pending_retirement
 test_branch_fallback_ambiguity
 test_branch_fallback
@@ -913,5 +988,6 @@ test_unknown_mergeable_is_reread
 test_closed_pull_request_is_not_reread_for_unknown
 test_live_merges_through_fm_pr_merge
 test_live_reports_a_refused_merge
+test_live_final_acceptance_read_retries
 test_live_failing_test_never_calls_the_merge
 test_arm_and_disarm

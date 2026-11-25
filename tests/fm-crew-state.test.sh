@@ -2608,6 +2608,209 @@ test_no_mistakes_prevalidation_done_stays_done() {
   pass "no-mistakes pre-validation done: stays current-state done"
 }
 
+test_ship_candidate_does_not_read_done() {
+  reset_fakes
+  local d out head before
+  d=$(new_case protected-candidate)
+  make_repo_on_branch "$d/wt" fm/candidate
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/config/done-acceptance"
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  fm_write_meta "$d/state/candidate.meta" "window=fm:fm-candidate" "kind=ship" \
+    "mode=no-mistakes" "worktree=$d/wt" "project=$d/wt" "harness=claude" \
+    "pr=https://github.com/o/r/pull/1" "pr_head=$head"
+  printf 'done: PR https://github.com/o/r/pull/1 checks green head %s\n' "$head" > "$d/state/candidate.status"
+  arm_idle_record "$d/state" candidate
+  before=$(cat "$d/state/candidate.meta")
+  out=$(FM_HOME="$d" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: blocked" "a worker candidate did not establish acceptance"
+  assert_contains "$out" "awaiting supervisor acceptance" "status did not explain the candidate hold"
+
+  printf 'done: PR https://github.com/o/r/pull/1\n' > "$d/state/candidate.status"
+  out=$(FM_HOME="$d" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: blocked" "a PR claim without a head or checks-green rider stays a candidate"
+  printf 'done: implementation complete\n' > "$d/state/candidate.status"
+  out=$(FM_HOME="$d" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: blocked" "a protected pre-validation handoff stays a candidate"
+  sed '/^mode=/d; /^kind=/d' "$d/state/candidate.meta" > "$d/legacy.meta"
+  mv "$d/legacy.meta" "$d/state/candidate.meta"
+  out=$(FM_HOME="$d" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: blocked" "missing legacy mode and kind must not authorize completion"
+  printf '%s\n' "$before" > "$d/state/candidate.meta"
+  printf 'done: PR https://github.com/o/r/pull/1 checks green head %s\n' "$head" > "$d/state/candidate.status"
+
+  FM_FAKE_AXI_STATUS="$(run_passed fm/candidate)"
+  out=$(FM_HOME="$d" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: blocked" "an attributed pipeline pass did not establish acceptance"
+  assert_contains "$out" "source: run-step" "pipeline attribution was lost"
+  assert_equals "$before" "$(cat "$d/state/candidate.meta")" "status read changed task metadata"
+  [ ! -e "$d/state/candidate.accepted.json" ] || fail "status read persisted acceptance"
+
+  FM_FAKE_AXI_STATUS="$(run_passed_with_skips fm/candidate)"
+  FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS//https:\/\/github.com\/o\/r\/pull\/1/}
+  out=$(FM_HOME="$d" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: blocked" "a current PR candidate must count even when the run omits its PR"
+  printf 'done: implementation complete\n' > "$d/state/candidate.status"
+  out=$(FM_HOME="$d" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: paused" "deliberate publication skip is a separate state"
+  assert_contains "$out" "publication skipped, so there is no PR to accept" "the run must retain its skip detail"
+
+  printf 'working: validating changes\n' > "$d/state/candidate.status"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/candidate)"
+  FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS//https:\/\/github.com\/o\/r\/pull\/1/}
+  out=$(FM_HOME="$d" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: blocked" "terminal publishing run without a PR identity"
+  assert_contains "$out" "run completed without a PR identity" "an unexplained missing PR should be visible"
+  FM_FAKE_AXI_STATUS="$(run_running fm/candidate)"
+  out=$(FM_HOME="$d" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: working" "acceptance must leave pre-publication validation running"
+
+  sed 's/^mode=no-mistakes$/mode=local-only/' "$d/state/candidate.meta" > "$d/local.meta"
+  mv "$d/local.meta" "$d/state/candidate.meta"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/candidate)"
+  out=$(FM_HOME="$d" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: done" "an attributed run must not subject a local-only ship to PR acceptance"
+  assert_contains "$out" "source: run-step" "the fixture should read the attributed run"
+  pass "protected status reads keep both a worker done candidate and a pipeline pass unaccepted"
+}
+
+test_protected_run_matches_accepted_head() {
+  reset_fakes
+  local d out run_head candidate url=https://github.com/o/r/pull/1
+  d=$(new_case accepted-run-head)
+  make_repo_on_branch "$d/wt" fm/candidate
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/config/done-acceptance"
+  run_head=$FM_FAKE_RUN_HEAD
+  candidate=$(printf 'different fixture identity\n' | git hash-object --stdin)
+  fm_write_meta "$d/state/candidate.meta" "window=fm:fm-candidate" "kind=ship" \
+    "mode=no-mistakes" "worktree=$d/wt" "project=$d/wt" "harness=claude"
+  # Keep real acceptance coverage in fm-done-check.test.sh. Here both heads
+  # are ordinary fixture values and the offline lookup accepts the named one.
+  cat > "$d/fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */fm-done-acceptance.py ]]; then
+  [ "$#" = 5 ] && [ "$2" = passing ] && [ "$3" = candidate ] &&
+    [ "$4" = https://github.com/o/r/pull/1 ] && [ "$5" = "$FM_FIXTURE_ACCEPTED_HEAD" ]
+  exit
+fi
+exec "$FM_FIXTURE_REAL_PYTHON" "$@"
+SH
+  chmod +x "$d/fakebin/python3"
+  local FM_FIXTURE_REAL_PYTHON
+  FM_FIXTURE_REAL_PYTHON=$(command -v python3)
+  export FM_FIXTURE_REAL_PYTHON
+  arm_idle_record "$d/state" candidate
+  FM_FAKE_AXI_STATUS=$(run_passed fm/candidate)
+
+  printf 'done: PR %s checks green head %s\n' "$url" "$candidate" > "$d/state/candidate.status"
+  out=$(FM_HOME="$d" FM_FIXTURE_ACCEPTED_HEAD="$candidate" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: blocked" "an accepted candidate cannot stand in for a different completed run head"
+  assert_contains "$out" "source: run-step" "the completed run must be attributed for this fixture"
+  assert_contains "$out" "does not match the accepted candidate" "mismatched run head should be visible"
+
+  printf 'done: PR %s checks green head %s\n' "$url" "$run_head" > "$d/state/candidate.status"
+  out=$(FM_HOME="$d" FM_FIXTURE_ACCEPTED_HEAD="$run_head" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: done" "the same full accepted and completed run head remains done"
+  assert_contains "$out" "source: run-step" "the matching run must also be attributed"
+
+  FM_FAKE_AXI_STATUS=$(FM_FAKE_RUN_HEAD="${run_head:0:12}" run_passed fm/candidate)
+  out=$(FM_HOME="$d" FM_FIXTURE_ACCEPTED_HEAD="$run_head" run_crew_state "$d" candidate)
+  assert_contains "$out" "state: blocked" "an abbreviated run head cannot prove exact completion"
+  assert_contains "$out" "source: run-step" "the abbreviated run must also be attributed"
+  pass "protected completed runs require the same full head as the accepted candidate"
+}
+
+# Every supported way an attributed run reads done, with the run at the accepted
+# head and then at a descendant of it (a pipeline fix commit past the candidate).
+test_protected_run_paths_match_accepted_head() {
+  reset_fakes
+  local d wt base next path head run short out expected_source url=https://github.com/o/r/pull/1
+  d=$(new_case accepted-run-paths)
+  wt=$d/wt
+  make_repo_on_branch "$wt" fm/candidate
+  base=$FM_FAKE_RUN_HEAD
+  next=$(git -C "$wt" commit-tree -p "$base" -m 'pipeline fix past the candidate' "$base^{tree}")
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/config/done-acceptance"
+  cat > "$d/fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */fm-done-acceptance.py ]]; then
+  [ "$#" = 5 ] && [ "$2" = passing ] && [ "$5" = "$FM_FIXTURE_ACCEPTED_HEAD" ]
+  exit
+fi
+exec "$FM_FIXTURE_REAL_PYTHON" "$@"
+SH
+  chmod +x "$d/fakebin/python3"
+  local FM_FIXTURE_REAL_PYTHON
+  FM_FIXTURE_REAL_PYTHON=$(command -v python3)
+  export FM_FIXTURE_REAL_PYTHON
+  arm_idle_record "$d/state" candidate
+  printf 'done: PR %s checks green head %s\n' "$url" "$base" > "$d/state/candidate.status"
+
+  for path in captured legacy-mode direct-pr checks-green monitoring coarse coarse-monitoring superseded; do
+    for head in "$base" "$next"; do
+      short=$(git -C "$wt" rev-parse --short=8 "$head")
+      fm_write_meta "$d/state/candidate.meta" "window=fm:fm-candidate" "kind=ship" \
+        "mode=no-mistakes" "worktree=$wt" "project=$wt" "harness=claude"
+      FM_FAKE_RUNS_LIST="" FM_FAKE_CI_LOGS="" expected_source=run-step
+      run=$(FM_FAKE_RUN_HEAD=$head captured_axi_status completed fm/candidate 01RUN |
+        sed "s|^  head: .*|  head: $short|; s|https://github.com/[^ \"]*/pull/[0-9]*|$url|")
+      case "$path" in
+        captured) FM_FAKE_AXI_STATUS=$run ;;
+        legacy-mode|direct-pr)
+          sed "s/^mode=.*/mode=direct-PR/" "$d/state/candidate.meta" > "$d/meta"
+          [ "$path" = direct-pr ] || sed '/^mode=/d' "$d/state/candidate.meta" > "$d/meta"
+          mv "$d/meta" "$d/state/candidate.meta"
+          FM_FAKE_AXI_STATUS=$run ;;
+        checks-green|monitoring)
+          FM_FAKE_AXI_STATUS=$(FM_FAKE_RUN_HEAD=$head run_ci_monitoring fm/candidate |
+            sed "s|/pull/2|/pull/1|")
+          if [ "$path" = checks-green ]; then
+            FM_FAKE_CI_LOGS='all CI checks passed'
+          else
+            expected_source="status-log"
+          fi ;;
+        coarse|coarse-monitoring)
+          FM_FAKE_AXI_STATUS=$(run_running fm/other-crew)
+          FM_FAKE_RUNS_LIST="  completed  fm/candidate $short  2026-08-27 15:20  $url"
+          if [ "$path" = coarse-monitoring ]; then
+            FM_FAKE_RUNS_LIST="  running    fm/candidate $short  2026-08-27 15:20"
+            expected_source="status-log"
+          fi ;;
+        superseded)
+          # The earlier failed run sat on the candidate in both readings; only
+          # the run that replaced it says which commit completed.
+          FM_FAKE_AXI_STATUS=$(FM_FAKE_RUN_HEAD=$base run_failed fm/candidate)
+          FM_FAKE_RUNS_LIST="  completed  fm/candidate $short  2026-08-27 15:20  $url
+  failed     fm/candidate ${base:0:8}  2026-08-27 14:20" ;;
+      esac
+      out=$(FM_HOME="$d" FM_CREW_STATE_NO_FORGE=1 FM_FIXTURE_ACCEPTED_HEAD="$base" run_crew_state "$d" candidate)
+      if [ "$head" = "$base" ]; then
+        assert_contains "$out" "state: done" "$path: the accepted head stays done"
+        assert_contains "$out" "source: $expected_source" "$path: the accepted head keeps its source"
+      else
+        assert_contains "$out" "state: blocked" "$path: a different run head holds"
+        assert_contains "$out" "source: run-step" "$path: the hold names the run"
+        assert_contains "$out" "run head $next does not match the accepted candidate $base" \
+          "$path: the hold names both heads"
+      fi
+    done
+  done
+
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_AXI_STATUS=$(FM_FAKE_RUN_HEAD=$base captured_axi_status completed fm/candidate 01RUN |
+    sed "s|^  head: .*|  head: ${next:0:8}|; s|https://github.com/[^ \"]*/pull/[0-9]*|$url|")
+  out=$(FM_HOME="$d" FM_CREW_STATE_NO_FORGE=1 FM_FIXTURE_ACCEPTED_HEAD="$base" run_crew_state "$d" candidate)
+  assert_contains "$out" "run head (unavailable) does not match" "a record that contradicts itself names no head"
+
+  printf 'done: PR %s checks green head %s\n' "$url" "$next" > "$d/state/candidate.status"
+  FM_FAKE_AXI_STATUS=$(FM_FAKE_RUN_HEAD=$next run_ci_monitoring fm/candidate | sed "s|/pull/2|/pull/1|")
+  out=$(FM_HOME="$d" FM_CREW_STATE_NO_FORGE=1 FM_FIXTURE_ACCEPTED_HEAD="$base" run_crew_state "$d" candidate)
+  assert_contains "$out" "awaiting supervisor acceptance" "an unaccepted candidate still waits for acceptance"
+  pass "every supported completed-run path keeps an accepted head done and holds a different one"
+}
+
 test_moved_remote_branch_without_named_head_is_blocked() {
   reset_fakes
   local d main_sha fix_sha out
@@ -6742,6 +6945,12 @@ test_captured_completed_history() {
   pass 'captured completed status yields to synthetic subsequent development'
 }
 
+if [ "${1:-}" = --accepted-run-head ]; then
+  test_protected_run_matches_accepted_head
+  test_protected_run_paths_match_accepted_head
+  exit
+fi
+
 test_captured_axi_status_shapes
 test_captured_inventory_replay
 test_captured_authority_transition
@@ -6827,6 +7036,9 @@ test_other_branch_run_ignored
 test_unpushed_ship_done_is_blocked
 test_merged_pr_reads_done_under_captured_meta
 test_no_mistakes_prevalidation_done_stays_done
+test_ship_candidate_does_not_read_done
+test_protected_run_matches_accepted_head
+test_protected_run_paths_match_accepted_head
 test_moved_remote_branch_without_named_head_is_blocked
 test_external_review_done_reads_ready
 test_no_run_busy_pane

@@ -1147,6 +1147,81 @@ The checks read the task's brief at `data/<id>/brief.md`: `## Base branch` (or `
 The `proof` check reads no brief section: it reads the ready-report `done:` line in `state/<id>.status` for the visual-proof rider a UI change's Definition of done requires and verifies the named screenshot or video files exist, failing only when the rider is absent and the PR's changed files carry UI extensions.
 `bin/fm-done-check.sh`'s header owns the exact checks, receipt shape, and exit codes.
 
+## Done acceptance (config/done-acceptance/)
+
+Create the home-local `config/done-acceptance/` directory to require supervisor acceptance for GitHub.com ship PRs.
+For each eligible task, the supervisor places a private `<task>.json` in that directory and pins the policy before dispatch.
+The worker's ready report submits a candidate with `head <full SHA>` after the URL or `checks green` and before any visual-proof rider.
+Worker completion and legacy checklist results can still be inspected.
+Current-state reads, PR registration and the merge path require acceptance for the candidate.
+The no-mistakes pre-validation handoff can start its ordinary pipeline while current state still shows a candidate awaiting acceptance.
+A protected task with an attributed no-mistakes run reads as completed in current state only when that run's full head matches the accepted candidate, including a run still monitoring the PR and a ledger run that replaced an earlier failure.
+The run record supplies the full head; where only the abbreviated ledger row answers, it must name exactly one commit in the task copy.
+A different or unavailable run head is reported as blocked with both heads.
+A terminal publishing run without a PR identity remains blocked.
+When the pipeline explicitly skips publication and there is no current PR candidate, it reports a pause and explains what was skipped.
+Registration and merge also check the live PR identity and read the target branch tip directly.
+Accepting a candidate confers no merge authority.
+
+The policy contains `repo` (same GitHub owner/repository for source and target), `base_branch`, `base` (full commit), `kind` (`feature` or `bug`), `allow` (allowed repository paths), `tests` (additional test paths, possibly empty), and `criteria` (approved task criteria).
+Path entries match literally, with a trailing slash for a directory prefix.
+Default test locations cover test, spec and end-to-end directories, common framework file names and suffixes, and dedicated runner and collection configuration such as `conftest.py`, `pytest.ini`, `vitest.config.ts` and `karma.conf.js`.
+Recognized pytest sections in `pyproject.toml` and `setup.cfg` also protect their containing files.
+Recognized in-file declarations in Rust, Go, Python, Java, Kotlin and C# also protect their containing files.
+The scope check compares exact committed tree entries, including gitlinks and both paths of a rename.
+Any change to an existing recognized or declared test entry is held, including mixed application and test files.
+Declare additional test and runner paths in the policy where repository conventions differ or make classification ambiguous.
+To add a new test, pin the supervisor-approved bytes in optional `new_tests` (a map from relative path to SHA-256), or use the bug regression pin below.
+New Python tests check common collection overrides, returns in the test body, qualified pytest and unittest skip markers, and simple literal assertions.
+New shell tests check common skip markers, early top-level exits, literal assertions with or without a message, and literal comparisons.
+New JavaScript and TypeScript tests check common skip, focus and todo calls and matching literal expectations outside comments, quoted strings, regular expressions and template text, including inside template interpolations.
+New Go tests check common skip calls outside comments, string literals and rune literals.
+These static checks recognize specific patterns.
+The supervisor and independent reviewer assess the pinned test's behavior.
+
+For a bug fix, add a `regression` object with `path`, `test_sha256` and `runner_sha256`.
+The supervisor approves the bytes of a new test file and of the runner at `data/<task>/regression`.
+The runner receives the relative test path as its sole argument.
+Keep the test observer in trusted code, invoke candidate programs in a child process, and capture their outputs separately from the observer's result.
+For a Python observer, use an isolated interpreter such as `python3 -I` and keep the candidate checkout off the observer's import path.
+For the expected assertion failure, exit 10 and emit one JSON object with `test` set to the supplied path, `tests_run` set to the integer 1, and `result` set to `expected-failure`.
+For a passing execution, exit 0 and use `result: "pass"` with the same path and count.
+Return another exit for skips, unexecuted tests, unexpected failures, and infrastructure or collection errors.
+Firstmate overlays the same test bytes and executable mode on the base and requires execution evidence from both committed snapshots.
+Linux bubblewrap is required for this check, with network isolation, read-only source and fixture mounts, and a fresh environment.
+It supports ordinary files and symlinks in the snapshot, with no submodule materialization or project environment activation.
+
+Use `bin/fm-done-check.sh review-brief <task> <pr-url> <fresh-scout-id>` to check the candidate and prepare the reviewer brief.
+The supervisor reads both commits from an owned bare repository populated by a noninteractive fetch of the exact pins from GitHub.
+For private repositories, that fetch uses the supervisor's GitHub CLI credentials for `https://github.com`.
+It uses the supervisor's `GH_CONFIG_DIR` or default GitHub CLI configuration, or a supervisor-provided `GH_TOKEN` or `GITHUB_TOKEN`.
+Use a configuration directory outside worker-controlled paths.
+The fetch disables redirects and never loads configuration from the worker's repository.
+Missing credentials, repository access or objects keep the candidate on hold.
+Use the native `bin/fm-spawn.sh` scout path with a new ID and an explicit Codex GPT or Claude model from a provider absent from the builder's complete dispatch lineage.
+Where `config/crew-dispatch.json` exists, that launch also needs [the task's dispatch record](#per-launch-overrides-and-inherited-defaults), so run `bin/fm-dispatch-resolve.sh data/<scout>/brief.md --project <name>` first.
+When the record is `clear`, pass its profile, or pass `--dispatch-override <reason>` for any other launch, such as a different eligible reviewer or a recorded selection that is not eligible.
+A refute scout runs in one dispatch, so relaunching it is refused; prepare a new scout ID instead.
+Each native dispatch appends its identity to the lineage, including on a harness switch or relaunch.
+Missing, implicit, ambiguous or unavailable model history leaves the candidate on hold, as does a lineage that has used both supported providers.
+The reviewer receives the approved criteria and pinned commits and tries to refute completion.
+The first line of its report is the verdict with the exact base and head, and its done status must repeat that line.
+After reading the scout's report, the supervisor records that verdict with `bin/fm-review-verdict.sh refute <task> <scout> <reviewed-head>` and verifies with `bin/fm-done-check.sh accept <task> <pr-url>`.
+The saved review is the authoritative snapshot until a supervisor records a newer result.
+Recording the same review again leaves the journal unchanged, so a retry cannot displace a later decision; [`bin/fm-review-verdict.sh`](../bin/fm-review-verdict.sh) owns what counts as a new review.
+The acceptance record binds the task incarnation, policy, base, exact candidate event, executed evidence and latest qualifying review.
+Supervisor-recorded operational pauses, review parks and overdue annotations preserve that event when their append provenance is present.
+A newer worker event, a new head, a change to the live base commit, a policy change or a new task incarnation requires fresh review and acceptance.
+If the target advances, approve and pin the new base, then publish and report an exact-head candidate that includes it before requesting fresh review and acceptance.
+Normal project capacity applies to the reviewer, so leave room for its scout while the candidate ship is still assigned.
+
+Homes with the directory absent use existing delivery checks.
+In an enabled home, an older task must recover its approved scope, original base and complete native builder lineage, submit a new exact-head candidate and undergo the same checks.
+When the original inputs cannot be verified, leave the task unaccepted and use a new task with a pinned policy.
+The Firstmate home is the operational trust boundary.
+Keep these records under supervisor control, outside project worktrees and worker-authored evidence.
+This mechanism does not defend against a process that can deliberately impersonate the supervisor and rewrite its private records under the same OS user.
+
 ## Parked-gate wait deferral (config/wedge-defer-parked-gate)
 
 The optional local, gitignored `config/wedge-defer-parked-gate` presence flag opts this home into a default-off further form of wait evidence in the watcher's wedge timer.

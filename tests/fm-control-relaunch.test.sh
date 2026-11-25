@@ -1006,14 +1006,17 @@ test_relaunch_requires_a_note_for_a_ship_task() {
 # --- 2. harness switch -------------------------------------------------------
 
 test_harness_switch_moves_the_record_and_clears_prior_wiring() {
-  local dir out rc
+  local dir out rc meta
   dir=$(new_case switch rl4)
   add_ship_task "$dir" rl4 claude
+  meta="$dir/home/state/rl4.meta"
+  printf '%s\n' 'spawn_gen=s10.20.30' 'builder_history=s10.20.30:claude:claude-sonnet-4-6' \
+    'tern_tab_id=retired-endpoint' >> "$meta"
   # Wiring the previous claude incarnation left in the worktree.
   mkdir -p "$dir/wt/.claude"
   printf '{"hooks":{}}\n' > "$dir/wt/.claude/settings.local.json"
   printf 'codex' > "$dir/fake/becomes"
-  out=$(run_control "$dir" rl4 relaunch --harness codex --note "switching runtime"); rc=$?
+  out=$(run_control "$dir" rl4 relaunch --harness codex --model gpt-5.6-sol --note "switching runtime"); rc=$?
   expect_code 0 "$rc" "a harness switch should succeed"$'\n'"$out"
   assert_contains "$out" "harness=codex from=claude" "the outcome should name both harnesses"
   [ "$(meta_field "$dir" rl4 harness)" = codex ] || fail "the record should follow the switch"
@@ -1022,6 +1025,10 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   assert_grep "codex" "$dir/fake/literal" "the replacement launch should be the new harness"
   [ "$(journal_field "$dir" rl4 from_harness)" = claude ] || fail "the journal should record the origin harness"
   [ "$(journal_field "$dir" rl4 to_harness)" = codex ] || fail "the journal should record the target harness"
+  assert_equals "s10.20.30:claude:claude-sonnet-4-6,$(meta_field "$dir" rl4 spawn_gen):codex:gpt-5.6-sol" \
+    "$(meta_field "$dir" rl4 builder_history)" "harness switch must keep every builder identity"
+  assert_equals 1 "$(grep -c '^builder_history=' "$meta")" "relaunch duplicated builder lineage"
+  assert_no_grep 'tern_tab_id=' "$meta" "relaunch carried a retired backend's tab ID"
   pass "fm-control relaunch: switching harness is one ordinary relaunch, and the old wiring goes with the old agent"
 }
 
@@ -2089,6 +2096,23 @@ test_sandbox_relaunch_retains_policy_and_refuses_switch_before_stop() {
   [ "${#temp}" -le 30 ] || fail 'replacement temp root too long'
   assert_contains "$(cat "$dir/fake/literal")" 'CLAUDE_CODE_TMPDIR=' 'replacement receives temp override'
   pass 'fm-control relaunch: sandbox policy survives replacement and refuses a harness switch before stop'
+}
+
+test_refute_review_relaunch_refuses_before_stop() {
+  local dir out rc
+  dir=$(new_case refute rl45)
+  add_ship_task "$dir" rl45 claude
+  sed -i.bak '/^mode=/d; s/^kind=.*/kind=scout/' "$dir/home/state/rl45.meta"
+  printf '{}\n' > "$dir/home/state/rl45.refute.json"
+  out=$(run_control "$dir" rl45 relaunch --note 'resume review'); rc=$?
+  expect_code 1 "$rc" "a refute review must not be relaunched"
+  assert_equals claude "$(cat "$dir/fake/command")" "a refused review relaunch must not stop the reviewer"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused review relaunch must send nothing"
+  assert_contains "$out" "one fresh dispatch" "the refusal should say a review is never relaunched"
+  rm "$dir/home/state/rl45.refute.json"
+  out=$(run_control "$dir" rl45 relaunch --note 'ordinary scout'); rc=$?
+  expect_code 0 "$rc" "an ordinary scout still relaunches"$'\n'"$out"
+  pass "fm-control relaunch: a refute review refuses before its reviewer is stopped"
 }
 
 test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
@@ -3560,6 +3584,7 @@ test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_spawn_relaunch_of_promoted_scout_uses_the_recorded_branch
 test_sandbox_relaunch_retains_policy_and_refuses_switch_before_stop
+test_refute_review_relaunch_refuses_before_stop
 test_promoted_scout_relaunch_receives_the_current_delivery_contract
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch

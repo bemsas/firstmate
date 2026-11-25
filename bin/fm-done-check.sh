@@ -50,6 +50,16 @@
 # Output: one JSON verdict on stdout, a human summary on stderr.
 # Exit: 0 pass / off / shadow, 10 bounced to the worker, 11 escalate to firstmate,
 # 3 unknown (nothing could be decided; proceed as today), 2 usage error.
+#
+# Supervisor acceptance (GitHub.com ship PRs in homes with config/done-acceptance):
+#   fm-done-check.sh review-brief <task> <pr-url> <fresh-scout-id>
+#   fm-done-check.sh accept <task> <pr-url>
+#   fm-done-check.sh passing <task> <pr-url> [head]  # read-only, offline
+#   fm-done-check.sh assert <task> <pr-url> [head]   # read-only, live forge
+# The candidate is the worker's current `done: PR <url> [checks green] head <sha>`
+# (optional proof rider at the end). Legacy checklist logs and ready metadata
+# are diagnostic inputs only. In protected homes --auto leaves those fields
+# alone. See docs/configuration.md for policy and native refute scout setup.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,6 +72,28 @@ BOUNCE_LIMIT=2
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+
+if [ "${1:-}" = --help ]; then
+  cat <<'EOF'
+Usage:
+  fm-done-check.sh [--auto] <task> <pr-url>              legacy checklist
+  fm-done-check.sh review-brief <task> <pr-url> <scout>   prepare fresh refute brief
+  fm-done-check.sh accept <task> <pr-url>                verify and record acceptance
+  fm-done-check.sh passing <task> <pr-url> [head]        read acceptance offline
+  fm-done-check.sh assert <task> <pr-url> [head]         also verify live PR identity
+
+For policy, regression runners and reviewer dispatch see the done acceptance
+section of docs/configuration.md. These commands do not authorize a merge.
+EOF
+  exit 0
+fi
+
+case "${1:-}" in
+  review-brief|accept|passing|assert|spawn-review)
+    export FM_HOME FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG"
+    exec python3 "$SCRIPT_DIR/fm-done-acceptance.py" "$@"
+    ;;
+esac
 
 AUTO=0
 if [ "${1:-}" = --auto ]; then AUTO=1; shift; fi
@@ -96,6 +128,8 @@ if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
   exit 2
 fi
 URL=$FM_PR_URL
+[ "$FM_PR_HOST" != github.com ] || [ "$AUTO" -eq 0 ] ||
+  { [ ! -e "$CONFIG/done-acceptance" ] && [ ! -L "$CONFIG/done-acceptance" ]; } || exit 0
 
 # Automatic done ingestion binds the PR even when the optional checklist is off.
 # Use the same task metadata lock as fm-pr-check; no merge poll is armed here.
