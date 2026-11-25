@@ -383,6 +383,10 @@ if [ -f "$PARK_RECORD" ]; then
   PARK_HEAD=$(fm_meta_get "$PARK_RECORD" head)
   PARK_AT=$(fm_meta_get "$PARK_RECORD" parked_at)
   PARK_WHEN=$(date -u -r "$PARK_AT" +%Y-%m-%dT%H:%MZ 2>/dev/null || date -u -d "@$PARK_AT" +%Y-%m-%dT%H:%MZ 2>/dev/null || printf '%s' "$PARK_AT")
+  # An unsettled attempt outranks the hold or failure it started from.
+  if [ -n "$(fm_meta_get "$PARK_RECORD" resume_attempt)" ]; then
+    emit paused review-park "parked on review: PR $PARK_PR at ${PARK_HEAD:0:12}; a relaunch was attempted and has no recorded outcome yet - nothing retries it automatically"
+  fi
   if [ -n "$(fm_meta_get "$PARK_RECORD" resume_error)" ]; then
     emit blocked review-park "parked on review: PR $PARK_PR at ${PARK_HEAD:0:12}; the relaunch on review activity failed - run bin/fm-park.sh resume"
   fi

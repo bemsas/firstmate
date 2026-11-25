@@ -798,31 +798,44 @@ done
 body=$(jq -r "$expr" "$FM_FAKE_GH_JSON") || exit 1
 printf 'api_response:\n  body: "%s"\n  truncated: %s\n' "$body" "$([ -n "${FM_FAKE_GH_TRUNCATED:-}" ] && echo true || echo false)"
 SH
-  chmod +x "$1/fakebin/gh-axi"
+  # The Darwin half of review_spawn's host; every other key is the real sysctl's.
+  cat > "$1/fakebin/sysctl" <<'SH'
+#!/usr/bin/env bash
+case "${2:-}" in
+  vm.loadavg) echo '{ 0.00 0.00 0.00 }' ;;
+  kern.memorystatus_level) echo 60 ;;
+  *) PATH=/usr/sbin:/sbin:/usr/bin:/bin exec sysctl "$@" ;;
+esac
+SH
+  chmod +x "$1/fakebin/gh-axi" "$1/fakebin/sysctl"
   : > "$1/gh.log"
 }
 
 # One open pull request node: number, head branch, draft, reviewDecision
 # (null for none), the head commit an APPROVED review was left on (empty for
-# none), and the repository the head branch lives in (default acme/widget, the
-# target itself). Its own head commit is h<number>.
-pr_node() {  # <number> <head> <draft> <decision|null> [<approved-oid>] [<head-repo>]
-  jq -cn --argjson n "$1" --arg head "$2" --argjson draft "$3" --arg d "$4" --arg ap "${5:-}" --arg hr "${6:-Acme/Widget}" '{
-    number: $n, headRefName: $head, headRefOid: "h\($n)", isDraft: $draft,
+# none), the repository the head branch lives in (default acme/widget, the
+# target itself), and its base branch (default main). Its own head commit is
+# h<number>.
+pr_node() {  # <number> <head> <draft> <decision|null> [<approved-oid>] [<head-repo>] [<base>]
+  jq -cn --argjson n "$1" --arg head "$2" --argjson draft "$3" --arg d "$4" --arg ap "${5:-}" --arg hr "${6:-Acme/Widget}" --arg base "${7:-main}" '{
+    number: $n, baseRefName: $base, headRefName: $head, headRefOid: "h\($n)", isDraft: $draft,
     headRepository: {nameWithOwner: $hr},
     reviewDecision: (if $d == "null" then null else $d end),
     latestOpinionatedReviews: {nodes: (if $ap == "" then [] else [{state: "APPROVED", commit: {oid: $ap}}] end)}}'
 }
 
 # The raw GraphQL answer: <total-count>, then one pr_node per open PR listed.
+# The target's default branch is main; FORGE_DEFAULT= reports none.
 forge_answer() {  # <case-dir> <total-count> [<node>...]
   local out="$1/forge.json" total=$2
   shift 2
-  printf '%s\n' "$@" | jq -s --argjson t "$total" '{data: {repository: {pullRequests: {totalCount: $t, nodes: .}}}}' > "$out"
+  printf '%s\n' "$@" | jq -s --argjson t "$total" --arg def "${FORGE_DEFAULT-main}" '{data: {repository: {defaultBranchRef: (if $def == "" then null else {name: $def} end), pullRequests: {totalCount: $t, nodes: .}}}}' > "$out"
 }
 
-# Review spawns read an idle, roomy host fixture, so the always-on host gate
-# can never decide a review case on this machine's live load or memory.
+# Review spawns read an idle, roomy host fixture on every platform, so the
+# always-on host gate can never decide a review case on this machine's live load
+# or memory: review_forge's sysctl answers the Darwin probes and a fixture /proc
+# the others. The core count stays real, and a load of 0.00 is under every limit.
 review_spawn() {  # <case-dir> <id> [pane-path]
   FM_PROC_ROOT_OVERRIDE=$(host_proc "$1" review 0.00 60) \
     FM_FAKE_GH_LOG="$1/gh.log" FM_FAKE_GH_JSON="$1/forge.json" spawn_ship "$@"
@@ -832,6 +845,31 @@ review_spawn() {  # <case-dir> <id> [pane-path]
 # handoff recorded long before the spawn's forge read.
 age_record() {  # <meta>
   perl -e 'utime(time - 600, time - 600, $ARGV[0]) or exit 1' "$1"
+}
+
+# The fixture host decides on both probe families: this "machine" is overloaded
+# behind it, whichever platform the gate believes it is on. What is faked is only
+# what the gate reads (uname, sysctl, /proc); no other Darwin behavior is claimed.
+test_review_spawns_never_read_this_machines_load_or_memory() {
+  local case_dir out rc os
+  for os in Darwin Linux; do
+    case_dir=$(make_case "review-host-$os" task-c)
+    github_target "$case_dir"
+    review_forge "$case_dir"
+    forge_answer "$case_dir" 0
+    mkdir -p "$case_dir/machine"
+    # shellcheck disable=SC2016 # expanded by the fake sysctl
+    printf '#!/usr/bin/env bash\ncase "${2:-}" in vm.loadavg) echo "{ 100000.00 1.00 1.00 }" ;; kern.memorystatus_level) echo 1 ;; *) exit 1 ;; esac\n' > "$case_dir/machine/sysctl"
+    # shellcheck disable=SC2016 # expanded by the fake uname
+    printf '#!/usr/bin/env bash\n[ "${1:-}" != -s ] || { echo %s; exit 0; }\nPATH=/usr/bin:/bin exec uname "$@"\n' "$os" > "$case_dir/machine/uname"
+    chmod +x "$case_dir/machine/sysctl" "$case_dir/machine/uname"
+    rc=0
+    out=$(PATH="$case_dir/machine:$PATH" review_spawn "$case_dir" task-c) || rc=$?
+    assert_not_contains "$out" "host is overloaded" "a review spawn read this machine through its $os probes"
+    expect_code 0 "$rc" "a review spawn under the $os probes was not admitted: $out"
+    assert_contains "$out" "spawned task-c" "a review spawn under the $os probes did not launch"
+  done
+  pass "a review spawn is judged on its fixture host under both the Darwin and the Linux probes, never on this machine"
 }
 
 test_review_capacity_admits_below_the_cap_with_one_bounded_call() {
@@ -963,7 +1001,7 @@ test_review_capacity_keeps_places_across_handoff_heads_and_clones() {
 # A worker's own pull request is matched by its exact identity, never by a
 # branch name alone, and its record is read as one generation of the file.
 test_review_capacity_matches_exact_identity_and_reads_records_coherently() {
-  local case_dir home out rc=0 before worktrees real_stat
+  local case_dir home out rc=0 before worktrees real_stat other
   # An approved pull request from another fork that shares an unpublished
   # worker's branch name does not release that worker's place.
   case_dir=$(make_case review-fork task-c)
@@ -986,6 +1024,54 @@ test_review_capacity_matches_exact_identity_and_reads_records_coherently() {
   out=$(review_spawn "$case_dir" task-c) || rc=$?
   expect_code 0 "$rc" "the worker's own approved pull request did not free its place: $out"
 
+  # A pull request a local record names is that worker's even when the forge no
+  # longer says which repository its branch lives in: unapproved it holds one
+  # place, approved it frees it.
+  case_dir=$(make_case review-no-headrepo task-c)
+  home="$case_dir/home"
+  github_target "$case_dir"
+  review_forge "$case_dir"
+  printf '%s\n' "project 1" > "$home/config/review-capacity"
+  write_live "$home" live-s "$case_dir/project" "branch=patch-1" "pr=https://github.com/acme/widget/pull/60"
+  age_record "$home/state/live-s.meta"
+  forge_answer "$case_dir" 1 "$(pr_node 60 patch-1 false null | jq -c '.headRepository = null')"
+  before=$(call_count "$case_dir")
+  worktrees=$(worktree_list "$case_dir")
+  rc=0
+  out=$(review_spawn "$case_dir" task-c "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "a recorded pull request without its repository held no place: $out"
+  assert_contains "$out" "1 of 1 places are held (#60)" "the deferral did not count the recorded pull request once"
+  assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+  # Control: another open pull request in that state, named by no record, is not fleet work.
+  forge_answer "$case_dir" 2 "$(pr_node 60 patch-1 false APPROVED | jq -c '.headRepository = null')" "$(pr_node 61 patch-1 false null | jq -c '.headRepository = null')"
+  rc=0
+  out=$(review_spawn "$case_dir" task-c) || rc=$?
+  expect_code 0 "$rc" "the recorded pull request's approval did not free its place, or an unrecorded one was counted: $out"
+
+  # One branch can have open pull requests into several bases. Before its
+  # handoff a worker's is the one into its intended base: the recorded
+  # base_branch, else the default branch; an unknown base matches nothing.
+  base_case() {  # <name> <recorded-base> <forge-default> <pr-base> -> sets case_dir home out rc
+    case_dir=$(make_case "review-base-$1" task-c)
+    home="$case_dir/home"
+    github_target "$case_dir"
+    review_forge "$case_dir"
+    printf '%s\n' "project 1" > "$home/config/review-capacity"
+    write_live "$home" live-s "$case_dir/project" "branch=fm/same-name" ${2:+"base_branch=$2"}
+    FORGE_DEFAULT=$3 forge_answer "$case_dir" 1 "$(pr_node 40 fm/same-name false APPROVED '' '' "$4")"
+    rc=0
+    out=$(review_spawn "$case_dir" task-c) || rc=$?
+  }
+  base_case default-other "" main release
+  expect_code "$DEFER_EXIT" "$rc" "an approved pull request into another base released an unpublished worker: $out"
+  assert_contains "$out" "1 of 1 places are held (live-s)" "the deferral did not keep the place of the worker whose base differs"
+  base_case recorded-other release main main
+  expect_code "$DEFER_EXIT" "$rc" "an approved pull request into the default branch released a worker that targets another: $out"
+  base_case recorded-own release main release
+  expect_code 0 "$rc" "the worker's own approved pull request into its recorded base did not free its place: $out"
+  base_case unknown "" "" main
+  expect_code "$DEFER_EXIT" "$rc" "an unknown intended base released an unpublished worker: $out"
+
   # A handoff published by rename while the walk reads the record: a stat shim
   # replaces the record (as bin/fm-worker-done.sh does) on its first identity
   # read and reports the old identity, so only a coherent read keeps the place.
@@ -993,15 +1079,18 @@ test_review_capacity_matches_exact_identity_and_reads_records_coherently() {
     pass "review capacity matches exact pull request identity; the mid-read handoff case skipped (its stat shim replaces GNU stat)"
     return 0
   fi
-  case_dir=$(make_case review-rename task-c)
-  home="$case_dir/home"
-  github_target "$case_dir"
-  review_forge "$case_dir"
-  printf '%s\n' "project 1" > "$home/config/review-capacity"
-  write_live "$home" live-r "$case_dir/project" "branch=fm/live-r"
-  age_record "$home/state/live-r.meta"
-  real_stat=$(command -v stat)
-  cat > "$case_dir/fakebin/stat" <<SH
+  # The second round lists an approved pull request 40 from the same branch:
+  # once pull request 50 is handed off, only 50 can account for the worker.
+  for other in '' 40; do
+    case_dir=$(make_case "review-rename-${other:-none}" task-c)
+    home="$case_dir/home"
+    github_target "$case_dir"
+    review_forge "$case_dir"
+    printf '%s\n' "project 1" > "$home/config/review-capacity"
+    write_live "$home" live-r "$case_dir/project" "branch=fm/live-r"
+    age_record "$home/state/live-r.meta"
+    real_stat=$(command -v stat)
+    cat > "$case_dir/fakebin/stat" <<SH
 #!/usr/bin/env bash
 target="$home/state/live-r.meta"
 if [ "\$1" = -c ] && [ "\$2" = '%i %Y' ] && [ "\$3" = "\$target" ] && [ ! -e "$case_dir/stat.fired" ]; then
@@ -1014,18 +1103,41 @@ if [ "\$1" = -c ] && [ "\$2" = '%i %Y' ] && [ "\$3" = "\$target" ] && [ ! -e "$c
 fi
 exec "$real_stat" "\$@"
 SH
-  chmod +x "$case_dir/fakebin/stat"
+    chmod +x "$case_dir/fakebin/stat"
+    if [ -z "$other" ]; then
+      forge_answer "$case_dir" 0
+    else
+      forge_answer "$case_dir" 1 "$(pr_node "$other" fm/live-r false APPROVED)"
+    fi
+    before=$(call_count "$case_dir")
+    worktrees=$(worktree_list "$case_dir")
+    rc=0
+    out=$(review_spawn "$case_dir" task-c "$case_dir/unused") || rc=$?
+    [ -e "$case_dir/stat.fired" ] || fail "the mid-read rename shim never fired"
+    grep -qx 'pr=https://github.com/acme/widget/pull/50' "$home/state/live-r.meta" || fail "the shim did not publish the handoff"
+    expect_code "$DEFER_EXIT" "$rc" "a handoff renamed in mid-read released its place: $out"
+    assert_contains "$out" "1 of 1 places are held (live-r)" "the deferral did not keep the renamed record's place"
+    assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+  done
+  # A record that is present but whose text cannot be read is never skipped.
+  case_dir=$(make_case review-unreadable task-c)
+  home="$case_dir/home"
+  github_target "$case_dir"
+  review_forge "$case_dir"
+  write_live "$home" live-u "$case_dir/project" "branch=fm/live-u"
+  cat > "$case_dir/fakebin/cat" <<SH
+#!/usr/bin/env bash
+[ "\$*" != "-- $home/state/live-u.meta" ] || exit 1
+PATH=/usr/bin:/bin exec cat "\$@"
+SH
+  chmod +x "$case_dir/fakebin/cat"
   forge_answer "$case_dir" 0
-  before=$(call_count "$case_dir")
-  worktrees=$(worktree_list "$case_dir")
   rc=0
   out=$(review_spawn "$case_dir" task-c "$case_dir/unused") || rc=$?
-  [ -e "$case_dir/stat.fired" ] || fail "the mid-read rename shim never fired"
-  grep -qx 'pr=https://github.com/acme/widget/pull/50' "$home/state/live-r.meta" || fail "the shim did not publish the handoff"
-  expect_code "$DEFER_EXIT" "$rc" "a handoff renamed in mid-read released its place: $out"
-  assert_contains "$out" "1 of 1 places are held (live-r)" "the deferral did not keep the renamed record's place"
-  assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
-  pass "review capacity matches a worker's exact pull request (another fork's lookalike never releases it) and reads each record as one generation across a rename"
+  expect_code 1 "$rc" "an unreadable task record was skipped instead of refusing admission: $out"
+  assert_contains "$out" "task record $home/state/live-u.meta cannot be read" "the refusal did not name the unreadable record"
+  assert_absent "$home/state/task-c.meta" "a spawn refused on an unreadable record published one"
+  pass "review capacity matches a worker's exact pull request (another fork's lookalike, another number, or another base never releases it), reads each record as one generation across a rename, and refuses when a record cannot be read"
 }
 
 test_review_capacity_defers_when_the_queue_cannot_be_counted() {
@@ -1106,6 +1218,7 @@ test_lane_capacity_gate_is_opt_in
 test_lane_capacity_gate_defers_without_leaving_anything_behind
 test_lane_capacity_gate_refuses_an_unreadable_opt_in
 test_host_gate_defers_an_overloaded_host_and_keeps_the_task_queued
+test_review_spawns_never_read_this_machines_load_or_memory
 test_review_capacity_admits_below_the_cap_with_one_bounded_call
 test_review_capacity_defers_a_full_queue_without_leaving_anything_behind
 test_review_capacity_counts_unpublished_work_once

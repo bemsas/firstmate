@@ -3497,6 +3497,59 @@ procevent_surface_queued() {
   wake "$reason"
 }
 
+park_ring_after_output() {
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+}
+
+# Whether the episode its lane is held for now is still queued as <held-line> and
+# not acknowledged. The drain commits the receipt before it removes the row, so a
+# row whose removal failed is acknowledged all the same.
+park_held_ringable_locked() {  # <held-line>
+  local id episode rc=0
+  id=${1#held }
+  id=${id%%:*}
+  episode=$(awk -F= '$1 == "parked_at" { parked = $2 } $1 == "held" { held = $2 } END { print parked "-" held }' \
+    "$STATE/$id.review-park" 2>/dev/null) || return 1
+  fm_wake_queue_has_payload_locked check "review-park-held:$id:$episode" "check: park-on-review: $1" || return 1
+  fm_wake_park_held_acked "$id" "$episode" || rc=$?
+  [ "$rc" -eq 1 ]
+}
+
+# Ring what a park tick printed. A held outcome is rung only while its exact
+# episode's wake row is queued and unacknowledged, decided and printed under the
+# queue lock an acknowledgement commits its receipt and consumes rows under, so
+# one acknowledged after the tick read its receipt is never rung. A lock not free
+# within the wait, or a record, queue, or receipt that cannot be read, proves
+# nothing: the line is not rung here, and its row, while it stays queued,
+# surfaces through resurface_after_downtime.
+PARK_RING_LOCK_SECS=10
+park_ring() {  # <tick-output>
+  local line lines='' held=0 locked=0
+  if printf '%s\n' "$1" | grep -q '^held ' \
+    && fm_lock_acquire_wait_max "$FM_WAKE_QUEUE_LOCK" "$PARK_RING_LOCK_SECS"; then
+    locked=1
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      'held '*)
+        [ "$locked" -eq 1 ] || continue
+        park_held_ringable_locked "$line" || continue
+        held=1
+        ;;
+    esac
+    lines="${lines:+$lines; }$line"
+  done <<< "$1"
+  if [ "$held" -eq 1 ]; then
+    # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
+    FM_WAKE_POST_OUTPUT_ACTION=park_ring_after_output
+  elif [ "$locked" -eq 1 ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  fi
+  [ -n "$lines" ] || return 0
+  touch "$STATE/.last-check"
+  wake "check: park-on-review: $lines"
+}
+
 run_check_process() {
   local c=$1
   shift
@@ -4660,14 +4713,10 @@ EOF
     # Parked-on-review lanes, close detection, opt-in automatic parking, and
     # the outcomes of detached park, relaunch, and cleanup actions
     # (bin/fm-park.sh owns all of them, bounds the whole tick, and records its
-    # wake before printing it, so the watcher only rings).
+    # wake before printing it, so the watcher only rings: park_ring above).
     park_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
       "$SCRIPT_DIR/fm-park.sh" tick 2>/dev/null) || true
-    if [ -n "$park_out" ]; then
-      reason="check: park-on-review: $(printf '%s' "$park_out" | paste -sd ';' - | sed 's/;/; /g')"
-      touch "$STATE/.last-check"
-      wake "$reason"
-    fi
+    [ -z "$park_out" ] || park_ring "$park_out"
     touch "$STATE/.last-check"
     [ -z "$check_outputs" ] || wake "$check_outputs"
   fi

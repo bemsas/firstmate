@@ -1056,7 +1056,12 @@ _fm_wake_append_recovery_restore_locked() {
   local marker="$STATE/.watcher-down" lock previous=$FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN
   [ -n "$previous" ] || return 0
   lock="${marker}.lock"
-  fm_lock_acquire_wait "$lock" || return 1
+  _fm_wake_append_budget
+  if [ -n "$FM_WAKE_APPEND_LOCK_MAX" ]; then
+    fm_lock_acquire_wait_max "$lock" "$FM_WAKE_APPEND_LOCK_MAX" || return 1
+  else
+    fm_lock_acquire_wait "$lock" || return 1
+  fi
   if ! fm_recovery_marker_read "$marker" \
     || [ "$FM_RECOVERY_MARKER_TOKEN" != "$FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN" ]; then
     fm_lock_release "$lock"
@@ -1066,8 +1071,6 @@ _fm_wake_append_recovery_restore_locked() {
     fm_lock_release "$lock"
     return 1
   fi
-  FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN=
-  FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN=
   fm_lock_release "$lock"
 }
 
@@ -2759,6 +2762,37 @@ fm_wake_append_guarded() {
   return "$status"
 }
 
+# fm_wake_append_within <seconds> <predicate|""> <kind> <key> <payload> [predicate args...]
+# The same append for a caller with a deadline: it returns 1 with nothing queued
+# rather than wait longer than <seconds> in total for the queue and recovery
+# marker locks, and 0 seconds takes only locks that are free (a lock whose
+# holder died before naming itself still earns fm_lock_acquire_wait_max's one
+# freshness window). A failed append whose previous recovery token cannot be
+# restored in what is left keeps the token it published.
+FM_WAKE_APPEND_DEADLINE=
+FM_WAKE_APPEND_LOCK_MAX=
+fm_wake_append_within() {
+  local seconds=$1 guard=$2 kind=$3 key=$4 payload=$5 status=0 deadline
+  deadline=$((SECONDS + seconds))
+  shift 5
+  [ -z "$guard" ] || declare -F "$guard" >/dev/null || return 2
+  fm_lock_acquire_wait_max "$FM_WAKE_QUEUE_LOCK" "$seconds" || return 1
+  FM_WAKE_APPEND_DEADLINE=$deadline
+  fm_wake_append_locked "$kind" "$key" "$payload" "$guard" "$@" || status=$?
+  FM_WAKE_APPEND_DEADLINE=
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
+# What a bounded append has left for its next lock, floored at 0; empty for an
+# unbounded one.
+_fm_wake_append_budget() {
+  FM_WAKE_APPEND_LOCK_MAX=
+  [ -n "$FM_WAKE_APPEND_DEADLINE" ] || return 0
+  FM_WAKE_APPEND_LOCK_MAX=$((FM_WAKE_APPEND_DEADLINE - SECONDS))
+  [ "$FM_WAKE_APPEND_LOCK_MAX" -ge 0 ] || FM_WAKE_APPEND_LOCK_MAX=0
+}
+
 # fm_wake_append_locked <kind> <key> <payload> [predicate [predicate args...]]
 # Locked core of fm_wake_append: appends the wake row under an already-held
 # FM_WAKE_QUEUE_LOCK. Callers that must commit another durable record atomically
@@ -2782,7 +2816,8 @@ fm_wake_append_locked() {
   recovery_marker="$STATE/.watcher-down"
   status=0
 
-  _fm_recovery_marker_publish "$recovery_marker" downtime "" append "$guard" "$@" || status=$?
+  _fm_wake_append_budget
+  _fm_recovery_marker_publish "$recovery_marker" downtime "$FM_WAKE_APPEND_LOCK_MAX" append "$guard" "$@" || status=$?
   if [ "$status" -eq 0 ]; then
     seq=$(cat "$seq_file" 2>/dev/null || echo 0)
     case "$seq" in
@@ -2808,10 +2843,9 @@ fm_wake_append_locked() {
   fi
   if [ "$status" -ne 0 ]; then
     _fm_wake_append_recovery_restore_locked || true
-  else
-    FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN=
-    FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN=
   fi
+  FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN=
+  FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN=
   return "$status"
 }
 
@@ -2836,6 +2870,29 @@ fm_wake_queued_keys_locked() {
   local kind=$1
   awk -F '\t' -v kind="$kind" 'NF >= 5 && $3 == kind && !seen[$4]++ { print $4 }' \
     "$FM_WAKE_QUEUE" 2>/dev/null || true
+}
+
+# fm_wake_queue_has_key_locked <kind> <key>: 0 when an unacknowledged row for
+# exactly <key> is queued, 1 when none is, 2 when the queue cannot be read, so a
+# publisher never takes a failed read for an absent row.
+fm_wake_queue_has_key_locked() {
+  local rows
+  [ -e "$FM_WAKE_QUEUE" ] || [ -L "$FM_WAKE_QUEUE" ] || return 1
+  rows=$(cat -- "$FM_WAKE_QUEUE" 2>/dev/null) || return 2
+  printf '%s\n' "$rows" | awk -F '\t' -v kind="$1" -v key="$2" \
+    'NF >= 5 && $3 == kind && $4 == key { found = 1 } END { exit !found }'
+}
+
+# fm_wake_queue_has_payload_locked <kind> <key> <payload>: the same answer for a
+# row whose payload is also <payload>.
+fm_wake_queue_has_payload_locked() {
+  local rows payload
+  [ -e "$FM_WAKE_QUEUE" ] || [ -L "$FM_WAKE_QUEUE" ] || return 1
+  rows=$(cat -- "$FM_WAKE_QUEUE" 2>/dev/null) || return 2
+  payload=$(printf '%s' "$3" | fm_wake_clean_field) || return 2
+  # Through the environment, so a backslash in the payload stays itself.
+  printf '%s\n' "$rows" | FM_WAKE_MATCH=$payload awk -F '\t' -v kind="$1" -v key="$2" \
+    'NF >= 5 && $3 == kind && $4 == key && $5 == ENVIRON["FM_WAKE_MATCH"] { found = 1 } END { exit !found }'
 }
 
 # fm_wake_queued_carries_locked: 0 iff an unacknowledged queued row of <kind>
@@ -2951,6 +3008,59 @@ fm_wake_commit_secondmate_stall_receipts_through() { # <cutoff> [<rows-file>]
   ' "$FM_WAKE_QUEUE" 2>/dev/null)
 }
 
+# Whether the drain acknowledged this held review-park episode: 0 yes, 1 no,
+# 2 unreadable. Its row can still be queued: the receipt is committed first.
+fm_wake_park_held_acked() { # <task> <episode>
+  local receipt="$STATE/.review-park-held-acked-$1" rc=0
+  [ -e "$receipt" ] || [ -L "$receipt" ] || return 1
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 2
+  grep -qxF -- "$2" "$receipt" 2>/dev/null || rc=$?
+  return "$rc"
+}
+
+# Commit the receipt of every held review-park outcome an acknowledgement is
+# about to consume, under the queue lock and before its row is removed, so a
+# park tick interrupted after its append never publishes that episode again
+# (bin/fm-park.sh owns the key and reads the receipts). One line per episode,
+# the file replaced whole. A lane without a park record can publish nothing, so
+# it gets no receipt. Returns 1, so the acknowledgement consumes nothing, when
+# the rows or a receipt cannot be read in full; an absent claim file owns no row.
+fm_wake_commit_park_held_receipts_through() { # <cutoff> [<rows-file>]
+  local cutoff=$1 rows=${2:-} keys key task episode receipt tmp rc
+  [ -z "$rows" ] || [ -e "$rows" ] || [ -L "$rows" ] || return 0
+  [ -f "$FM_WAKE_QUEUE" ] || return 1
+  keys=$(awk -F '\t' -v cutoff="$cutoff" -v rows="$rows" '
+    BEGIN {
+      if (rows != "") {
+        while ((got = (getline line < rows)) > 0) owned[line]=1
+        if (got < 0) exit 2
+      }
+    }
+    NF >= 5 && $2 ~ /^[0-9]+$/ && $2 <= cutoff \
+      && (rows == "" || ($2 in owned)) && $3 == "check" \
+      && $4 ~ /^review-park-held:[A-Za-z0-9._-]+:[0-9]+-[0-9]+$/ { print $4 }
+  ' "$FM_WAKE_QUEUE" 2>/dev/null) || return 1
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    key=${key#review-park-held:}
+    episode=${key##*:}
+    task=${key%:*}
+    [ -e "$STATE/$task.review-park" ] || continue
+    receipt="$STATE/.review-park-held-acked-$task"
+    rc=0
+    fm_wake_park_held_acked "$task" "$episode" || rc=$?
+    [ "$rc" -ne 0 ] || continue
+    [ "$rc" -eq 1 ] || return 1
+    # Named as drain scratch, so a later drain removes one a crash left behind.
+    tmp=$(mktemp "$STATE/.wake-queue.ack.XXXXXX") || return 1
+    if ! { { [ ! -e "$receipt" ] || awk '1' "$receipt"; } && printf '%s\n' "$episode"; } > "$tmp" \
+      || ! chmod 0600 "$tmp" || ! _fm_atomic_replace "$tmp" "$receipt"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+  done <<< "$keys"
+}
+
 fm_wake_restore_queue() {
   local drained=$1 restore
   restore="$STATE/.wake-queue.restore.$(fm_current_pid)"
@@ -2964,13 +3074,17 @@ fm_wake_restore_queue() {
 # fm_wake_queue_prune_task <state> <task-id> [target]
 # Prune pending durable wakes for <task-id> and its recorded <target> from
 # the wake queue. Removes stale wakes for <target>, signal wakes for the task's
-# status or turn-ended files, and task-specific check wakes.
+# status or turn-ended files, and task-specific check wakes. The queue is judged
+# only under its lock: a publisher already holding it finishes first, so its row
+# is pruned too.
 fm_wake_queue_prune_task() {  # <state> <task-id> [target]
   local state=$1 task=$2 target=${3:-}
   local queue="$state/.wake-queue" lock="$state/.wake-queue.lock" tmp
-  [ -f "$queue" ] || return 0
-  [ -s "$queue" ] || return 0
   fm_lock_acquire_wait "$lock" || return 1
+  if [ ! -f "$queue" ] || [ ! -s "$queue" ]; then
+    fm_lock_release "$lock"
+    return 0
+  fi
   tmp=$(mktemp "$state/.wake-queue.prune.XXXXXX") || { fm_lock_release "$lock"; return 1; }
   chmod 0600 "$tmp" 2>/dev/null || true
   awk -F '\t' -v task="$task" -v target="$target" -v state="$state" '
@@ -2978,6 +3092,7 @@ fm_wake_queue_prune_task() {  # <state> <task-id> [target]
       if ($3 == "stale" && target != "" && $4 == target) next
       if ($3 == "signal" && ($4 == task || $4 == task ".status" || $4 == task ".turn-ended" || $4 == state "/" task ".status" || $4 == state "/" task ".turn-ended")) next
       if ($3 == "check" && $4 == state "/" task ".check.sh") next
+      if ($3 == "check" && index($4, "review-park-held:" task ":") == 1) next
     }
     { print }
   ' "$queue" > "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }

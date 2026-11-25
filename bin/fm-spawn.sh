@@ -405,12 +405,12 @@
 #   primary's commit is read from the local object store, so nothing more is
 #   fetched, and every base this picks contains origin's tip, so the reset
 #   discards nothing the origin-only rule would have kept. When no origin
-#   configuration is detected, spawn skips that remote freshness check and
-#   launches from the clean worktree's current HEAD. Relaunch reuses the
-#   recorded worktree without fetching or resetting its base. An unreachable
-#   detected origin, unresolved default branch, or non-clean worktree refuses
-#   a fresh spawn rather than risking a PR based on stale history or
-#   discarding local work.
+#   configuration is detected, spawn fetches and resets nothing: it launches
+#   only a clean worktree already at the project's local default-branch tip.
+#   Relaunch reuses the recorded worktree without fetching or resetting its
+#   base. An unreachable detected origin, unresolved default branch, origin-less
+#   worktree at any other commit, or non-clean worktree refuses a fresh spawn
+#   rather than risking a PR based on stale history or discarding local work.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -1746,6 +1746,7 @@ T3CODE_LAUNCH_UNCONFIRMED=0
 T3CODE_PROJECT_ID=
 T3CODE_MODEL_SELECTION=
 HERDR_LEASED=0
+HERDR_SLOT_MAY_HOLD_WORK=0
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -2031,14 +2032,15 @@ spawn_abort_cleanup() {
   # A durable Herdr lease outlives the pane, unlike the process lease the
   # interactive command used to take, so an abort that leaves no record returns
   # it, whether or not the launch was sent. Only a pane Herdr reports gone and a
-  # copy with no uncommitted work prove nothing is left to inspect there; any
-  # other keeps the lease and names the command, as the pane used to hold the
-  # slot for the operator.
+  # copy with no uncommitted work, whose base was not refused as possibly holding
+  # work, prove nothing is left to inspect there; any other keeps the lease and
+  # names the command, as the pane used to hold the slot for the operator.
   if [ "$HERDR_LEASED" = 1 ] && [ "$status" -ne 0 ] && [ -n "${WT:-}" ] &&
     [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
     HERDR_LEASED=0
     local herdr_slot_status
-    if [ "$SPAWN_ENDPOINT_CLOSED" = 1 ] && fm_backend_herdr_endpoint_confirmed_gone "${T:-}" &&
+    if [ "$HERDR_SLOT_MAY_HOLD_WORK" = 0 ] &&
+      [ "$SPAWN_ENDPOINT_CLOSED" = 1 ] && fm_backend_herdr_endpoint_confirmed_gone "${T:-}" &&
       herdr_slot_status=$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null) &&
       [ -z "$herdr_slot_status" ] &&
       (cd "$PROJ_ABS" && treehouse return --force "$WT") >/dev/null 2>&1; then
@@ -2048,14 +2050,16 @@ spawn_abort_cleanup() {
     fi
   fi
   # A spawn that aborts after claiming its slot but before its record survives
-  # must not leave a claim naming a task no record describes. The release is a
+  # must not leave a claim naming a task no record describes, except on a Herdr
+  # slot refused as possibly holding work: its kept lease and claim are what that
+  # work is recovered by. The release is a
   # read-then-remove, so it runs only while the project lock that wrote the
   # claim is still held (aborts before metadata publication); a later abort has
   # already released that lock and leaves the claim for the next spawn's
   # atomic replacement rather than racing it. A polytoken spawn instead retakes
   # that lock once for a later failure whose record was rolled back. The
   # release itself never removes another task's claim.
-  if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ -n "${WT:-}" ] &&
+  if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ "$HERDR_SLOT_MAY_HOLD_WORK" = 0 ] && [ -n "${WT:-}" ] &&
     [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] &&
     fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
     SPAWN_SLOT_CLAIMED=0
@@ -4965,7 +4969,7 @@ spawn_base_from_primary_checkout() { # <worktree> <project> <default> <origin-re
   return 1
 }
 
-freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 when the worktree is not clean
+freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 when the worktree is not clean, or an origin-less one is not proven to hold only commits its base has
   local worktree=$1 base=${2:-} project=${3:-} mode=${4:-} default target expected reset_ref actual status
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
@@ -4984,7 +4988,17 @@ freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 w
       echo "error: pooled worktree '$worktree' has no origin, so it cannot start from base branch '$base'" >&2
       return 1
     }
-    return 0
+    # No remote can refresh this slot, so its base is only proven, never reset:
+    # it must already be at the project's own default-branch tip.
+    expected=$(primary_head_commit "${project:-$worktree}") || {
+      echo "error: could not resolve the local default branch tip for origin-less pooled worktree '$worktree'; refusing to launch from an unproven base" >&2
+      return 2
+    }
+    actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+    [ "$actual" != "$expected" ] || return 0
+    echo "error: origin-less pooled worktree '$worktree' is at '${actual:-unknown}', not the project's local default branch tip ('$expected'); refusing to launch and leaving it untouched" >&2
+    git -C "$worktree" merge-base --is-ancestor "$actual" "$expected" 2>/dev/null || return 2
+    return 1
   fi
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
@@ -5176,7 +5190,15 @@ spawn_acp_scout() {
     fi
     SPAWN_SLOT_CLAIMED=1
   fi
-  freshen_spawn_worktree_base "$WT" || { spawn_acp_return_slot; exit 1; }
+  freshen_spawn_worktree_base "$WT" || {
+    # A refused slot that may hold work keeps its lease; a forced return discards.
+    if [ "$?" -eq 2 ]; then
+      echo "error: $WT stays leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS" >&2
+    else
+      spawn_acp_return_slot
+    fi
+    exit 1
+  }
   python3 "$FM_ROOT/bin/fm-worker-guardrails.py" opencode "$WT" "$STATE" "$ID" || {
     spawn_acp_return_slot
     exit 1
@@ -6473,7 +6495,13 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != t3code ]; then
-  freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || exit 1
+  freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || {
+    # A refused slot that may hold work keeps its durable lease; a forced return discards.
+    if [ "$?" -eq 2 ] && [ "$HERDR_LEASED" = 1 ]; then
+      HERDR_SLOT_MAY_HOLD_WORK=1
+    fi
+    exit 1
+  }
 fi
 
 # Re-assert the durable task copy after either treehouse acquisition or endpoint

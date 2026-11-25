@@ -150,6 +150,24 @@ test_host_gate_uses_usable_cores_on_linux() {
     expect_code 75 "$rc" "load above the unrounded limit defers even when the rounded limit equals it"
     assert_contains "$out" 'cores=1.34 load_limit=2.01' "the report must round only for display"
   fi
+  # Quota periods whose ratio no short decimal holds, in both directions:
+  # 101000/150000 allows exactly 1.01, and 686644/999967 just under 1.03.
+  printf '101000 150000\n' > "$dir/sys/fs/cgroup/fleet/cpu.max"
+  gate 1.01
+  expect_code 0 "$rc" "load exactly at the limit of a 101000/150000 quota is not over"
+  gate 1.02
+  expect_code 75 "$rc" "load above the limit of a 101000/150000 quota defers"
+  printf '686644 999967\n' > "$dir/sys/fs/cgroup/fleet/cpu.max"
+  gate 1.02
+  expect_code 0 "$rc" "load below the limit of a 686644/999967 quota is not over"
+  gate 1.03
+  expect_code 75 "$rc" "load above a limit that rounds up to it defers"
+  assert_contains "$out" 'cores=0.69 load_limit=1.03' "the report must round only for display"
+  # The tighter of two quotas with different periods wins.
+  printf '101000 150000\n' > "$dir/sys/fs/cgroup/fleet/lane/cpu.max"
+  gate 1.02
+  expect_code 75 "$rc" "the tighter leaf quota must win over its ancestor's"
+  printf 'max 100000\n' > "$dir/sys/fs/cgroup/fleet/lane/cpu.max"
   # No quota anywhere on the path: usable cores are the CPUs this process may run on.
   printf 'max 100000\n' > "$dir/sys/fs/cgroup/fleet/cpu.max"
   if command -v taskset >/dev/null 2>&1; then

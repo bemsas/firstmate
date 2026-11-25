@@ -242,9 +242,10 @@
 #           process's cgroup path; without nproc, the online count (getconf
 #           _NPROCESSORS_ONLN); on Darwin, sysctl hw.logicalcpu. A cgroup v1
 #           quota is not read. The report's cores= and load_limit= are that
-#           count and its limit rounded to two decimals; the comparison uses
-#           the quota ratio at six. The load average is host-wide while the
-#           cores are this process's own, a deliberately conservative pairing:
+#           count and its limit rounded to two decimals; the comparison is
+#           exact, on the whole quota and period. The load average is
+#           host-wide while the cores are this process's own, a deliberately
+#           conservative pairing:
 #           a pinned or quota-limited process on a busy host is refused even
 #           when its own CPUs are idle, never admitted onto an overloaded one.
 #   memory  available memory is under 20 percent of total (Linux
@@ -536,55 +537,63 @@ probe_disks=
 "
 
 # --- host gate (--host-gate) ------------------------------------------------
-HOST_GATE_LOAD_FACTOR=1.5
 HOST_GATE_MEM_MIN_PCT=20
 # Usable cores for the host gate. Off Darwin this is the CPUs this process may
 # run on (nproc, which honors CPU affinity; the OpenMP variables it would also
 # honor are cleared), lowered to the tightest cgroup v2 cpu.max quota on this
 # process's cgroup path (quota / period, possibly fractional). Without nproc it
 # is the online count above; on Darwin it is hw.logicalcpu.
-host_gate_usable_cores() {
-  local n quota period path dir limit=
+host_gate_usable_cores() {  # prints "<quota> <period>", a whole count over 1
+  local n quota period path dir q='' p=''
   if [ "$os" = Darwin ]; then
-    printf '%s\n' "$cores"
+    printf '%s 1\n' "$cores"
     return 0
   fi
   n=$(env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc 2>/dev/null) || n=
   is_uint "$n" && [ "$n" -gt 0 ] || n=$cores
-  [ "$n" != unknown ] || { printf 'unknown\n'; return 0; }
+  [ "$n" != unknown ] || { printf 'unknown 1\n'; return 0; }
+  q=$n p=1
   path=$(sed -n 's/^0:://p' "$PROC_ROOT/self/cgroup" 2>/dev/null | head -n 1)
   case "$path" in /*) ;; *) path= ;; esac
   dir="$SYS_ROOT/fs/cgroup$path"
   while [ -n "$path" ] || [ "$dir" = "$SYS_ROOT/fs/cgroup" ]; do
-    if { read -r quota period < "$dir/cpu.max"; } 2>/dev/null && is_uint "$quota" && is_uint "$period" && [ "$period" -gt 0 ]; then
-      if [ -z "$limit" ] || num_lt "$(awk -v q="$quota" -v p="$period" 'BEGIN{printf "%.6f", q / p}')" "$limit"; then
-        limit=$(awk -v q="$quota" -v p="$period" 'BEGIN{printf "%.6f", q / p}')
-      fi
+    # The kernel's period is at most 1000000; a quota past 12 digits is more
+    # CPUs than any host has, so it is never the tightest.
+    if { read -r quota period < "$dir/cpu.max"; } 2>/dev/null && is_uint "$quota" && is_uint "$period" &&
+      [ "${#quota}" -le 12 ] && [ "${#period}" -le 7 ] && [ "$period" -gt 0 ] && [ "$period" -le 1000000 ] &&
+      [ $((10#$quota * p)) -lt $((q * 10#$period)) ]; then
+      q=$((10#$quota)) p=$((10#$period))
     fi
     [ -n "$path" ] || break
     path=${path%/*}
     dir="$SYS_ROOT/fs/cgroup$path"
   done
-  if [ -n "$limit" ] && num_lt "$limit" "$n"; then
-    printf '%s\n' "$limit"
-  else
-    printf '%s\n' "$n"
-  fi
+  printf '%s %s\n' "$q" "$p"
+}
+
+# load > 1.5 x quota / period, in whole numbers: load x 2 x period > 3 x quota.
+host_gate_load_over() {  # <load> <quota> <period>
+  local whole=${1%%.*} frac='' scale=1 i
+  case "$1" in *.*) frac=${1#*.} ;; esac
+  i=${#frac}
+  while [ "$i" -gt 0 ]; do scale=$((scale * 10)); i=$((i - 1)); done
+  [ $((10#$whole$frac * 2 * $3)) -gt $((3 * $2 * scale)) ]
 }
 
 if [ "$mode" = host_gate ]; then
   hg_reasons='' hg_unknown='' hg_limit=unknown
-  # The comparison keeps the quota ratio at six decimals; only the report
-  # line rounds cores and the limit to two.
-  hg_cores_exact=$(host_gate_usable_cores)
-  cores=$hg_cores_exact
-  case "$cores" in *.*) cores=$(awk -v c="$cores" 'BEGIN{printf "%.2f", c}') ;; esac
+  # The quota and period reach the comparison whole; only the report rounds. A
+  # load outside six whole and six decimal digits is no real reading.
+  [[ "$load1" =~ ^[0-9]{1,6}(\.[0-9]{1,6})?$ ]] || load1=unknown
+  read -r hg_quota hg_period <<< "$(host_gate_usable_cores)"
+  cores=$hg_quota
+  [ "$hg_period" = 1 ] || cores=$(awk -v q="$hg_quota" -v p="$hg_period" 'BEGIN{printf "%.2f", q / p}')
   [ "$load1" != unknown ] || hg_unknown="${hg_unknown:+$hg_unknown,}load1"
   [ "$cores" != unknown ] || hg_unknown="${hg_unknown:+$hg_unknown,}cores"
   [ "$mem_free_pct" != unknown ] || hg_unknown="${hg_unknown:+$hg_unknown,}mem_avail_pct"
   if [ "$cores" != unknown ]; then
-    hg_limit=$(awk -v c="$hg_cores_exact" -v f="$HOST_GATE_LOAD_FACTOR" 'BEGIN{printf "%.2f", c * f}')
-    if [ "$load1" != unknown ] && awk -v l="$load1" -v c="$hg_cores_exact" -v f="$HOST_GATE_LOAD_FACTOR" 'BEGIN{exit !(l > c * f)}'; then
+    hg_limit=$(awk -v q="$hg_quota" -v p="$hg_period" 'BEGIN{printf "%.2f", 1.5 * q / p}')
+    if [ "$load1" != unknown ] && host_gate_load_over "$load1" "$hg_quota" "$hg_period"; then
       hg_reasons=cpu
     fi
   fi
