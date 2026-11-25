@@ -1275,7 +1275,7 @@ test_review_event_retry() {
   accept_reset
   printf 'value = 31\n' > "$A_REPO/app.py"
   accept_candidate
-  rm -f "$journal"
+  rm -f "$journal" "$A_STATE/$A_ID.accepted.json"
 
   prepare_review_record first 'Checked app.py. No blocker.' merge
   record_review first
