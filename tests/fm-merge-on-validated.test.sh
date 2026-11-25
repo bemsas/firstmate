@@ -682,6 +682,10 @@ test_review_verdict_gate() {
   FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$URL" bad merge >/dev/null 2>&1 || rc=$?
   expect_code 2 "$rc" "bad review head"
   rc=0
+  FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$URL" "$HEAD_A${HEAD_B:0:24}" merge >/dev/null 2>&1 || rc=$?
+  expect_code 2 "$rc" "a 64-hex review head the journal reader would refuse"
+  assert_equals 3 "$(wc -l < "$dir/home/state/review-verdicts.jsonl" | tr -d ' ')" "a refused head was recorded"
+  rc=0
   FM_HOME="$dir/home" "$ROOT/bin/fm-review-verdict.sh" "$URL" "$HEAD_A" approve >/dev/null 2>&1 || rc=$?
   expect_code 2 "$rc" "bad verdict"
 

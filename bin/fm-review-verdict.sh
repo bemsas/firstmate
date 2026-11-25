@@ -14,8 +14,7 @@
 # wins; another head's record never authorizes a merge. Recording the same
 # refute review again appends nothing and keeps its original row, so a retry
 # cannot displace a later record. A refute merge is new only with a new scout or
-# report; a refute fix is also new when the scout reports it again, or, beside a
-# row from before events were kept, when its status changed after that row.
+# report; a refute fix is also new when the scout reports it again.
 # Ordinary verdicts carry no event identity, so each one is appended. FM_HOME (or
 # FM_ROOT_OVERRIDE) and FM_STATE_OVERRIDE select the home/state as usual.
 # Exit: 0 recorded or already recorded, 1 write/lock failure, 2 invalid arguments.
@@ -55,7 +54,7 @@ if [ "${1:-}" = refute ]; then
   [ "$#" -eq 4 ] || { usage >&2; exit 2; }
 else
   if { [ "$#" -ne 3 ] && [ "$#" -ne 4 ]; } || ! fm_pr_url_parse "$1" || [ "$FM_PR_PROVIDER" != github ] \
-    || ! fm_pr_head_valid "$2"; then
+    || ! fm_pr_head_valid "$2" || [ "${#2}" -ne 40 ]; then
     usage >&2
     exit 2
   fi

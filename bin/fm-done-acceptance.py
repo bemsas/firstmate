@@ -564,7 +564,7 @@ def js_signals(data, _path):
     comment = r"//[^\r\n]*|/\*[\s\S]*?\*/"
     quoted = r"'(?:\\[\s\S]|[^'\\\r\n])*'" r'|"(?:\\[\s\S]|[^"\\\r\n])*"'
     regex = (
-        r"(?:[(,=:\[&|?;]|=>|\breturn\b)\s*"
+        r"""(?:[(,=:\[&|?;]|=>|\breturn\b|(?<![.#\w$])(?:if|while|for)\s*\([^(){}'"`/\r\n]*\))\s*"""
         r"/(?![*/])(?:\\.|\[(?:\\.|[^\]\\\r\n])*\]|[^/\\\[\r\n])+/"
     )
     gap = rf"(?:\s|{comment})*"
@@ -808,11 +808,12 @@ Head {head}
 
 Inspect the two exact commits with `git --no-replace-objects -C {shlex.quote(source)} diff --no-ext-diff --no-textconv --ignore-submodules=none {base} {head} --`.
 Keep the project read-only and use only this review brief and committed source.
-Record a criterion, file and line, and a reproducing case for each blocker in the scout report.
-If the evidence is unavailable, report blocked.
-For the conclusion of the normal scout done report, use one of these exact values:
+Make the first line of the scout report exactly one of these verdicts:
 - Refute {base} {head} merge
 - Refute {base} {head} fix
+Below it, record a criterion, file and line, and a reproducing case for each blocker.
+Use that same line as the conclusion of the normal scout done report; a different verdict is refused.
+If the evidence is unavailable, report blocked.
 
 The result applies only to these commits and carries no merge permission."""
     brief = DATA / reviewer / "brief.md"
@@ -861,6 +862,9 @@ def journal_rows():
         require(isinstance(row, dict) and isinstance(row.get("pr"), str)
                 and matches(SHA, row.get("head")) and row.get("verdict") in ("merge", "fix"),
                 "review verdict journal contains an invalid row")
+        refute = row.get("refute")
+        require("refute" not in row or isinstance(refute, dict) and isinstance(refute.get("candidate"), dict)
+                and matches(SHA256, refute.get("event")), "refute review evidence is unreadable")
         yield row
 
 
@@ -870,18 +874,6 @@ def review_event(row):
     # reports it again, so a repeated blocker is never dropped.
     ignored = ("recorded_ns", "event") if row["verdict"] == "merge" else ("recorded_ns",)
     return {**row, "refute": {key: value for key, value in row["refute"].items() if key not in ignored}}
-
-
-def already_recorded(old, row, status_ns):
-    refute = old.get("refute")
-    if not isinstance(refute, dict):
-        return False
-    # A row from before events were kept cannot name its fix report. It stands
-    # for the current one only if the scout's status is no newer than the row.
-    unnamed = row["verdict"] == "fix" and "event" not in refute
-    if unnamed:
-        old = {**old, "refute": {**refute, "event": row["refute"]["event"]}}
-    return review_event(old) == review_event(row) and (not unnamed or status_ns <= refute["recorded_ns"])
 
 
 def review_result(task, reviewer, head):
@@ -900,11 +892,11 @@ def review_result(task, reviewer, head):
     require(independent_model(identity, harness, model),
             "reviewer model is not independent of the builder")
     note, event = done_event(reviewer)
-    status_ns = (STATE / f"{reviewer}.status").lstat().st_mtime_ns
-    verdict = re.fullmatch(rf"Refute {identity['base']} {identity['head']} (merge|fix)", note)
-    require(verdict, "scout did not report a verdict for the exact pinned base and head")
     report = private_bytes(DATA / reviewer / "report.md", private=False)
-    require(report.strip(), "independent review report is empty")
+    title, _, findings = report.decode().partition("\n")
+    verdict = re.fullmatch(rf"Refute {identity['base']} {identity['head']} (merge|fix)", title)
+    require(verdict and findings.strip(), "scout report lacks findings under a verdict for the exact pinned base and head")
+    require(note == title, "scout status and report verdicts disagree")
     row = {
         "pr": identity["pr"], "head": head, "reviewer": reviewer, "verdict": verdict[1],
         "refute": {"candidate": identity, "model": model, "harness": harness,
@@ -914,7 +906,7 @@ def review_result(task, reviewer, head):
     # fm-review-verdict.sh holds the writer lock from this read through its
     # append, so a retry keeps the first row's identity, time and position.
     recorded = list(journal_rows()) if os.path.lexists(JOURNAL) else []
-    if any(already_recorded(old, row, status_ns) for old in recorded):
+    if any("refute" in old and review_event(old) == review_event(row) for old in recorded):
         print("review already recorded; the journal is unchanged", file=sys.stderr)
         return
     print(json_bytes(row).decode().strip())
@@ -932,9 +924,7 @@ def passing_review(identity):
                 latest = row
             continue
         refute = row["refute"]
-        require(isinstance(refute, dict) and isinstance(refute.get("candidate"), dict),
-                "refute review evidence is unreadable")
-        if refute.get("candidate") != identity:
+        if refute["candidate"] != identity:
             continue
         harness, model = refute.get("harness"), refute.get("model")
         require(independent_model(identity, harness, model) and refute.get("generation")

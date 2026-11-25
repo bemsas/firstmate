@@ -4,6 +4,11 @@
 # shellcheck disable=SC2016
 set -u
 
+case "$#:${1:-}" in
+  0: | 1:--framework-paths | 1:--review-events) ;;
+  *) printf 'usage: %s [--framework-paths|--review-events]\n' "${0##*/}" >&2; exit 2 ;;
+esac
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -779,6 +784,7 @@ SH
   cat > "$A_REPO/src/guide.test.js" <<'JS'
 // Documentation example: test.skip("deferred", check);
 /* Documentation example: test.only("focused", check); */
+if (checkHelp) /test.skip()/.test(helpText);
 test("render test.skip() in the guide", () => expect(guide()).toContain("skip"));
 test(`render test.only() in the guide`, () => expect(guide()).toContain("only"));
 test(`render test.skip() for ${locale}`, () => expect(guide(locale)).toContain("skip"));
@@ -828,6 +834,11 @@ focused-js|src/iterator.test.js|added skip|test.only("sample", check);
 focused-concurrent-js|src/iterator.test.js|added skip|test.concurrent.only("sample", check);
 commented-call-js|src/iterator.test.js|added skip|test /* note */ .skip("sample", check);
 literal-js|src/iterator.test.js|added trivial assertion|it("sample", () => expect("ready").toEqual("ready"));
+after-pattern-js|src/iterator.test.js|added skip|if (checkHelp) /test.skip()/.test(helpText); test.skip("later", check);
+divided-call-js|src/iterator.test.js|added skip|const half = (total) / test.skip("later", check) / 2;
+divided-method-js|src/iterator.test.js|added skip|const half = rows.if(total) / test.skip("later", check) / 2;
+quoted-condition-js|src/iterator.test.js|added skip|if (mark === ") /") test.skip("later", check); use("/");
+commented-condition-js|src/iterator.test.js|added skip|if (mark /* ) /" */) test.skip("later", check); use("/");
 after-title-js|src/iterator.test.js|added skip|it(`a ${x} b`, check);\ntest.skip("later", check);\nit(`c`, check);
 nested-title-js|src/iterator.test.js|added skip|it(`a ${ids.map((id) => `${id}!`)} ${fmt({ a: { b: 1 } })}`, check);\nit.only("later", check);\nit(`c ${y}`, check);
 title-own-call-js|src/iterator.test.js|added skip|test.skip(`a ${x} b`, check);
@@ -1166,9 +1177,9 @@ test_acceptance_entry_points() {
   result=$(A_HEAD="$A_HEAD" A_BASE="$A_BASE" A_URL="$A_URL" \
     fm_test_run_spawn "$A_HOME" "$A/pool" "$A_FAKE" "$scout" "$A_REPO" \
     --scout --backend tmux --harness codex --model gpt-5.6-sol) || fail "native scout did not launch: $result"
-  printf 'Checked the criterion against app.py. No blocker.\n' > "$A_HOME/data/$scout/report.md"
+  write_report "$scout" merge 'Checked the criterion against app.py. No blocker.'
   printf 'done: Refute %s %s merge\n' "$A_BASE" "$A_BASE" > "$A_STATE/$scout.status"
-  accept_refused "scout did not report" "$A_VERDICT" refute "$A_ID" "$scout" "$A_HEAD"
+  accept_refused "verdicts disagree" "$A_VERDICT" refute "$A_ID" "$scout" "$A_HEAD"
   printf 'done: Refute %s %s merge\n' "$A_BASE" "$A_HEAD" > "$A_STATE/$scout.status"
   accept_refused "did not sign off" "$A_VERDICT" refute "$A_ID" "$scout" "$A_BASE"
   accept_refused "supervisor operations" env FM_TASK_ID="$scout" "$A_VERDICT" refute "$A_ID" "$scout" "$A_HEAD"
@@ -1227,6 +1238,7 @@ test_acceptance_entry_points() {
   rm "$A_STATE/review-verdicts.jsonl"
   mv "$A_STATE/review-verdicts.saved" "$A_STATE/review-verdicts.jsonl"
 
+  write_report "$scout" fix 'Found a blocker in app.py.'
   printf 'done: Refute %s %s fix\n' "$A_BASE" "$A_HEAD" > "$A_STATE/$scout.status"
   accept_cmd "$A_VERDICT" refute "$A_ID" "$scout" "$A_HEAD" || fail "could not record exact-head blocker"
   accept_refused "missing passing fresh-context review" "$PR_CHECK" "$A_ID" "$A_URL"
@@ -1250,8 +1262,12 @@ prepare_review_record() {  # <scout> <report> <merge|fix> [project]
   accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" "$scout" >/dev/null || fail "could not prepare review $scout"
   fm_write_meta "$A_STATE/$scout.meta" "kind=scout" "spawn_gen=s200.300.$RANDOM" "project=${4:-$A_REPO}" \
     "harness=codex" "model=gpt-5.6-sol" "refute_context=$(fixture_sha256 "$A_STATE/$scout.refute.json")"
-  printf '%s\n' "$2" > "$A_HOME/data/$scout/report.md"
+  write_report "$scout" "$3" "$2"
   report_review "$scout" "$3"
+}
+
+write_report() {  # <scout> <merge|fix> <findings>
+  printf 'Refute %s %s %s\n\n%s\n' "$A_BASE" "$A_HEAD" "$2" "$3" > "$A_HOME/data/$1/report.md"
 }
 
 report_review() {  # <scout> <merge|fix>
@@ -1282,6 +1298,27 @@ test_review_event_retry() {
   accept_candidate
   rm -f "$journal" "$A_STATE/$A_ID.accepted.json"
 
+  # The report's first line owns the verdict, and the scout's status must agree.
+  local verdict other
+  for verdict in merge fix; do
+    [ "$verdict" = merge ] && other=fix || other=merge
+    prepare_review_record "conflict-$verdict" 'Replaced after the status.' "$verdict"
+    write_report "conflict-$verdict" "$other" 'Replaced after the status.'
+    accept_refused "verdicts disagree" "$A_VERDICT" refute "$A_ID" "conflict-$verdict" "$A_HEAD"
+    write_report "conflict-$verdict" "$verdict" ''
+    accept_refused "lacks findings" "$A_VERDICT" refute "$A_ID" "conflict-$verdict" "$A_HEAD"
+    printf 'Summary first.\nRefute %s %s %s\n' "$A_BASE" "$A_HEAD" "$verdict" > "$A_HOME/data/conflict-$verdict/report.md"
+    accept_refused "lacks findings under a verdict" "$A_VERDICT" refute "$A_ID" "conflict-$verdict" "$A_HEAD"
+    printf 'Refute %s %s %s\nOther head.\n' "$A_BASE" "$A_BASE" "$verdict" > "$A_HOME/data/conflict-$verdict/report.md"
+    accept_refused "exact pinned base and head" "$A_VERDICT" refute "$A_ID" "conflict-$verdict" "$A_HEAD"
+    assert_absent "$journal" "a refused report must not be recorded"
+  done
+  for verdict in fix merge; do
+    prepare_review_record "agree-$verdict" 'Report and status agree.' "$verdict"
+    record_review "agree-$verdict"
+    assert_equals "agree-$verdict:$verdict" "$(effective_review)" "an agreeing report must be recorded"
+  done
+
   prepare_review_record first 'Checked app.py. No blocker.' merge
   record_review first
   assert_review_retry first "latest review"
@@ -1296,7 +1333,7 @@ test_review_event_retry() {
   assert_absent "$A_STATE/$A_ID.accepted.json" "a retried review must not accept the candidate"
 
   # A fresh report from the same scout and a fresh scout are both new evidence.
-  printf 'Rechecked app.py after the fix verdict. No blocker.\n' > "$A_HOME/data/first/report.md"
+  write_report first merge 'Rechecked app.py after the fix verdict. No blocker.'
   report_review first merge
   record_review first
   assert_equals first:merge "$(effective_review)" "a revised report is new evidence"
@@ -1329,29 +1366,13 @@ test_review_event_retry() {
   accept_cmd "$A_VERDICT" "$A_URL" "$A_HEAD" fix "second reviewer" || fail "could not record an ordinary fix again"
   assert_equals "second reviewer:fix" "$(effective_review)" "an ordinary fix must still append"
 
-  # A row recorded before events were kept reads the same and still identifies its review.
-  jq -c 'if .refute then del(.refute.event) else . end' "$journal" > "$A/journal"
-  cat "$A/journal" > "$journal"
-  assert_review_retry third "row without an event"
-
-  # A fix in such a row stays recorded while its scout reports nothing new.
-  prepare_review_record fourth 'Both blockers are fixed.' merge
-  record_review fourth
-  assert_review_retry second "fix without an event, before a later merge"
-  assert_equals fourth:merge "$(effective_review)" "a retried fix without an event displaced a later merge"
-  # Reporting it again, or revising its report, is still new evidence.
-  report_review second fix
-  record_review second
-  assert_equals second:fix "$(effective_review)" "a fix reported after its row without an event must block again"
-  assert_review_retry second "fix reported after its row without an event"
-  jq -c 'if .refute then del(.refute.event) else . end' "$journal" > "$A/journal"
-  cat "$A/journal" > "$journal"
-  assert_review_retry second "newest fix without an event"
-  n=$(grep -c . "$journal")
-  printf 'Found another blocker in app.py.\n' > "$A_HOME/data/second/report.md"
-  record_review second
-  assert_equals "$((n + 1))" "$(grep -c . "$journal")" "a revised report is new beside a row without an event"
+  # A refute row that names no event is unreadable to intake and acceptance alike.
   cp "$journal" "$A/journal"
+  jq -c 'if .refute then del(.refute.event) else . end' "$A/journal" > "$journal"
+  accept_refused "refute review evidence is unreadable" "$A_VERDICT" refute "$A_ID" first "$A_HEAD"
+  accept_refused "refute review evidence is unreadable" "$SCRIPT" accept "$A_ID" "$A_URL"
+  cat "$A/journal" > "$journal"
+  assert_review_retry third "row with its event restored"
   printf 'not a verdict\n' >> "$journal"
   accept_refused "done acceptance" "$A_VERDICT" refute "$A_ID" first "$A_HEAD"
   cat "$A/journal" > "$journal"

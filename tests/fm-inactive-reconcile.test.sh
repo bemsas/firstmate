@@ -529,6 +529,7 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
   pass "ledger delivery carries the report pointer, the failed verb, and each new terminal line"
 }
 
+CANDIDATE_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 # Children whose ready lines differ only in what config/pr-register-scan opts
 # into: a ready line after one naming the recorded PR, a ready line beside a
 # recorded PR the log never named, a GitLab ready line after one naming the
@@ -538,6 +539,7 @@ write_replacement_children() {
   write_child "$MATE" kept 'done: PR https://example.test/owner/repo/pull/23 checks green'
   write_child "$MATE" gitlab $'done: PR https://example.test/owner/repo/pull/1 checks green\ndone: PR https://gitlab.example/group/sub/project/-/merge_requests/8 checks green'
   write_child "$MATE" unrecorded 'done: PR https://gitlab.example/group/sub/project/-/merge_requests/9 checks green'
+  write_child "$MATE" candidate "done: PR https://github.com/o/r/pull/8 checks green head $CANDIDATE_HEAD"
   awk '$0 !~ /^pr=/' "$MATE/state/unrecorded.meta" > "$MATE/state/unrecorded.meta.tmp"
   mv "$MATE/state/unrecorded.meta.tmp" "$MATE/state/unrecorded.meta"
 }
@@ -567,6 +569,8 @@ test_ledger_report_names_a_replacement_pr() {
     "the report kept the recorded PR instead of the GitLab replacement"
   assert_child_report unrecorded "child unrecorded done: PR https://gitlab.example/group/sub/project/-/merge_requests/9 checks green pr=https://gitlab.example/group/sub/project/-/merge_requests/9 mode=no-mistakes yolo=off" \
     "the report dropped an unrecorded GitLab ready PR"
+  assert_child_report candidate "child candidate done: PR https://github.com/o/r/pull/8 checks green head $CANDIDATE_HEAD pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
+    "an unverified candidate replaced a recorded PR the log never named"
   pass "with the scan opt-in, a child report names a replacement or forge PR and keeps a recorded PR the log never named"
 }
 
@@ -585,6 +589,8 @@ test_ledger_report_without_scan_opt_in_keeps_recorded_pr() {
     "a GitLab ready line replaced the recorded PR without the opt-in"
   assert_child_report unrecorded "child unrecorded done: PR https://gitlab.example/group/sub/project/-/merge_requests/9 checks green mode=no-mistakes yolo=off" \
     "a GitLab ready line carried a PR without the opt-in"
+  assert_child_report candidate "child candidate done: PR https://github.com/o/r/pull/8 checks green head $CANDIDATE_HEAD pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
+    "an unverified candidate replaced the recorded PR with acceptance off"
   pass "without the scan opt-in, a child report keeps the recorded PR and accepts only a GitHub-shaped ready line"
 }
 
@@ -787,7 +793,7 @@ test_ledger_done_waits_for_supervisor_acceptance() {
   write_child "$MATE" child 'working: validating'
   head=$(git -C "$MATE/projects/child" rev-parse HEAD)
   other=$(printf 'another head\n' | git hash-object --stdin)
-  sed '/^pr=/d; /^pr_head=/d' "$MATE/state/child.meta" > "$WORLD/meta"
+  sed 's|^pr=.*|pr=https://github.com/o/r/pull/2|; /^pr_head=/d' "$MATE/state/child.meta" > "$WORLD/meta"
   mv "$WORLD/meta" "$MATE/state/child.meta"
   printf 'done: PR https://github.com/o/r/pull/1 checks green head %s\n' "$head" > "$MATE/state/child.status"
   mkdir "$MATE/config/done-acceptance"

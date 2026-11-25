@@ -438,11 +438,12 @@ terminal_outcome_corroborated() { # <state> <last-status-line> <state-line>
 # and it also replaces a recorded PR the status log named
 # (fm_dod_status_names_pr); a recorded PR the log never named stays.
 # A scout never delivers a PR, so it never carries one.
-pr_for_task() { # <meta> <terminal-line> <status-file>
+# A protected task's accepted candidate replaces any recorded PR.
+pr_for_task() { # <meta> <terminal-line> <status-file> <protected>
   local meta=$1 terminal=$2 status=$3 value ready=
   local github_shape='^https?://[^[:space:])"]+/pull/[0-9]+$'
   [ "$(meta_field "$meta" kind)" != scout ] || return 0
-  if [ "$(status_line_verb "$terminal")" = "done" ] &&
+  if [ "$4" = 1 ] && [ "$(status_line_verb "$terminal")" = "done" ] &&
     fm_dod_candidate_fields "$(status_line_note "$terminal")"; then
     clean_field "$FM_DOD_CANDIDATE_URL"
     return
@@ -543,19 +544,18 @@ claim_inactive_report_for_ledger() { # <task> <incarnation> <state> <ledger-fing
 # delivered, or nothing is owed, and 1 when it is owed but the parent channel
 # could not be written (the notice is queued once per record).
 report_child_ledger_locked() { # <id> <meta>
-  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line candidate
+  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line candidate protected=0
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
-  pr=$(pr_for_task "$meta" "$last" "$status")
   mode=$(meta_field "$meta" mode)
   candidate=$(fm_dod_pr_url_from_done_note "$(status_line_note "$last")") || candidate=
+  [ "$mode" = local-only ] || ! fm_dod_acceptance_required "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$id" "$candidate" || protected=1
+  pr=$(pr_for_task "$meta" "$last" "$status" "$protected")
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
   if [ "$state" = "done" ] && [ ! -f "$(record_path "$fingerprint" reported)" ] \
-    && { [ ! -f "$(record_path "$fingerprint" pending)" ] ||
-      { [ "$mode" != local-only ] &&
-        fm_dod_acceptance_required "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$id" "$candidate"; }; } \
+    && { [ ! -f "$(record_path "$fingerprint" pending)" ] || [ "$protected" = 1 ]; } \
     && ! fm_dod_accept_ship_done "$(meta_field "$meta" kind)" "$mode" \
       "$(meta_field "$meta" worktree)" "$(meta_field "$meta" project)" "$last" \
       "$STATE" "$id" "$meta" meta-locked >/dev/null; then
