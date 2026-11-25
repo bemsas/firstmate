@@ -2769,14 +2769,14 @@ SH
           if [ "$path" = checks-green ]; then
             FM_FAKE_CI_LOGS='all CI checks passed'
           else
-            expected_source=status-log
+            expected_source="status-log"
           fi ;;
         coarse|coarse-monitoring)
           FM_FAKE_AXI_STATUS=$(run_running fm/other-crew)
           FM_FAKE_RUNS_LIST="  completed  fm/candidate $short  2026-08-27 15:20  $url"
           if [ "$path" = coarse-monitoring ]; then
             FM_FAKE_RUNS_LIST="  running    fm/candidate $short  2026-08-27 15:20"
-            expected_source=status-log
+            expected_source="status-log"
           fi ;;
         superseded)
           # The earlier failed run sat on the candidate in both readings; only
