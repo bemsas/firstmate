@@ -1207,7 +1207,9 @@ Missing, implicit, ambiguous or unavailable model history leaves the candidate o
 The reviewer receives the approved criteria and pinned commits and tries to refute completion.
 The first line of its report is the verdict with the exact base and head, and its done status must repeat that line.
 After reading the scout's report, the supervisor records that verdict with `bin/fm-review-verdict.sh refute <task> <scout> <reviewed-head>` and verifies with `bin/fm-done-check.sh accept <task> <pr-url>`.
-The saved review is the authoritative snapshot until a supervisor records a newer result.
+The saved review counts only while the report and status of every scout dispatched for that candidate match the last row saved for that scout.
+A newer report or verdict displaces it as soon as the scout writes it, and current-state reads, registration and merge refuse until the supervisor records the current review and accepts again.
+A retired scout is held to its saved report alone, and an unrecorded blocker it left behind holds that candidate until a newer candidate event is reviewed.
 Recording the same review again leaves the journal unchanged, so a retry cannot displace a later decision; [`bin/fm-review-verdict.sh`](../bin/fm-review-verdict.sh) owns what counts as a new review.
 The acceptance record binds the task incarnation, policy, base, exact candidate event, executed evidence and latest qualifying review.
 Supervisor-recorded operational pauses, review parks and overdue annotations preserve that event when their append provenance is present.

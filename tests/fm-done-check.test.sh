@@ -551,10 +551,13 @@ A_ID=ship-accept
 A_META="$A_STATE/$A_ID.meta"
 A_STATUS="$A_STATE/$A_ID.status"
 A_URL=https://github.com/acme/widget/pull/8
-A_POLICY="$A_HOME/config/done-acceptance/$A_ID.json"
+# Policies are injected through FM_CONFIG_OVERRIDE, so the fixture home itself
+# never opts in to done acceptance.
+A_CONFIG="$A/injected"
+A_POLICY="$A_CONFIG/done-acceptance/$A_ID.json"
 A_VERDICT="$ROOT/bin/fm-review-verdict.sh"
 A_FAKE=$(make_spawn_fakebin "$A/tools" codex claude gh)
-mkdir -p "$A_STATE" "$A_HOME/config/done-acceptance" "$A_HOME/data/$A_ID" "$A_HOME/projects"
+mkdir -p "$A_STATE" "$A_CONFIG/done-acceptance" "$A_HOME/data/$A_ID" "$A_HOME/projects"
 touch "$A_STATE/.last-watcher-beat"
 
 cat > "$A_FAKE/gh-axi" <<'STUB'
@@ -641,7 +644,7 @@ STUB
 chmod +x "$A_FAKE/gh"
 
 accept_cmd() {
-  FM_ROOT_OVERRIDE="$ROOT_STUB" FM_HOME="$A_HOME" PATH="$A_FAKE:$PATH" \
+  FM_ROOT_OVERRIDE="$ROOT_STUB" FM_HOME="$A_HOME" FM_CONFIG_OVERRIDE="$A_CONFIG" PATH="$A_FAKE:$PATH" \
     A_HEAD="$A_HEAD" A_BASE="$A_BASE" A_URL="$A_URL" "$@"
 }
 
@@ -785,6 +788,8 @@ SH
 // Documentation example: test.skip("deferred", check);
 /* Documentation example: test.only("focused", check); */
 if (checkHelp) /test.skip()/.test(helpText);
+if (rows. while) /test.skip()/.test(helpText);
+const matches = () => { return /test.skip()/.test(helpText); };
 test("render test.skip() in the guide", () => expect(guide()).toContain("skip"));
 test(`render test.only() in the guide`, () => expect(guide()).toContain("only"));
 test(`render test.skip() for ${locale}`, () => expect(guide(locale)).toContain("skip"));
@@ -837,6 +842,11 @@ literal-js|src/iterator.test.js|added trivial assertion|it("sample", () => expec
 after-pattern-js|src/iterator.test.js|added skip|if (checkHelp) /test.skip()/.test(helpText); test.skip("later", check);
 divided-call-js|src/iterator.test.js|added skip|const half = (total) / test.skip("later", check) / 2;
 divided-method-js|src/iterator.test.js|added skip|const half = rows.if(total) / test.skip("later", check) / 2;
+spaced-method-js|src/iterator.test.js|added skip|const half = rows. if(total) / test.skip("later", check) / 2;
+spaced-line-js|src/iterator.test.js|added skip|const half = rows\n  .\n  while(total) / test.skip("later", check) / 2;
+spaced-comment-js|src/iterator.test.js|added skip|const half = rows?. /* count */ for(total) / test.skip("later", check) / 2;
+divided-property-js|src/iterator.test.js|added skip|const half = rows.return / test.skip("later", check) / 2;
+divided-name-js|src/iterator.test.js|added skip|const half = $return / test.skip("later", check) / 2;
 quoted-condition-js|src/iterator.test.js|added skip|if (mark === ") /") test.skip("later", check); use("/");
 commented-condition-js|src/iterator.test.js|added skip|if (mark /* ) /" */) test.skip("later", check); use("/");
 after-title-js|src/iterator.test.js|added skip|it(`a ${x} b`, check);\ntest.skip("later", check);\nit(`c`, check);
@@ -1174,7 +1184,7 @@ test_acceptance_entry_points() {
     fail "a symlink to the candidate's own project should name the same project"
   accept_refused "$scout.meta" "$A_VERDICT" refute "$A_ID" "$scout" "$A_HEAD"
 
-  result=$(A_HEAD="$A_HEAD" A_BASE="$A_BASE" A_URL="$A_URL" \
+  result=$(A_HEAD="$A_HEAD" A_BASE="$A_BASE" A_URL="$A_URL" FM_TEST_CONFIG="$A_CONFIG" \
     fm_test_run_spawn "$A_HOME" "$A/pool" "$A_FAKE" "$scout" "$A_REPO" \
     --scout --backend tmux --harness codex --model gpt-5.6-sol) || fail "native scout did not launch: $result"
   write_report "$scout" merge 'Checked the criterion against app.py. No blocker.'
@@ -1379,6 +1389,106 @@ test_review_event_retry() {
   pass "retrying a recorded review appends nothing and a later decision on the same head stays effective"
 }
 
+# Every normal read and registration entry point, with the scout's newest report
+# not yet recorded by the supervisor.
+assert_accepted() {  # <label>
+  local result
+  result=$(accept_cmd "$SCRIPT" passing "$A_ID" "$A_URL" "$A_HEAD" 2>&1) || fail "$1: passing refused: $result"
+  result=$(accept_cmd "$SCRIPT" assert "$A_ID" "$A_URL" "$A_HEAD" 2>&1) || fail "$1: assert refused: $result"
+  result=$(accept_cmd "$PR_CHECK" "$A_ID" "$A_URL" 2>&1) || fail "$1: PR registration refused: $result"
+  result=$(ship_done_read) || fail "$1: current-state read refused: $result"
+}
+
+assert_displaced() {  # <label> <scout>
+  local reason="native review report from $2 is not the saved verdict"
+  accept_refused "$reason" "$SCRIPT" passing "$A_ID" "$A_URL" "$A_HEAD"
+  accept_refused "$reason" "$SCRIPT" assert "$A_ID" "$A_URL" "$A_HEAD"
+  accept_refused "$reason" "$SCRIPT" accept "$A_ID" "$A_URL"
+  accept_refused "$reason" "$PR_CHECK" "$A_ID" "$A_URL"
+  FM_PR_CHECK_MERGE=1 accept_refused "$reason" "$PR_CHECK" "$A_ID" "$A_URL"
+  ship_done_read >/dev/null && fail "$1: current-state read kept a displaced acceptance"
+}
+
+# The current-state, reconciliation and delivery readers share this library gate.
+ship_done_read() {
+  accept_cmd bash -c '. "$1"; fm_dod_accept_ship_done ship direct-PR "$2" "$2" "$3" "$4" "$5" "$6"' fixture \
+    "$ROOT/bin/fm-dod-lib.sh" "$A_REPO" "$(tail -n 1 "$A_STATUS")" "$A_STATE" "$A_ID" "$A_META"
+}
+
+test_native_report_displaces_acceptance() {
+  local report="$A_HOME/data/keeper/report.md" status="$A_STATE/keeper.status" scout
+  accept_reset
+  printf 'value = 37\n' > "$A_REPO/app.py"
+  accept_candidate
+  rm -f "$A_STATE/review-verdicts.jsonl" "$A_STATE/$A_ID.accepted.json"
+  prepare_review_record keeper 'Checked app.py. No blocker.' merge
+  record_review keeper
+  accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL" >/dev/null || fail "could not accept the recorded review"
+  assert_accepted "recorded review"
+  cp "$report" "$A/keeper.report"
+  cp "$status" "$A/keeper.status"
+
+  # The same scout's newer report, its status, or both, before it is recorded.
+  write_report keeper fix 'Found a blocker in app.py.'
+  assert_displaced "replaced report" keeper
+  cat "$A/keeper.report" > "$report"
+  assert_accepted "exact saved report"
+  report_review keeper fix
+  assert_displaced "newer status" keeper
+  cat "$A/keeper.status" > "$status"
+  write_report keeper merge 'Rechecked app.py. Still no blocker.'
+  report_review keeper merge
+  assert_displaced "revised merge report" keeper
+  cat "$A/keeper.report" > "$report"
+
+  # A retry of the saved merge is not a new report.
+  assert_review_retry keeper "repeated merge report"
+  assert_accepted "repeated merge report"
+  printf 'working: rechecking the fixture\n' >> "$status"
+  assert_displaced "withdrawn status" keeper
+  report_review keeper merge
+  assert_accepted "merge reported again"
+
+  # A fresh scout displaces the saved verdict when it reports, not when it is
+  # dispatched. Retiring it does not drop a blocker nobody recorded.
+  prepare_review_record rival 'Found a blocker in app.py.' fix
+  mv "$A_HOME/data/rival/report.md" "$A/rival.report"
+  mv "$A_STATE/rival.status" "$A/rival.status"
+  assert_accepted "dispatched scout without a report"
+  cp "$A/rival.report" "$A_HOME/data/rival/report.md"
+  assert_displaced "fresh scout report" rival
+  cp "$A/rival.status" "$A_STATE/rival.status"
+  assert_displaced "fresh scout verdict" rival
+  mkdir "$A/retired"
+  mv "$A_STATE/rival.meta" "$A_STATE/rival.status" "$A/retired/"
+  assert_displaced "retired scout with an unrecorded blocker" rival
+  mv "$A/retired/rival.meta" "$A/retired/rival.status" "$A_STATE/"
+  record_review rival
+  accept_refused "missing passing fresh-context review" "$SCRIPT" passing "$A_ID" "$A_URL" "$A_HEAD"
+
+  # A later recorded merge needs its own acceptance, and a blocker reported
+  # again displaces that one too.
+  prepare_review_record arbiter 'Blocker does not reproduce.' merge
+  accept_refused "missing passing fresh-context review" "$SCRIPT" accept "$A_ID" "$A_URL"
+  record_review arbiter
+  accept_refused "accepted evidence no longer matches" "$SCRIPT" passing "$A_ID" "$A_URL" "$A_HEAD"
+  accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL" >/dev/null || fail "could not accept the later review"
+  assert_accepted "later review"
+  cp "$A_STATE/rival.status" "$A/rival.status"
+  report_review rival fix
+  assert_displaced "blocker reported again" rival
+  cat "$A/rival.status" > "$A_STATE/rival.status"
+
+  # Retired scouts keep the saved verdict, and its report must stay exact.
+  for scout in keeper rival arbiter; do
+    rm "$A_STATE/$scout.meta" "$A_STATE/$scout.status"
+  done
+  assert_accepted "retired scouts"
+  write_report arbiter merge 'Rewritten after retirement.'
+  assert_displaced "rewritten report of a retired scout" arbiter
+  pass "a native review report displaces the saved verdict at every acceptance entry point before it is recorded"
+}
+
 test_acceptance_inspects_pipeline_objects() {
   local result cache="$A_STATE/$A_ID.acceptance-git"
   accept_reset
@@ -1431,6 +1541,7 @@ fi
 
 if [ "${1:-}" = --review-events ]; then
   test_review_event_retry
+  test_native_report_displaces_acceptance
   exit
 fi
 
@@ -1442,5 +1553,6 @@ test_acceptance_pinned_test_signals
 test_acceptance_regression
 test_acceptance_entry_points
 test_review_event_retry
+test_native_report_displaces_acceptance
 test_acceptance_inspects_pipeline_objects
 test_acceptance_requires_complete_builder_lineage

@@ -117,7 +117,7 @@ write_mate_meta() {
 run_reconcile() { # <home> [--startup]
   local home=$1 option=${2:-}
   PATH="$WORLD/fakebin:$PATH" FM_ROOT_OVERRIDE="$WORLD/root" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="${FM_TEST_CONFIG:-$home/config}" \
     FM_INACTIVE_RECONCILE_SECS=60 FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" \
     FM_FORGE_LOG="$WORLD/forge.log" "$RECON" scan ${option:+"$option"}
 }
@@ -127,7 +127,7 @@ run_reconcile() { # <home> [--startup]
 run_report() { # <home> <child>
   local home=$1 child=$2
   PATH="$WORLD/fakebin:$PATH" FM_ROOT_OVERRIDE="$WORLD/root" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="${FM_TEST_CONFIG:-$home/config}" \
     FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" \
     FM_FORGE_LOG="$WORLD/forge.log" "$RECON" report "$child"
 }
@@ -775,7 +775,8 @@ test_pending_legacy_ship_candidate_waits_for_acceptance() {
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
   [ "$(outcome_count "$MATE" pending)" = 1 ] || fail "legacy event did not leave a pending delivery"
 
-  mkdir "$MATE/config/done-acceptance"
+  local FM_TEST_CONFIG="$MATE/injected"
+  mkdir -p "$FM_TEST_CONFIG/done-acceptance"
   cp "$WORLD/parent-binding" "$MATE/.fm-secondmate-parent"
   run_report "$MATE" child || fail "reporting an unaccepted candidate should leave it pending"
   [ "$(outcome_count "$MATE" reported)" = 0 ] || fail "legacy pending event bypassed acceptance"
@@ -796,7 +797,8 @@ test_ledger_done_waits_for_supervisor_acceptance() {
   sed 's|^pr=.*|pr=https://github.com/o/r/pull/2|; /^pr_head=/d' "$MATE/state/child.meta" > "$WORLD/meta"
   mv "$WORLD/meta" "$MATE/state/child.meta"
   printf 'done: PR https://github.com/o/r/pull/1 checks green head %s\n' "$head" > "$MATE/state/child.status"
-  mkdir "$MATE/config/done-acceptance"
+  local FM_TEST_CONFIG="$MATE/injected"
+  mkdir -p "$FM_TEST_CONFIG/done-acceptance"
   real_python=$(command -v python3)
   cat > "$WORLD/fakebin/python3" <<SH
 #!/usr/bin/env bash

@@ -564,11 +564,14 @@ def js_signals(data, _path):
     comment = r"//[^\r\n]*|/\*[\s\S]*?\*/"
     quoted = r"'(?:\\[\s\S]|[^'\\\r\n])*'" r'|"(?:\\[\s\S]|[^"\\\r\n])*"'
     regex = (
-        r"""(?:[(,=:\[&|?;]|=>|\breturn\b|(?<![.#\w$])(?:if|while|for)\s*\([^(){}'"`/\r\n]*\))\s*"""
+        r"""(?:[(,=:\[&|?;]|=>|(?<![.#\w$])(?:return\b|(?:if|while|for)\s*\([^(){}'"`/\r\n]*\)))\s*"""
         r"/(?![*/])(?:\\.|\[(?:\\.|[^\]\\\r\n])*\]|[^/\\\[\r\n])+/"
     )
     gap = rf"(?:\s|{comment})*"
     dot = rf"{gap}\.{gap}"
+    # A keyword after a dot is a property name, however far the dot is. Consume
+    # both so it cannot start a statement whose regular expression hides code.
+    member = rf"\.{gap}(?:return|if|while|for)\b"
     modifier = rf"(?:(?:concurrent|sequential){dot})?(?:skip|skipIf|runIf|todo|only)"
     skip = (
         rf"\b(?:describe|it|test){dot}{modifier}(?:{gap}\(|{dot}each{gap}[(`])"
@@ -580,7 +583,7 @@ def js_signals(data, _path):
         rf"to(?:Be|Equal|StrictEqual){gap}\({gap}(?P=expected){gap}\)"
     )
     signals = re.compile(
-        rf"{comment}|{quoted}|{regex}|(?P<skip>{skip})|(?P<trivial>{expect})|(?P<template>[`{{}}])"
+        rf"{comment}|{quoted}|{member}|{regex}|(?P<skip>{skip})|(?P<trivial>{expect})|(?P<template>[`{{}}])"
     )
     template_text = re.compile(r"(?:\\[\s\S]|[^\\`$]|\$(?!\{))*(?P<end>`|\$\{|)")
     text = data.decode()
@@ -912,8 +915,48 @@ def review_result(task, reviewer, head):
     print(json_bytes(row).decode().strip())
 
 
+def require_saved_reports(identity, saved, latest):
+    # A native report displaces the saved verdict when it is written, not when a
+    # supervisor records it. Compare each reviewer of this candidate with its own
+    # last saved row under the retry rule in review_event. A retired scout keeps
+    # its ticket and report but no status.
+    tickets = {}
+    for path in STATE.glob("*.refute.json"):
+        data = private_bytes(path)
+        ticket = decode(data)
+        if ticket["candidate"] == identity:
+            require(path == ticket_for(ticket["reviewer"]), "review dispatch record names another scout")
+            tickets[ticket["reviewer"]] = digest(data)
+    require(latest["reviewer"] in tickets, "recorded review has no dispatch record for this candidate")
+    for reviewer, ticket in sorted(tickets.items()):
+        status = STATE / f"{reviewer}.status"
+        live = os.path.lexists(status) or os.path.lexists(STATE / f"{reviewer}.meta")
+        note, event = done_event(reviewer) if os.path.lexists(status) else ("", "")
+        path = DATA / reviewer / "report.md"
+        report = private_bytes(path, private=False) if os.path.lexists(path) else b""
+        title = report.partition(b"\n")[0].decode(errors="replace")
+        pins = f"Refute {identity['base']} {identity['head']} "
+        verdicts = (pins + "merge", pins + "fix")
+        same_report = same_event = False
+        if reviewer in saved:
+            row, refute = saved[reviewer], saved[reviewer]["refute"]
+            verdict = pins + row["verdict"]
+            same_report = (title == verdict and refute["report"] == digest(report)
+                           and refute["ticket"] == ticket)
+            same_event = (note == verdict and (row["verdict"] == "merge" or refute["event"] == event)
+                          and metadata(reviewer).get("spawn_gen") == refute["generation"])
+        own = reviewer == latest["reviewer"]
+        # A retired scout's unsaved merge can no longer be recorded and cannot
+        # weaken a later saved verdict. Its unsaved fix still blocks.
+        reported = title in verdicts and (live or title == pins + "fix")
+        require((same_report or not (own or reported))
+                and (same_event or not ((own and live) or note in verdicts)),
+                f"native review report from {reviewer} is not the saved verdict; record the current review and accept again")
+
+
 def passing_review(identity):
     latest = None
+    saved = {}
     for row in journal_rows():
         if row.get("pr") != identity["pr"] or row.get("head") != identity["head"]:
             continue
@@ -931,9 +974,10 @@ def passing_review(identity):
                 and matches(SHA256, refute.get("ticket")) and matches(SHA256, refute.get("report"))
                 and matches(ID, row.get("reviewer")) and row["reviewer"] != identity["task"],
                 "recorded review does not identify an independent native scout")
-        latest = row
+        latest = saved[row["reviewer"]] = row
     require(latest and latest.get("verdict") == "merge" and "refute" in latest,
             "missing passing fresh-context review for this task and exact head")
+    require_saved_reports(identity, saved, latest)
     return digest(json_bytes(latest))
 
 
