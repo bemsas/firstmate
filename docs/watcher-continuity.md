@@ -383,7 +383,7 @@ The same suite pins the counted-equals-presentable invariant against `bin/fm-gua
 - That row is presented with its acknowledgement command - with the ordinary warning restored - as soon as the grant clears.
 - Structurally unusable rows are retired by main alone while every remaining row stays presentable and acknowledgeable.
 
-Branch acknowledgement retiring the check-row receipts of exactly its granted sequences is pinned by `tests/fm-wake-queue.test.sh` for the secondmate stall receipt and by `tests/fm-inactive-reconcile.test.sh` for the inactive-outcome receipt.
+Branch acknowledgement retiring the check-row receipts of exactly its granted sequences is pinned by `tests/fm-wake-queue.test.sh` for the secondmate stall and held review-park receipts and by `tests/fm-inactive-reconcile.test.sh` for the inactive-outcome receipt.
 
 `tests/fm-pi-branch-extension.test.sh` pins extension-side classification, claim publication and release, and the pre-drain recheck.
 

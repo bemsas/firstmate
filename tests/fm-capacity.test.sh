@@ -63,6 +63,134 @@ run_capacity() {  # <home> <fakebin>
   PATH="$2:$BASE_PATH" FM_HOME="$1" "$CAPACITY" 2>&1
 }
 
+# --host-gate: above, below, at, and missing evidence for each limit, with no
+# config needed and a malformed config/lane-capacity ignored.
+test_host_gate_judges_observed_load_and_memory_only() {
+  local home fakebin out rc
+  home=$(make_home host-gate 0 0)
+  printf 'not a lane cap\n' > "$home/config/lane-capacity"
+  host_gate() {  # <label> <load1> <mem-pct> <cores> -> sets out rc
+    fakebin=$(make_probes "$TMP_ROOT/p-host-gate-$1" "$2" "$3" "$4" 20971520)
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$CAPACITY" --host-gate 2>&1); rc=$?
+  }
+  host_gate below 11.90 21 8
+  expect_code 0 "$rc" "host gate below both limits"
+  assert_contains "$out" 'host-gate: verdict=admit load1=11.90 cores=8 load_limit=12.00 mem_avail_pct=21 mem_min_pct=20 reasons=none unknown=none' "below: report line"
+  host_gate at-limits 12.00 20 8
+  expect_code 0 "$rc" "load exactly 1.5 x cores and memory exactly 20 percent are not over"
+  host_gate load-above 12.01 60 8
+  expect_code 75 "$rc" "load above 1.5 x cores defers"
+  assert_contains "$out" 'verdict=defer load1=12.01 cores=8 load_limit=12.00' "load-above: report"
+  assert_contains "$out" 'reasons=cpu unknown=none' "load-above: reason"
+  assert_contains "$out" 'deferred: this host is overloaded' "load-above: deferred line"
+  host_gate mem-below 0.10 19 8
+  expect_code 75 "$rc" "available memory under 20 percent defers"
+  assert_contains "$out" 'reasons=memory unknown=none' "mem-below: reason"
+  host_gate both 99.00 5 8
+  expect_code 75 "$rc" "both over"
+  assert_contains "$out" 'reasons=cpu,memory' "both: reasons"
+  host_gate load-missing '' 50 8
+  expect_code 0 "$rc" "a missing load reading does not defer by itself"
+  assert_contains "$out" 'load1=unknown cores=8 load_limit=12.00 mem_avail_pct=50' "load-missing: report"
+  assert_contains "$out" 'unknown=load1' "load-missing: named unknown"
+  assert_contains "$out" 'warning: host gate: this host'"'"'s load1 reading is unknown, so it was not judged' "load-missing: warning"
+  host_gate cores-missing 500.00 50 ''
+  expect_code 0 "$rc" "without a core count the load cannot be judged"
+  assert_contains "$out" 'load_limit=unknown' "cores-missing: limit unknown"
+  assert_contains "$out" 'unknown=cores' "cores-missing: named unknown"
+  host_gate mem-missing-load-high 99.00 '' 8
+  expect_code 75 "$rc" "an unknown memory reading never hides an observed overload"
+  assert_contains "$out" 'reasons=cpu unknown=mem_avail_pct' "mem-missing: cpu still judged"
+  host_gate all-missing '' '' ''
+  expect_code 0 "$rc" "no observation at all admits and says so"
+  assert_contains "$out" 'unknown=load1,cores,mem_avail_pct' "all-missing: named unknowns"
+  pass "--host-gate defers only on an observed load above 1.5 x cores or memory under 20 percent, names unknown readings without deferring on them, and ignores lane config"
+}
+
+# --host-gate on Linux judges load against usable cores: the CPUs this process
+# may run on, lowered to the tightest cgroup v2 cpu.max quota on its cgroup
+# path. Fixture /proc and /sys trees supply load, memory, and the cgroup; CPU
+# affinity comes from taskset when it is installed.
+test_host_gate_uses_usable_cores_on_linux() {
+  local home dir out rc cpu
+  if [ "$(uname -s)" != Linux ]; then
+    pass "--host-gate usable cores (skipped: affinity and cgroup quotas are Linux probes; the portable verdict is covered above)"
+    return 0
+  fi
+  home=$(make_home host-gate-cores 0 0)
+  dir="$TMP_ROOT/host-gate-cores"
+  mkdir -p "$dir/proc/self" "$dir/sys/fs/cgroup/fleet/lane"
+  printf '0::/fleet/lane\n' > "$dir/proc/self/cgroup"
+  printf 'MemTotal: 1000000 kB\nMemAvailable: 600000 kB\n' > "$dir/proc/meminfo"
+  printf 'max 100000\n' > "$dir/sys/fs/cgroup/fleet/lane/cpu.max"
+  printf '50000 100000\n' > "$dir/sys/fs/cgroup/fleet/cpu.max"
+  gate() {  # <load1> [taskset-cpus] -> sets out rc
+    printf '%s 0.00 0.00 1/1 1\n' "$1" > "$dir/proc/loadavg"
+    if [ -n "${2:-}" ]; then
+      out=$(FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$dir/proc" FM_SYS_ROOT_OVERRIDE="$dir/sys" taskset -c "$2" "$CAPACITY" --host-gate 2>&1); rc=$?
+    else
+      out=$(FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$dir/proc" FM_SYS_ROOT_OVERRIDE="$dir/sys" "$CAPACITY" --host-gate 2>&1); rc=$?
+    fi
+  }
+  # An ancestor's half-CPU quota is the tightest limit on any runner: 0.5 x
+  # 1.5 = 0.75.
+  gate 0.75
+  expect_code 0 "$rc" "load at the quota-scaled limit is not over"
+  assert_contains "$out" 'cores=0.50 load_limit=0.75' "an ancestor cgroup quota did not set usable cores"
+  gate 0.76
+  expect_code 75 "$rc" "load above 1.5 x the quota-limited cores defers"
+  assert_contains "$out" 'reasons=cpu' "quota: reason"
+  # The comparison keeps the quota ratio exact: 1.338 CPUs allow 2.007, so a
+  # load of 2.01 is over although both round to 2.01 for display.
+  printf '133800 100000\n' > "$dir/sys/fs/cgroup/fleet/cpu.max"
+  gate 2.007
+  if awk -v n="$(nproc 2>/dev/null || echo 1)" 'BEGIN{exit !(n >= 2)}'; then
+    expect_code 0 "$rc" "load exactly at the unrounded limit is not over"
+    gate 2.01
+    expect_code 75 "$rc" "load above the unrounded limit defers even when the rounded limit equals it"
+    assert_contains "$out" 'cores=1.34 load_limit=2.01' "the report must round only for display"
+  fi
+  # Quota periods whose ratio no short decimal holds, in both directions:
+  # 101000/150000 allows exactly 1.01, and 686644/999967 just under 1.03.
+  printf '101000 150000\n' > "$dir/sys/fs/cgroup/fleet/cpu.max"
+  gate 1.01
+  expect_code 0 "$rc" "load exactly at the limit of a 101000/150000 quota is not over"
+  gate 1.02
+  expect_code 75 "$rc" "load above the limit of a 101000/150000 quota defers"
+  printf '686644 999967\n' > "$dir/sys/fs/cgroup/fleet/cpu.max"
+  gate 1.02
+  expect_code 0 "$rc" "load below the limit of a 686644/999967 quota is not over"
+  gate 1.03
+  expect_code 75 "$rc" "load above a limit that rounds up to it defers"
+  assert_contains "$out" 'cores=0.69 load_limit=1.03' "the report must round only for display"
+  # The tighter of two quotas with different periods wins.
+  printf '101000 150000\n' > "$dir/sys/fs/cgroup/fleet/lane/cpu.max"
+  gate 1.02
+  expect_code 75 "$rc" "the tighter leaf quota must win over its ancestor's"
+  printf 'max 100000\n' > "$dir/sys/fs/cgroup/fleet/lane/cpu.max"
+  # No quota anywhere on the path: usable cores are the CPUs this process may run on.
+  printf 'max 100000\n' > "$dir/sys/fs/cgroup/fleet/cpu.max"
+  if command -v taskset >/dev/null 2>&1; then
+    # Pin to a CPU this runner may actually use; CPU 0 can be outside a
+    # container's permitted set.
+    cpu=$(taskset -pc $$ 2>/dev/null | sed 's/.*: *//' | cut -d, -f1 | cut -d- -f1)
+    case "$cpu" in '' | *[!0-9]*) cpu= ;; esac
+    if [ -n "$cpu" ]; then
+      gate 1.51 "$cpu"
+      expect_code 75 "$rc" "one usable CPU under affinity must defer a load of 1.51"
+      assert_contains "$out" 'cores=1 load_limit=1.50' "CPU affinity did not set usable cores"
+      gate 1.50 "$cpu"
+      expect_code 0 "$rc" "load exactly 1.5 x one usable CPU is not over"
+    fi
+  fi
+  # An unreadable cgroup path leaves the affinity count, never unknown.
+  rm -f "$dir/proc/self/cgroup"
+  gate 0.00
+  expect_code 0 "$rc" "a missing cgroup file must not defer"
+  assert_contains "$out" 'unknown=none' "a missing cgroup file must not make cores unknown"
+  pass "--host-gate on Linux uses usable cores: affinity, lowered to the tightest cgroup v2 quota, with a missing cgroup read falling back to affinity"
+}
+
 test_no_target_prints_counts_only() {
   local home fakebin out rc
   home=$(make_home no-target 3 1)
@@ -558,6 +686,8 @@ test_watcher_publishes_only_when_opted_in() {
   pass "the watcher publishes lane facts only for an opted-in home"
 }
 
+test_host_gate_judges_observed_load_and_memory_only
+test_host_gate_uses_usable_cores_on_linux
 test_no_target_prints_counts_only
 test_no_target_never_prints_constrained_line
 test_target_yields_open_lanes_and_full

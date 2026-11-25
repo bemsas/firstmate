@@ -136,12 +136,14 @@ SH
     write_brief "$home" "$id"
     add_item "$home" "$id"
   done
-  # Injected memory: a 100 GB host, so the macOS memory level is the GB available.
+  # Injected memory: a 25 GB host, so the macOS memory level is four times the
+  # GB available and every admitting case stays above the host resource gate's
+  # 20 percent memory floor (bin/fm-capacity.sh --host-gate).
   cat > "$fakebin/sysctl" <<SH
 #!/usr/bin/env bash
 case "\${2:-}" in
-  hw.memsize) echo 107374182400 ;;
-  kern.memorystatus_level) cat "$case_dir/v/avail_gb" ;;
+  hw.memsize) echo 26843545600 ;;
+  kern.memorystatus_level) echo \$(( \$(cat "$case_dir/v/avail_gb") * 4 )) ;;
   *) exec /usr/sbin/sysctl "\$@" ;;
 esac
 SH
@@ -173,10 +175,10 @@ set_power() {
   fi
 }
 
-# set_mem <case-dir> <gb>: the injected available memory, in whole GB of 100.
+# set_mem <case-dir> <gb>: the injected available memory, in whole GB of 25.
 set_mem() {
   printf '%s\n' "$2" > "$1/v/avail_gb"
-  printf 'MemTotal:       104857600 kB\nMemAvailable:   %s kB\n' "$(( $2 * 1048576 ))" > "$1/proc/meminfo"
+  printf 'MemTotal:       26214400 kB\nMemAvailable:   %s kB\n' "$(( $2 * 1048576 ))" > "$1/proc/meminfo"
 }
 
 # set_room <case-dir> <lanes>: injected memory with room for exactly <lanes>

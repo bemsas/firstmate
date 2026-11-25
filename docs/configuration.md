@@ -15,6 +15,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
 | Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review) |
+| Limits on starting new workers | [Review capacity](#review-capacity-configreview-capacity), [host resource gate](#host-resource-gate), [project capacity](#project-capacity-configproject-capacity), and [lane capacity](#lane-capacity-configlane-capacity) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -906,6 +907,7 @@ The optional local, gitignored `config/park-on-review` presence flag opts this h
 `config/auto-land` opts into merge-time cleanup of unparked ship lanes.
 Either flag also lets `bin/fm-teardown.sh` accept a merged GitLab merge request, including a squash or merge-train merge, as landed work when the merge request's head contains the lane's work; with neither flag, teardown does not read GitLab merge requests.
 Both flags are home-local and not inherited by secondmate homes.
+Failing or timed-out checks on a parked lane never relaunch its worker automatically: the lane is recorded once as held and stays parked until `bin/fm-park.sh resume <task-id> --trigger <text>` relaunches it by hand.
 The full behavior contract and command details are owned by [`bin/fm-park.sh`](../bin/fm-park.sh); the watcher calls its `tick` command on each check sweep.
 
 ## PR registration scan (config/pr-register-scan)
@@ -2117,7 +2119,7 @@ Per-machine Cursor `cli-config.json` attribution-off is not this contract: it do
 ## Project capacity (config/project-capacity)
 
 The optional local, gitignored `config/project-capacity` tells Firstmate how many workers a project can run at once on this machine, for a project whose machine-local resource - a heavy test suite, a local editor stack, a device - only serves a few workers at a time.
-Without it, dispatch stays uncapped as `AGENTS.md` section 7 describes, and a surplus worker is launched only to spend full-context turns waiting for the resource.
+Without it, no machine-local limit applies, and a surplus worker is launched only to spend full-context turns waiting for the resource.
 The file lives in the machine's root Firstmate home, so every local secondmate home reads the same limit, and it holds one line per project:
 
 ```text
@@ -2136,6 +2138,42 @@ When every place is held, `bin/fm-spawn.sh` launches nothing, creates no record,
 A malformed or unreadable file refuses every fresh ship or scout spawn until it is fixed, rather than guessing the intended limit, and so does a local home's state directory or task record that cannot be read while counting a capped project's holders.
 Firstmate cannot see which part of a worker's life uses the resource, so the number bounds whole workers from launch to handoff, and the tightest resource every worker needs should decide it.
 [`bin/fm-project-capacity-lib.sh`](../bin/fm-project-capacity-lib.sh) owns the file format, what holds a place, and why concurrent spawns cannot both take the last one.
+
+## Review capacity (config/review-capacity)
+
+Firstmate's goal is landed pull requests, so it stops starting new publishing work for a project whose review queue is already full.
+Before a fresh ship that will open a GitHub pull request is launched, `bin/fm-spawn.sh` makes one bounded `gh-axi` read of the target repository's open pull requests and counts the project's open fleet pull requests that have no approving review, plus this machine's ship workers for the project that have not opened theirs yet.
+At the cap, which is 3 unless `config/review-capacity` says otherwise, the spawn launches nothing, creates no record, leaves the backlog item queued, prints one `deferred:` line naming the holders, and exits 75.
+The optional local, gitignored `config/review-capacity` lives in the machine's root Firstmate home next to `config/project-capacity` and uses exactly that file's format, one `<project-name> <cap>` line per project:
+
+```text
+# two reviewers on this project
+my-project 5
+```
+
+A fleet pull request is one whose head branch starts with the spawn's ship-branch prefix, the project's registered prefix, or `fm/`, or is exactly the branch a local task records, compared exactly whatever valid characters the branch name uses.
+When GitHub reports a review decision for a pull request, `APPROVED` frees its place, draft or not, while changes requested or review required holds it.
+When GitHub reports no review decision, only an approval of the current head commit frees the place, draft or not, so a pull request whose only approval is of an older head commit holds it, on any base branch.
+A worker keeps its place when it reports its pull request ready: the place frees only when that pull request is approved, merged, or closed.
+Local workers count by the repository they publish to, so clones of one project with different origins share one queue, a worker that reports its pull request ready while the forge read is in flight keeps its place, and only a worker's own pull request stands in for it: the one it handed off, or before that the one from its own branch into its intended base branch.
+An unreadable, timed-out, or truncated forge read, or a repository with more open pull requests than one read lists, defers the spawn rather than admitting it on a count that may be low.
+A malformed or unreadable file refuses every fresh publishing ship until it is fixed.
+Only fresh no-mistakes and direct-PR ships whose publication target is a GitHub repository are judged; scouts, local-only ships, relaunches, Gerrit, Forgejo, and external-review projects, and local-path or non-GitHub remotes are not, and a relaunch remains the way to continue an existing pull request.
+A worker on another machine that has not opened its pull request yet is invisible to this count, so two machines spawning for one repository at the same moment can each take the last place.
+[`bin/fm-review-capacity-lib.sh`](../bin/fm-review-capacity-lib.sh) owns which spawns are judged, what holds a place, the forge read, and those limits.
+
+## Host resource gate
+
+Every local launch - a fresh ship or scout spawn, a local secondmate spawn, and a relaunch through `bin/fm-spawn.sh --relaunch` or `bin/fm-control.sh <task-id> relaunch` - first asks `bin/fm-capacity.sh --host-gate`, which needs no configuration.
+It defers the launch when this host's 1-minute load average is above 1.5 times its usable cores, or when available memory is below 20 percent of total.
+Usable cores are the CPUs the process may run on, lowered to any cgroup v2 CPU quota; the load average stays host-wide, a deliberately conservative pairing that can refuse a pinned or quota-limited launch on a busy host even while its own CPUs are idle.
+A fresh ship or scout's deferral launches nothing, creates no record, leaves the backlog item queued, prints `deferred:` lines naming the readings and the task, and exits 75; a deferred secondmate launch does the same, with no backlog item to keep.
+A relaunch deferral leaves the running agent and its record unchanged, except when load rises between `bin/fm-control.sh`'s own check and the replacement launch: then the old agent has already stopped, the command still exits 75 with a `deferred:` line saying so, the record and work are kept, the lane has no running agent, and nothing retries it automatically.
+A parked lane whose review relaunch is refused by the gate is held and reported once; no later park check retries it, even when that refusal could not be recorded at first, and `bin/fm-park.sh resume <task-id> --trigger <text>` relaunches it by hand once the host has room.
+A reading the host cannot provide, such as on native Windows or without `/proc`, is printed as unknown with a warning and does not defer the spawn by itself, while the other reading is still judged.
+The limits are fixed; [Lane capacity](#lane-capacity-configlane-capacity) `admit-spawns` can only add stricter refusals after it.
+A remote secondmate is judged on its own host, and `exit`, `stop`, and `interrupt` start nothing and are never gated.
+`bin/fm-capacity.sh --help` owns the exact probes and report line.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

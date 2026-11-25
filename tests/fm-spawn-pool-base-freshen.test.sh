@@ -5,7 +5,8 @@
 # advanced after the worktree was allocated.
 # These tests drive the real spawn path with a fake terminal, then prove it
 # starts the worker from the fetched origin tip, launches a clean origin-less
-# pool as-is, or stops when a configured origin is unusable.
+# pool only at the project's local default-branch tip, or stops when a
+# configured origin is unusable.
 # A home that opts in with config/spawn-base-primary-checkout starts a
 # local-only ship or a scout from the primary checkout's default branch when it
 # strictly contains origin's tip; the opt-in cases below also prove that a
@@ -265,7 +266,91 @@ test_originless_pool_launches_without_a_freshness_fetch() {
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# observed origin-less launch: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
   fi
-  pass "an origin-less pooled worktree launches as-is, skipping the freshness gate"
+  pass "an origin-less pooled worktree at the project's local tip launches without a fetch"
+}
+
+# The project's local default branch moved on after the slot was cut, so a clean
+# origin-less slot is stale without any remote: spawn refuses before a worker can
+# branch from it, moves nothing, and launches once the slot is at the tip.
+test_originless_stale_pool_refuses_before_branching() {
+  local kind id rec out status tip refs
+  for kind in ship scout; do
+    id="pool-originless-stale-$kind-r1"
+    rec=$(make_originless_case "originless-stale-$kind" "$id")
+    read_case_record "$rec"
+    git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+      commit -q --allow-empty -m advance-main
+    tip=$(git -C "$PROJECT_DIR" rev-parse main)
+    [ "$tip" != "$INITIAL_SHA" ] || fail "fixture did not advance the project past the pool base"
+    [ -z "$(git -C "$POOL_DIR" status --porcelain)" ] || fail "fixture pool is not clean"
+    # The tip is the default branch, never whatever the project has checked out.
+    git -C "$PROJECT_DIR" checkout --quiet -b side "$INITIAL_SHA"
+    refs=$(git -C "$PROJECT_DIR" for-each-ref)
+    if [ "$kind" = scout ]; then set -- --scout; else set -- --mode local-only --yolo off; fi
+
+    out=$(run_spawn "$id" "$@")
+    status=$?
+    [ "$status" -ne 0 ] || fail "spawn launched a $kind from a stale origin-less pooled worktree"
+    assert_contains "$out" "is at '$INITIAL_SHA', not the project's local default branch tip ('$tip')" \
+      "the $kind refusal did not name the stale base and the project tip"
+    assert_not_contains "$out" "could not fetch origin" "the $kind refusal attempted a fetch"
+    [ ! -e "$(git -C "$POOL_DIR" rev-parse --git-path FETCH_HEAD)" ] || fail "spawn fetched for an origin-less $kind"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] \
+      || fail "spawn moved HEAD while refusing a stale origin-less pooled worktree"
+    [ "$(git -C "$PROJECT_DIR" for-each-ref)" = "$refs" ] || fail "the refused $kind spawn changed a project ref"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the refused $kind spawn published task metadata"
+
+    # The refused launch keeps its window for the operator, so relaunch afresh.
+    git -C "$POOL_DIR" checkout --quiet --detach "$tip"
+    id="pool-originless-current-$kind-r1"
+    fm_test_spawn_brief "$HOME_DIR" "$id"
+    out=$(run_spawn "$id" "$@")
+    status=$?
+    expect_code 0 "$status" "a $kind should launch once its origin-less slot is at the project tip"$'\n'"$out"
+    assert_contains "$out" "spawned $id" "the $kind launch from the project tip did not report success"
+  done
+  pass "a stale clean origin-less pooled worktree is refused before a task branch, untouched, for a ship and a scout"
+}
+
+# A clean slot holding a commit the project's default branch does not contain is
+# refused too, and that commit stays exactly where it was.
+test_originless_ahead_pool_refuses_without_discarding_commits() {
+  local rec id out status ahead
+  id='pool-originless-ahead-r1'
+  rec=$(make_originless_case originless-ahead "$id")
+  read_case_record "$rec"
+  printf 'unlanded\n' > "$POOL_DIR/unlanded.txt"
+  git -C "$POOL_DIR" add unlanded.txt
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm unlanded
+  ahead=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched from an origin-less slot ahead of the project tip"
+  assert_contains "$out" "is at '$ahead', not the project's local default branch tip ('$INITIAL_SHA')" \
+    "the refusal did not name the unlanded base and the project tip"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$ahead" ] || fail "spawn moved HEAD off an unlanded commit"
+  assert_grep 'unlanded' "$POOL_DIR/unlanded.txt" "spawn discarded an unlanded commit's content"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "an origin-less pooled worktree ahead of the project tip is refused with its commit in place"
+}
+
+# With neither origin/HEAD, main, nor master, no base tip is resolvable.
+test_originless_unresolved_default_refuses_pool() {
+  local rec id out status
+  id='pool-originless-unresolved-r1'
+  rec=$(make_originless_case originless-unresolved "$id")
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" branch -m main trunk
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched an origin-less slot whose project tip is unresolved"
+  assert_contains "$out" "could not resolve the local default branch tip" \
+    "the refusal did not name the unresolved project tip"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] || fail "spawn moved HEAD while refusing"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "an origin-less pooled worktree whose project tip cannot be resolved is refused"
 }
 
 test_originless_dirty_pool_refuses_without_discarding_work() {
@@ -1397,6 +1482,9 @@ test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 test_originless_pool_launches_without_a_freshness_fetch
 test_originless_dirty_pool_refuses_without_discarding_work
+test_originless_stale_pool_refuses_before_branching
+test_originless_ahead_pool_refuses_without_discarding_commits
+test_originless_unresolved_default_refuses_pool
 test_origin_config_without_url_refuses_pool
 test_empty_origin_config_section_refuses_pool
 test_empty_only_included_origin_config_section_launches_pool

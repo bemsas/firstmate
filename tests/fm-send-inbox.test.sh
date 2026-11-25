@@ -497,6 +497,39 @@ test_unwritable_inbox_fails_loudly() {
   pass "fm-send inbox: an unwritable record is a loud local failure that leaves no false expectation"
 }
 
+# The claim around a steer (bin/fm-lease-lib.sh "Lifetime"): no send ends it,
+# delivered or refused, so the claimant's own release does, and that release
+# drops neither the other actor's lease nor anything check did not say is ours.
+test_send_never_ends_the_callers_lease() {
+  local dir err how rc
+  for how in delivered refused; do
+    dir=$(setup_case "lease-$how")
+    err="$dir/send.err"
+    printf '%s\n' "$$" > "$dir/home/state/.lock"
+    lease() { env -u PI_CODING_AGENT FM_HOME="$dir/home" FM_SUPERVISION_ACTOR="$1" FM_LEASE_HOLDER_PID=$$ "$ROOT/bin/fm-lease.sh" "$2" "$3"; }
+    ! lease main check t1 >/dev/null || fail "$how: the fixture starts with a lease"
+    lease main claim t1 || fail "$how: the steer could not claim its lease"
+    lease branch claim t2 || fail "$how: the other actor could not claim its lease"
+    [ "$how" = delivered ] || : > "$dir/home/state/t1.inbox" # a FILE where the inbox dir must go
+    rc=0
+    run_send "$dir" "$err" FM_SUPERVISION_ACTOR=main -- t1 "steer under a lease" || rc=$?
+    if [ "$how" = delivered ]; then
+      expect_code 0 "$rc" "the leased steer was not delivered: $(cat "$err")"
+    else
+      [ "$rc" -ne 0 ] || fail "an unwritable inbox must fail the send"
+    fi
+    case "$(lease main check t1)" in "main $$ "*" live") ;; *) fail "$how: the send ended its caller's lease" ;; esac
+    # A later step under the same handling sees the lease is already its own.
+    lease main claim t1 || fail "$how: the holder could not refresh its own lease"
+    lease main release t1 || fail "$how: the caller could not release its lease"
+    ! lease main check t1 >/dev/null || fail "$how: the released lease is still held"
+    lease branch claim t1 || fail "$how: the released task could not be claimed by the other actor"
+    lease main release t2 || fail "$how: releasing a lease not held must be a no-op"
+    case "$(lease main check t2)" in "branch $$ "*" live") ;; *) fail "$how: a release dropped the other actor's lease" ;; esac
+  done
+  pass "fm-send: neither a delivered nor a refused steer ends its caller's lease; the caller's release does, and leaves the other actor's alone"
+}
+
 test_empty_message_refused() {
   local dir err rc
   # The lived defect: an empty marked secondmate steer used to deliver a
@@ -558,4 +591,5 @@ test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
 test_delivery_lock_serializes_enqueue
 test_unwritable_inbox_fails_loudly
+test_send_never_ends_the_callers_lease
 test_empty_message_refused

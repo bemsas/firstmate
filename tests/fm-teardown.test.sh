@@ -991,6 +991,77 @@ test_teardown_leaves_the_merge_cleanup_request_to_its_cleanup() {
   pass "teardown leaves a merge cleanup request for the detached cleanup that owns it"
 }
 
+# A torn-down lane leaves no held park wake queued, and the acknowledgement of
+# another lane's recreates nothing for it.
+test_teardown_retires_its_held_park_wakes() {
+  local case_dir wt_head rc id
+  case_dir=$(make_case held-park-wakes)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  for id in task-x1 task-x1.b; do
+    printf 'parked_at=100\nheld=200\n' > "$case_dir/state/$id.review-park"
+    printf '100-150\n' > "$case_dir/state/.review-park-held-acked-$id"
+    FM_STATE_OVERRIDE="$case_dir/state" bash -c '. "$0/bin/fm-wake-lib.sh"; fm_wake_append check "review-park-held:$1:100-200" "check: park-on-review: held $1"' "$ROOT" "$id" \
+      || fail "held-park-wakes: could not seed $id"
+  done
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "held-park-wakes: teardown should succeed when work is merged into local main"
+  assert_absent "$case_dir/state/task-x1.review-park" "teardown kept the park record"
+  assert_absent "$case_dir/state/.review-park-held-acked-task-x1" "teardown kept the held receipt"
+  ! grep -q 'review-park-held:task-x1:' "$case_dir/state/.wake-queue" || fail "teardown left its held park wake queued"
+  grep -q 'review-park-held:task-x1.b:' "$case_dir/state/.wake-queue" || fail "teardown removed another lane's held park wake"
+  FM_STATE_OVERRIDE="$case_dir/state" bash -c '. "$0/bin/fm-wake-lib.sh"; fm_wake_commit_park_held_receipts_through 99' "$ROOT" \
+    || fail "held-park-wakes: the remaining row's acknowledgement failed"
+  assert_absent "$case_dir/state/.review-park-held-acked-task-x1" "a later acknowledgement recreated the torn-down lane's receipt"
+  grep -qx '100-200' "$case_dir/state/.review-park-held-acked-task-x1.b" || fail "the other lane's receipt was not committed"
+  pass "teardown removes exactly its own lane's held park wakes, record and receipt, and a later acknowledgement recreates none"
+}
+
+# Holds a home's empty queue lock as a held publisher whose guard already passed:
+# it appends its lane's row, and another's, only once the park record is gone.
+hold_queue_until_unparked() {  # <state> <task-id> <ready-file>
+  FM_STATE_OVERRIDE="$1" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$FM_WAKE_QUEUE_LOCK" || exit 1
+    : > "$3"
+    rc=1
+    for _ in $(seq 1 1200); do [ -e "$STATE/$2.review-park" ] || { rc=0; break; }; sleep 0.05; done
+    fm_wake_append_locked check "review-park-held:$2:100-200" "check: park-on-review: held $2" || rc=1
+    fm_wake_append_locked check "review-park-held:$2.b:100-200" "check: park-on-review: held $2.b" || rc=1
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    exit "$rc"' _ "$ROOT" "$2" "$3"
+}
+
+# A publisher already past its guard when teardown starts queues its row after
+# the park record goes and before the prune, which takes the row with it.
+test_teardown_prunes_a_row_published_during_it() {
+  local case_dir wt_head rc publisher
+  case_dir=$(make_case held-park-race)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  printf 'parked_at=100\nheld=200\n' > "$case_dir/state/task-x1.review-park"
+  hold_queue_until_unparked "$case_dir/state" task-x1 "$case_dir/publisher-holds" &
+  publisher=$!
+  for _ in $(seq 1 200); do [ ! -e "$case_dir/publisher-holds" ] || break; sleep 0.05; done
+  assert_present "$case_dir/publisher-holds" "held-park-race: the publisher never took the queue lock"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  wait "$publisher" || fail "held-park-race: the park record did not go before the publisher finished"
+  expect_code 0 "$rc" "held-park-race: teardown should succeed when work is merged into local main"
+  ! grep -q 'review-park-held:task-x1:' "$case_dir/state/.wake-queue" || fail "teardown left a held park wake published during it"
+  grep -q 'review-park-held:task-x1.b:' "$case_dir/state/.wake-queue" || fail "teardown removed another lane's held park wake"
+  pass "teardown also removes a held park wake whose publisher held the queue lock when it started"
+}
+
 # Send the task branch's commits to <target> on origin from a separate clone, so
 # the task copy's tracking refs do not show them. Args: case_dir target
 land_task_commits_from_other_clone() {
@@ -6657,6 +6728,8 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_teardown_leaves_the_merge_cleanup_request_to_its_cleanup
+test_teardown_retires_its_held_park_wakes
+test_teardown_prunes_a_row_published_during_it
 test_landed_on_other_origin_branch_with_stale_refs_allows
 test_refresh_failure_does_not_read_as_landed
 test_refreshed_refs_still_refuse_unreachable_commits
