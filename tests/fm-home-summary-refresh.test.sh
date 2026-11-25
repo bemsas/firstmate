@@ -150,7 +150,7 @@ exit "$rc"
 SH
 cat > "$TRACE_BIN/fm-fleet-snapshot.sh" <<'SH'
 #!/usr/bin/env bash
-date +%s >> "$FM_TEST_SUMMARY_TRACE/collectors"
+printf '%s\n' "$$" >> "$FM_TEST_SUMMARY_TRACE/collectors"
 if [ -e "$FM_TEST_SUMMARY_TRACE/fail-next" ]; then
   rm "$FM_TEST_SUMMARY_TRACE/fail-next"
   printf 'injected collection failure\n' >&2
@@ -159,13 +159,10 @@ fi
 exec "$FM_TEST_REAL_SNAPSHOT" "$@"
 SH
 chmod +x "$TRACE_BIN/fm-home-summary-refresh.sh" "$TRACE_BIN/fm-fleet-snapshot.sh"
-# The fixture's own retry window keeps the watcher's cooldown visible without
-# waiting out the 60-second operational default, which is asserted further down.
 TRACE_ENV=(
   "PATH=$FAKEBIN:$PATH" "FM_ROOT_OVERRIDE=$ROOT" "FM_HOME=$HOME_DIR"
   "FM_BACKEND=tmux" "FM_TEST_SUMMARY_TRACE=$TRACE" "FM_TEST_REAL_SNAPSHOT=$SNAPSHOT"
-  "FM_HOME_SUMMARY_INTERVAL=300" "FM_HOME_SUMMARY_COOLDOWN=6"
-  "FM_SNAPSHOT_NOW=$NOW_TWO" "FM_SNAPSHOT_NOW_EPOCH=$EPOCH_TWO"
+  "FM_HOME_SUMMARY_INTERVAL=300" "FM_SNAPSHOT_NOW=$NOW_TWO" "FM_SNAPSHOT_NOW_EPOCH=$EPOCH_TWO"
   "FM_POLL=1" "FM_SIGNAL_GRACE=0" "FM_CHECK_INTERVAL=9999999" "FM_HEARTBEAT=9999999"
   "FM_WATCH_HANDLING_SUCCESSOR=1"
 )
@@ -197,9 +194,7 @@ cmp -s "$TRACE/original.json" "$SUMMARY" || fail "a fresh ledger was replaced du
 pass "watcher status bursts leave a fresh ledger alone"
 
 # Age the published file without changing its contents so the very next poll
-# is due. A failed attempt must leave that same ledger due for recovery, but no
-# watcher trigger may retry before the failure's cooldown ends. Each
-# collector records its start time, so a slow host cannot hide an early retry.
+# is due. A failed attempt must leave that same ledger due for recovery.
 touch -t 200101010000 "$SUMMARY"
 : > "$TRACE/fail-next"
 env "${TRACE_ENV[@]}" FM_HOME_SUMMARY_IF_IDLE=1 \
@@ -209,34 +204,15 @@ env "${TRACE_ENV[@]}" FM_HOME_SUMMARY_IF_IDLE=1 \
 cmp -s "$TRACE/original.json" "$SUMMARY" || fail "a failed refresh changed the last complete ledger"
 grep -F 'injected collection failure' "$HOME_DIR/state/.home-summary-refresh.log" >/dev/null \
   || fail "the due producer failure was not logged"
-retry_at=$(cat "$HOME_DIR/state/.home-summary-refresh.backoff" 2>/dev/null)
-[ -n "$retry_at" ] || fail "the failed watcher refresh recorded no retry time"
-env "${TRACE_ENV[@]}" FM_HOME_SUMMARY_IF_IDLE=1 \
-  "$TRACE_BIN/fm-home-summary-refresh.sh" --best-effort \
-  || fail "a deferred watcher refresh changed the best-effort result"
-[ "$(date +%s)" -lt "$retry_at" ] || fail "test setup: the early retry outlasted its cooldown"
-[ "$(trace_count collectors)" -eq 1 ] || fail "a watcher trigger retried inside its cooldown"
 
-# A watcher exits on any wake, such as this idle pane going stale inside the
-# window, so relaunch it as supervision does.
-idle_deadline=$(( $(date +%s) + 45 ))
-until wait_for_ledger_generation "$NOW_TWO" 10; do
-  [ "$(date +%s)" -lt "$idle_deadline" ] \
-    || fail "an idle watcher did not retry the failed publication after its window: $(cat "$TRACE/idle.err")"
-  if [ -z "$WATCH_PID" ] || ! kill -0 "$WATCH_PID" 2>/dev/null; then
-    env "${TRACE_ENV[@]}" "$TRACE_BIN/fm-watch.sh" > "$TRACE/idle.out" 2> "$TRACE/idle.err" &
-    WATCH_PID=$!
-  fi
-done
+env "${TRACE_ENV[@]}" "$TRACE_BIN/fm-watch.sh" > "$TRACE/idle.out" 2> "$TRACE/idle.err" &
+WATCH_PID=$!
+wait_for_ledger_generation "$NOW_TWO" \
+  || fail "an idle watcher did not retry the failed publication: $(cat "$TRACE/idle.err")"
 kill "$WATCH_PID" >/dev/null 2>&1 || true
 wait "$WATCH_PID" >/dev/null 2>&1 || true
 WATCH_PID=
 [ "$(trace_count collectors)" -eq 2 ] || fail "the due idle retry did not collect exactly once"
-retried_at=$(sed -n 2p "$TRACE/collectors")
-[ "$retried_at" -ge "$retry_at" ] \
-  || fail "an idle watcher retried at $retried_at, before its cooldown ended at $retry_at"
-[ ! -e "$HOME_DIR/state/.home-summary-refresh.backoff" ] \
-  || fail "the successful retry kept the cooldown record"
 jq -e '[.decisions_open[].key] | sort == ["fixture-1", "fixture-2", "fixture-3"]' "$SUMMARY" >/dev/null \
   || fail "the due publication did not include every decision from the burst"
 run_producer "$NOW_TWO" "$EPOCH_TWO" > "$TRACE/expected.json" \
@@ -245,7 +221,7 @@ jq -S . "$SUMMARY" > "$TRACE/published-normalized.json"
 jq -S . "$TRACE/expected.json" > "$TRACE/expected-normalized.json"
 cmp -s "$TRACE/published-normalized.json" "$TRACE/expected-normalized.json" \
   || fail "the due ledger differed from the real fresh producer"
-pass "idle polls wait out the cooldown, then retry and publish all status changes in one collection"
+pass "the next due idle poll retries failure and publishes all status changes in one collection"
 
 env "${TRACE_ENV[@]}" FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
   "$TRACE_BIN/fm-home-summary-refresh.sh" --best-effort \
@@ -633,17 +609,15 @@ done
 exec "$FM_TEST_REAL_MKDIR" "$@"
 SH
 chmod +x "$MKBIN/mkdir"
-for if_idle in 0 1; do
-  started=$(date +%s)
-  PATH="$MKBIN:$FAKEBIN:$PATH" FM_TEST_REAL_MKDIR="$REAL_MKDIR" \
-    FM_TEST_STALLED_STATE="$HOME_DIR/state" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=1 FM_HOME_SUMMARY_IF_IDLE="$if_idle" \
-    "$WRITER" --best-effort >/dev/null 2>"$TMP_ROOT/stalled-state.err" \
-    || fail "state initialization timeout changed the best-effort caller result (if-idle $if_idle)"
-  elapsed=$(( $(date +%s) - started ))
-  [ "$elapsed" -lt 6 ] \
-    || fail "best-effort refresh waited $elapsed seconds before bounded state initialization (if-idle $if_idle)"
-done
+started=$(date +%s)
+PATH="$MKBIN:$FAKEBIN:$PATH" FM_TEST_REAL_MKDIR="$REAL_MKDIR" \
+  FM_TEST_STALLED_STATE="$HOME_DIR/state" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=1 \
+  "$WRITER" --best-effort >/dev/null 2>"$TMP_ROOT/stalled-state.err" \
+  || fail "state initialization timeout changed the best-effort caller result"
+elapsed=$(( $(date +%s) - started ))
+[ "$elapsed" -lt 6 ] \
+  || fail "best-effort refresh waited $elapsed seconds before bounded state initialization"
 pass "best-effort refresh bounds state initialization"
 
 SIGNALBIN="$TMP_ROOT/signalbin"
@@ -1353,100 +1327,3 @@ case "$report_out" in
     ;;
 esac
 pass "repeated publication failure is reported at session start until it clears"
-
-# --- watcher cooldown --------------------------------------------------------
-#
-# A fake producer drives each outcome, selected by $COOL_HOME/mode; everything
-# else is the real writer, run as the watcher's trigger unless a case says so.
-COOL_HOME="$TMP_ROOT/cooldown-home"
-COOL_BIN="$TMP_ROOT/cooldown-bin"
-COOL_RECORD="$COOL_HOME/state/.home-summary-refresh.backoff"
-mkdir -p "$COOL_HOME/state" "$COOL_BIN"
-ln -s "$ROOT"/bin/* "$COOL_BIN/"
-unlink "$COOL_BIN/fm-fleet-snapshot.sh"
-cat > "$COOL_BIN/fm-fleet-snapshot.sh" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$$" >> "$FM_HOME/collectors"
-case "$(cat "$FM_HOME/mode")" in
-  fail) printf 'injected collection failure\n' >&2; exit 42 ;;
-  hang) sleep 30 ;;
-esac
-jq -n --arg home "$FM_HOME" '{schema:"fm-secondmate-home-summary.v1",
-  hold_classifier_schema:"fm-captain-hold-buckets.v1", home:$home,
-  generated:"2026-08-28T10:00:00Z", generated_epoch:1787911200, valid:true,
-  state:"no_active_work", invalidity:{}, active_children:[], decisions_open:[],
-  holds:[], queued:[], landed:[], endpoints:[], counts:{}, omitted:[]}'
-SH
-chmod +x "$COOL_BIN/fm-fleet-snapshot.sh"
-
-cool_run() {  # <mode> <expected collectors> <message> [VAR=value...]
-  local mode=$1 want=$2 message=$3 begun got
-  shift 3
-  printf '%s\n' "$mode" > "$COOL_HOME/mode"
-  : > "$COOL_HOME/collectors"
-  begun=$(date +%s)
-  env "FM_ROOT_OVERRIDE=$ROOT" "FM_HOME=$COOL_HOME" FM_HOME_SUMMARY_IF_IDLE=1 "$@" \
-    "$COOL_BIN/fm-home-summary-refresh.sh" --best-effort 2>"$COOL_HOME/stderr" \
-    || fail "$message: the best-effort result changed"
-  [ "$(( $(date +%s) - begun ))" -lt 20 ] || fail "$message: the refresh was not bounded"
-  got=$(wc -l < "$COOL_HOME/collectors" | tr -d '[:space:]')
-  [ "$got" -eq "$want" ] || fail "$message: $got collections instead of $want"
-}
-assert_cooldown() {  # <started> <delay> <message>
-  local next ended
-  ended=$(date +%s)
-  next=$(cat "$COOL_RECORD" 2>/dev/null)
-  case "$next" in ''|*[!0-9]*) fail "$3: no recorded epoch: $next" ;; esac
-  [ "$next" -ge "$(($1 + $2))" ] && [ "$next" -le "$((ended + $2))" ] \
-    || fail "$3: $next is not $2 seconds after an attempt in $1..$ended"
-}
-
-started=$(date +%s)
-cool_run fail 1 "first failure"
-assert_cooldown "$started" 60 "a failure must wait the 60-second operational default"
-before=$(cat "$COOL_RECORD")
-cool_run ok 0 "a trigger inside the cooldown"
-cool_run fail 1 "a lifecycle refresh inside the cooldown" FM_HOME_SUMMARY_IF_IDLE=0
-[ "$(cat "$COOL_RECORD")" = "$before" ] || fail "a deferred or lifecycle refresh rewrote the record"
-cool_run ok 1 "a successful lifecycle refresh" FM_HOME_SUMMARY_IF_IDLE=0
-[ ! -e "$COOL_RECORD" ] || fail "a successful refresh kept the cooldown"
-rm -f "$COOL_HOME/state/home-summary.json"
-for ignored in '' garbage 0 "0$before" "$(( $(date +%s) - 1 ))" "$(( $(date +%s) + 999999 ))"; do
-  printf '%s\n' "$ignored" > "$COOL_RECORD"
-  started=$(date +%s)
-  cool_run fail 1 "record '$ignored'"
-  assert_cooldown "$started" 60 "a failure after record '$ignored'"
-done
-pass "a failed watcher refresh waits out one cooldown that any success clears"
-
-rm -f "$COOL_RECORD"
-started=$(date +%s)
-cool_run hang 1 "a timed-out refresh" FM_HOME_SUMMARY_TIMEOUT=1 FM_HOME_SUMMARY_COOLDOWN=30
-assert_cooldown "$started" 31 "a timed-out attempt must cool down from its deadline"
-cool_run ok 0 "a trigger after the timeout" FM_HOME_SUMMARY_TIMEOUT=1 FM_HOME_SUMMARY_COOLDOWN=30
-cool_run ok 1 "a success after the timeout" FM_HOME_SUMMARY_IF_IDLE=0
-[ ! -e "$COOL_RECORD" ] || fail "a success after a timed-out attempt kept its cooldown"
-pass "a timed-out watcher refresh cools down until a success"
-
-for kind in fifo directory symlink; do
-  case "$kind" in
-    fifo) mkfifo "$COOL_RECORD" ;;
-    directory) mkdir "$COOL_RECORD" ;;
-    symlink)
-      printf '%s\n' "$(( $(date +%s) + 60 ))" > "$COOL_HOME/target"
-      ln -s "$COOL_HOME/target" "$COOL_RECORD"
-      before=$(cat "$COOL_HOME/target")
-      ;;
-  esac
-  for mode in fail fail ok; do
-    rm -f "$COOL_HOME/state/home-summary.json"
-    cool_run "$mode" 1 "$mode with a $kind record" FM_HOME_SUMMARY_TIMEOUT=10
-  done
-  [ -f "$COOL_HOME/state/home-summary.json" ] || fail "a $kind record blocked publication"
-  case "$kind" in
-    fifo) [ -p "$COOL_RECORD" ] && rm "$COOL_RECORD" ;;
-    directory) rmdir "$COOL_RECORD" ;;
-    symlink) [ "$(cat "$COOL_HOME/target")" = "$before" ] && [ -L "$COOL_RECORD" ] && rm "$COOL_RECORD" ;;
-  esac || fail "a refresh changed the $kind at the cooldown path"
-done
-pass "a non-regular cooldown path means no cooldown and is left alone"

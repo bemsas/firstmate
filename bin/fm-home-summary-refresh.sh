@@ -31,15 +31,6 @@
 # teardown use that mode so this side-band publication can never change their
 # result. Without it, failures are printed and returned to the direct caller
 # for tests and diagnostics.
-#
-# The watcher's detached trigger (--best-effort with FM_HOME_SUMMARY_IF_IDLE=1)
-# also cools down after an unsuccessful attempt: it skips, exiting zero, until
-# the epoch recorded in state/.home-summary-refresh.backoff. That is
-# FM_HOME_SUMMARY_COOLDOWN seconds (default 60) after a failure, or after the
-# deadline of an attempt that was killed. Only the timed worker touches the
-# record, under the refresh lock. Any successful publication clears it, a
-# malformed or implausibly distant record is ignored, and a non-regular path
-# means no cooldown. Other invocations neither wait for it nor record one.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,12 +43,10 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 LEDGER="$STATE/home-summary.json"
 ERROR_LOG="$STATE/.home-summary-refresh.log"
 REFRESH_LOCK="$STATE/.home-summary-refresh.lock"
-BACKOFF_FILE="$STATE/.home-summary-refresh.backoff"
 ERROR_LOG_MAX_BYTES=${FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES:-65536}
 HOME_SUMMARY_TIMEOUT=${FM_HOME_SUMMARY_TIMEOUT:-60}
 HOME_SUMMARY_IF_IDLE=${FM_HOME_SUMMARY_IF_IDLE:-0}
 HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
-HOME_SUMMARY_COOLDOWN=${FM_HOME_SUMMARY_COOLDOWN:-60}
 BEST_EFFORT=0
 HOME_SUMMARY_MODE=parent
 HOME_SUMMARY_ERROR=
@@ -98,14 +87,6 @@ esac
 case "$HOME_SUMMARY_INTERVAL" in
   ''|*[!0-9]*|0) HOME_SUMMARY_INTERVAL=300 ;;
 esac
-case "$HOME_SUMMARY_COOLDOWN" in
-  ''|*[!0-9]*|0*|???????*) HOME_SUMMARY_COOLDOWN=60 ;;
-esac
-# Only the watcher's detached trigger combines best-effort with if-idle.
-WATCHER_COOLDOWN=0
-if [ "$BEST_EFFORT" -eq 1 ] && [ "$HOME_SUMMARY_IF_IDLE" -eq 1 ]; then
-  WATCHER_COOLDOWN=1
-fi
 
 if [ "$HOME_SUMMARY_MODE" != parent ]; then
   # shellcheck source=bin/fm-wake-lib.sh
@@ -135,25 +116,6 @@ home_summary_is_fresh() {
   [ "$mtime" -le "$now" ] && [ "$((now - mtime))" -lt "$HOME_SUMMARY_INTERVAL" ]
 }
 
-home_summary_cooling_down() {
-  local next now
-  [ -f "$BACKOFF_FILE" ] && [ ! -L "$BACKOFF_FILE" ] || return 1
-  IFS= read -r next 2>/dev/null < "$BACKOFF_FILE" || return 1
-  case "$next" in ''|0*|*[!0-9]*|????????????*) return 1 ;; esac
-  fm_epoch_seconds_to now
-  [ "$next" -gt "$now" ] \
-    && [ "$next" -le "$((now + 10#$HOME_SUMMARY_TIMEOUT + HOME_SUMMARY_COOLDOWN))" ]
-}
-
-home_summary_set_cooldown() {  # <seconds>
-  local now
-  if [ -e "$BACKOFF_FILE" ] || [ -L "$BACKOFF_FILE" ]; then
-    [ -f "$BACKOFF_FILE" ] && [ ! -L "$BACKOFF_FILE" ] || return 0
-  fi
-  fm_epoch_seconds_to now
-  printf '%s\n' "$((now + $1))" 2>/dev/null > "$BACKOFF_FILE" || true
-}
-
 home_summary_refresh_once() {
   local producer_rc producer_error
   if ! mkdir -p "$STATE" 2>/dev/null; then
@@ -172,11 +134,6 @@ home_summary_refresh_once() {
   HOME_SUMMARY_LOCK_HELD=1
   if [ "$HOME_SUMMARY_IF_IDLE" -eq 1 ] && home_summary_is_fresh; then
     return 0
-  fi
-  if [ "$WATCHER_COOLDOWN" -eq 1 ]; then
-    if home_summary_cooling_down; then return 0; fi
-    # The deadline kills this worker, so it must count itself failed up front.
-    home_summary_set_cooldown "$((10#$HOME_SUMMARY_TIMEOUT + HOME_SUMMARY_COOLDOWN))"
   fi
   HOME_SUMMARY_TMP=$(umask 077; mktemp "$STATE/.home-summary.json.XXXXXX") || {
     home_summary_fail "could not create an atomic publication file in $STATE"
@@ -245,9 +202,6 @@ home_summary_refresh_once() {
     return 1
   fi
   HOME_SUMMARY_TMP=
-  if [ -f "$BACKOFF_FILE" ] && [ ! -L "$BACKOFF_FILE" ]; then
-    rm -f -- "$BACKOFF_FILE" 2>/dev/null || true
-  fi
   fm_lock_release "$REFRESH_LOCK"
   HOME_SUMMARY_LOCK_HELD=0
   trap - EXIT HUP INT TERM
@@ -316,7 +270,6 @@ else
   refresh_rc=$?
 fi
 if [ "$BEST_EFFORT" -eq 1 ]; then
-  [ "$WATCHER_COOLDOWN" -eq 0 ] || home_summary_set_cooldown "$HOME_SUMMARY_COOLDOWN"
   home_summary_log_failure
   exit 0
 fi
