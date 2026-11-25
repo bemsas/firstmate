@@ -1398,6 +1398,9 @@ resolve_relaunch_profile() {
   if [ "$(fm_meta_get "$META" claude_sandbox)" = on ] && [ "$TARGET_HARNESS" != claude ]; then
     die "task $ID retains its Claude sandbox policy; switching to another harness is refused before stopping the running agent"
   fi
+  if [ -e "$STATE/$ID.refute.json" ] || [ -L "$STATE/$ID.refute.json" ]; then
+    die "task $ID is a refute review, which must run in one fresh dispatch; relaunching it is refused before stopping the running agent"
+  fi
   # A model or effort chosen for the previous harness does not transfer to a
   # different one, so an explicit harness change resets both axes unless the
   # caller names them too.

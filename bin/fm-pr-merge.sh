@@ -1997,6 +1997,12 @@ case "$PROVIDER" in
       echo 'error: head moved since validation and second-model review' >&2
       exit 1
     fi
+    if [ "$PR_HOST" = github.com ] &&
+      { [ -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/done-acceptance" ] ||
+        [ -L "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/done-acceptance" ]; }; then
+      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+        "$SCRIPT_DIR/fm-done-check.sh" assert "$ID" "$URL" "$FM_PR_MERGE_HEAD" >/dev/null || exit 1
+    fi
     merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       --match-head-commit "$FM_PR_MERGE_HEAD" \
       "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1) || merge_status=$?

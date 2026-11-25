@@ -115,6 +115,8 @@ THREADS_QUERY='query($owner:String!,$repo:String!,$number:Int!){repository(owner
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -305,10 +307,17 @@ vision_blob() {  # <ref> -> blob sha, or "absent"; returns 1 when unreadable
 # Test-only exemptions require a complete forge file list, including rename sources.
 check_review_verdict() {
   local verdict='' files count review_text
+  if fm_dod_acceptance_required "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$EV_TASK" "$EV_URL"; then
+    fm_run_timed "$GH_SECS" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-done-check.sh" assert "$EV_TASK" "$EV_URL" "$EV_SHA" >/dev/null 2>&1 ||
+      add_retry "missing current supervisor acceptance for this head"
+    return 0
+  fi
   review_text=${EV_LINE#*" head $EV_SHA"}
   if [ -f "$STATE/review-verdicts.jsonl" ]; then
     verdict=$(jq -Rrs --arg pr "$EV_URL" --arg head "$EV_SHA" '
-      [split("\n")[] | fromjson? | select(.pr == $pr and .head == $head)
+      [split("\n")[] | fromjson?
+       | select(.pr == $pr and .head == $head and (.verdict == "fix" or (has("refute") | not)))
        | select(.verdict == "merge" or .verdict == "fix")] | last | .verdict // ""' \
       "$STATE/review-verdicts.jsonl" 2>/dev/null) || verdict=''
   fi
@@ -385,8 +394,6 @@ check_live() {
   if [ "$(jqf 'any(.labels[]?; (.name // "") | test("security"; "i"))')" = true ]; then
     add_reason "marked security-sensitive on the pull request"
   fi
-  check_review_verdict
-
   if red=$(fm_pr_github_checks_not_green "$EV_JSON"); then
     nchecks=$(jqf '.statusCheckRollup | length')
     if [ "${nchecks:-0}" -eq 0 ]; then
@@ -490,6 +497,9 @@ evaluate() {  # <status-line>
     return 2
   elif [ "$find_rc" -eq 0 ]; then
     check_task
+    if [ "$(jqf '.baseRefName // ""')" = "$DEV_BASE" ] && [ "$EV_HEAD_CHANGED" -eq 0 ]; then
+      check_review_verdict
+    fi
   fi
   [ -z "$EV_REASON" ]
 }
@@ -555,10 +565,12 @@ act_on_verdict() {  # <evaluate-rc> <advance-command...>
     first=$(printf '%s\n' "$out" | grep -m1 -E '^(error|actionable)' | cut -c1-200)
     [ -n "$first" ] || first=$(printf '%s\n' "$out" | head -n 1 | cut -c1-200)
     log_line "merge refused by fm-pr-merge: ${first:-exit $merge_rc} [$EV_URL $EV_SHA]"
-    case "$out" in
-      *UNKNOWN*|*DIRTY*|*[Pp]ending*|*"not green"*|*"head moved"*|*"head changed"*) ;;
-      *) pending_set "" || return 1 ;;
-    esac
+    if ! grep -Fxq 'error: done acceptance: temporary forge read unavailable' <<< "$out"; then
+      case "$out" in
+        *UNKNOWN*|*DIRTY*|*[Pp]ending*|*"not green"*|*"head moved"*|*"head changed"*) ;;
+        *) pending_set "" || return 1 ;;
+      esac
+    fi
     add_wake "fm-pr-merge refused $EV_URL at $EV_SHA (task $EV_TASK): ${first:-exit $merge_rc}"
   fi
 }

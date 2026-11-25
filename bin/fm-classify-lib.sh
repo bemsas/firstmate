@@ -176,13 +176,17 @@ last_status_line() {  # <status-file> [<previous-event-var>]
 # and captain-held lines a supervisor writes about it. Bounded the same way as
 # last_status_line.
 last_crew_status_line() {  # <status-file>
-  local f=$1 scan='' annotations
+  local f=$1 scan=''
   [ -f "$f" ] && [ -r "$f" ] || return 0
-  annotations="^[[:space:]]*(${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}|${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT})[[:space:]:[]"
-  if ! scan=$(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null | grep -Ev "$annotations" | _fm_status_event_scan); then
-    scan=$(grep -Ev "$annotations" "$f" | _fm_status_event_scan) || :
+  if ! scan=$(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null | _fm_crew_status_event_scan); then
+    scan=$(_fm_crew_status_event_scan < "$f") || :
   fi
   printf '%s\n' "${scan##*$'\n'}"
+}
+
+_fm_crew_status_event_scan() {
+  local annotations="^[[:space:]]*(${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}|${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT})[[:space:]:[]"
+  grep -Ev "$annotations" | _fm_status_event_scan
 }
 
 # 0 when <verb> is exactly one recognized status verb, with no leftover token.

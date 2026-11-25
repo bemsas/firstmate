@@ -230,6 +230,14 @@ if [ "$KIND" = secondmate ]; then
   exit 1
 fi
 
+PR_ACCEPTANCE=0
+PR_ACCEPTED_HEAD=
+if fm_dod_acceptance_required "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$ID" "$URL"; then
+  PR_ACCEPTANCE=1
+  PR_ACCEPTED_HEAD=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-done-check.sh" assert "$ID" "$URL") || exit 1
+fi
+
 # A prior exact merged result may have queued its durable wake immediately
 # before interruption.
 # Finish only its identity-bound receipt before publishing a replacement poll.
@@ -330,8 +338,8 @@ fi
 # same reason, and treats a recorded value that disagrees as stale rather than
 # authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
-PR_HEAD=
-if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
+PR_HEAD=$PR_ACCEPTED_HEAD
+if [ "$PR_ACCEPTANCE" = 0 ] && [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
@@ -348,7 +356,7 @@ case "$PROVIDER:$MODE" in
   *) DONE_LINE="done: PR $URL" ;;
 esac
 FM_DOD_REFRESH_REMOTES=1
-if { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \
+if [ "$PR_ACCEPTANCE" = 0 ] && { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \
   && ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META"); then
   echo "error: $GATE_REASON" >&2
   exit 1
@@ -451,6 +459,10 @@ fm_lock_acquire_wait "$META_LOCK"
 META_LOCK_HELD=1
 [ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_pr_file_link_count "$META")" = 1 ] \
   || { echo "error: task metadata is unavailable" >&2; exit 1; }
+if [ "$PR_ACCEPTANCE" = 1 ]; then
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-done-check.sh" passing "$ID" "$URL" "$PR_HEAD" >/dev/null || exit 1
+fi
 # A scan gathers its candidates before it registers them, so the supervisor may
 # have recorded another PR meanwhile; that choice is never overwritten. Only the
 # exact pr= the scan chose to replace gives way, and only while its merge is

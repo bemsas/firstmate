@@ -12,6 +12,9 @@
 # the pane busy-signature) and reconciles the possibly-stale log against it.
 # A ship `done:` is current-state done only when bin/fm-dod-lib.sh accepts the
 # named head as reachable outside the worker's disposable copy; otherwise blocked.
+# Where that library requires supervisor acceptance, a ship that is not
+# local-only also needs its current candidate accepted, and an attributed run
+# must be at that candidate's full head; otherwise blocked.
 #
 # The determinism lives entirely here - run-step / pane / log reads, fixed
 # mapping logic, and terminal passed-run PR detail from bounded evidence only,
@@ -118,6 +121,9 @@
 #      also a passing outcome (publication or CI verification was
 #      automatically skipped, no-mistakes' own vocabulary), read as done but
 #      with that skip kept visible in the detail, unlike a clean passed.
+#      Where that acceptance is required, a done reading with no PR identity
+#      in the run or the log has nothing to accept: it reads paused when the
+#      run states that publication was skipped, and blocked otherwise.
 #      EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
@@ -309,8 +315,45 @@ emit() {  # <state> <source> [detail]
   exit 0
 }
 
-emit_run() {  # <state> <detail> [pr]
-  local detail=$2
+# Hold a protected delivery unless its attributed run ended at the same full head
+# the supervisor accepted. Callers have already established that acceptance.
+require_candidate_run_head() {  # <full run head>
+  local note pr
+  note=$(status_line_note "$LOG_LINE")
+  pr=$(fm_dod_pr_url_from_done_note "$note") || pr=
+  if [ "$(meta_value mode)" != local-only ] &&
+    fm_dod_acceptance_required "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$ID" "$pr" &&
+    fm_dod_candidate_fields "$note" && [ "$1" != "$FM_DOD_CANDIDATE_HEAD" ]; then
+    emit blocked run-step "run head ${1:-(unavailable)} does not match the accepted candidate $FM_DOD_CANDIDATE_HEAD"
+  fi
+}
+
+emit_run() {  # <state> <detail> [pr] [full run head]
+  local detail=$2 pr=${3:-${RUN_PR:-}} mode candidate=''
+  if [ "$1" = "done" ] && [ "$KIND" = ship ]; then
+    mode=$(meta_value mode)
+    if [ "$(status_line_verb "$LOG_LINE")" = "done" ]; then
+      candidate=$(fm_dod_pr_url_from_done_note "$(status_line_note "$LOG_LINE")") || candidate=
+    fi
+    pr=${pr:-$candidate}
+    if [ "$mode" != local-only ] &&
+      fm_dod_acceptance_required "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$ID" "$pr"; then
+      if [ -z "$pr" ]; then
+        if [ "${RUN_PUBLICATION_SKIPPED:-0}" = 1 ]; then
+          emit paused run-step "validation passed; publication skipped, so there is no PR to accept"
+        fi
+        emit blocked run-step "run completed without a PR identity for supervisor acceptance"
+      fi
+      if ! { [ "$pr" = "$candidate" ] &&
+        fm_dod_candidate_fields "$(status_line_note "$LOG_LINE")" &&
+        fm_dod_should_gate_ship_done "$KIND" "$mode" "$LOG_LINE" &&
+        fm_dod_accept_ship_done "$KIND" "$mode" "$WT" "$(meta_value project)" \
+          "$LOG_LINE" "$STATE" "$ID" "$META" >/dev/null; }; then
+        emit blocked run-step "ship delivery awaits supervisor acceptance for its exact head"
+      fi
+      require_candidate_run_head "${4:-}"
+    fi
+  fi
   case "$1" in
     done|failed) [ -z "${3:-}" ] || detail="$detail${SEP}pr=$3" ;;
   esac
@@ -378,9 +421,10 @@ fi
 # which runs when a ready report is registered, and on each watcher sweep when
 # config/pr-register-scan is on, refreshes the same copy before it refuses, so
 # a read after it sees the fetched head.
-emit_ship_status_done() {  # [extra-detail]
+emit_ship_status_done() {  # [extra-detail] [full run head]
   local extra=${1:-} reason
   if reason=$(fm_dod_accept_ship_done "$KIND" "$(meta_value mode)" "$WT" "$(meta_value project)" "$LOG_LINE" "$STATE" "$ID" "$META"); then
+    [ "$#" -lt 2 ] || require_candidate_run_head "$2"
     emit "done" status-log "$(status_line_note "$LOG_LINE")${extra:+${SEP}$extra}"
   fi
   emit blocked status-log "$reason"
@@ -1152,6 +1196,28 @@ nm_run_head_matches_worktree() {
   fm_nm_head_matches_worktree "$WT" "$run_head"
 }
 
+# Full head of the run in $RUN_OUT. The CLI abbreviates `head` and states the
+# whole commit in `head_sha`; a record without `head_sha` counts only when its
+# `head` is already full. Empty when the two disagree or neither is full.
+nm_run_full_head() {
+  local head full
+  head=$(strip_quotes "$(nm_field head)")
+  full=$(strip_quotes "$(nm_field head_sha)")
+  [ -n "$full" ] || full=$head
+  fm_pr_head_valid "$full" || return 0
+  case "$full" in "$head"*) printf '%s' "$full" ;; esac
+}
+
+# Full head of the newest row for this branch in the fetched ledger. The ledger
+# may abbreviate, so the row must name exactly one commit in this copy.
+nm_ledger_full_head() {
+  local row sha
+  row=$(fm_nm_runs_newest_for_branch "$CREW_BRANCH" "$RUNS_LIST")
+  row=${row#*|}
+  sha=${row%%|*}
+  [ -z "$sha" ] || fm_nm_resolve_commit "$WT" "$sha"
+}
+
 HAVE_RUN=0
 # RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
 # $RUN_OUT is real `axi status` TOON with step/gate detail (including a
@@ -1350,6 +1416,12 @@ if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATE=working
   RUN_DETAIL=""
   RUN_PR=""
+  if [ "$RUN_SOURCE" = coarse ]; then
+    RUN_FULL_HEAD=$(nm_ledger_full_head)
+  else
+    RUN_FULL_HEAD=$(nm_run_full_head)
+  fi
+  RUN_PUBLICATION_SKIPPED=0
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
   RUN_STATUS=""
@@ -1403,7 +1475,11 @@ if [ "$HAVE_RUN" = 1 ]; then
     if [ -n "$outcome" ]; then
       case "$outcome" in
         passed|passed-with-override) RUN_STATE="done"; RUN_DETAIL=$(passed_pr_detail) ;;
-        passed-with-skips) RUN_STATE="done"; RUN_DETAIL="$(passed_pr_detail) (publication/CI verification skipped)" ;;
+        passed-with-skips)
+          RUN_STATE="done"; RUN_DETAIL="$(passed_pr_detail) (publication/CI verification skipped)"
+          case "$(strip_quotes "$(nm_field automatic_skips)")" in
+            "publication skipped:"*) RUN_PUBLICATION_SKIPPED=1 ;;
+          esac ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else
@@ -1476,7 +1552,7 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
-      emit_ship_status_done "run still monitoring PR"
+      emit_ship_status_done "run still monitoring PR" "$RUN_FULL_HEAD"
     fi
     [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
     if [ "$RUN_STATUS" = fixing ]; then
@@ -1487,7 +1563,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       CI_LOG_STATE=not-ready
     fi
     if [ "$CI_LOG_STATE" != not-ready ] && [ "$CI_LOG_STATE" != no-checks ]; then
-      emit_ship_status_done "run still monitoring PR"
+      emit_ship_status_done "run still monitoring PR" "$RUN_FULL_HEAD"
     fi
   fi
 
@@ -1586,7 +1662,7 @@ if [ "$HAVE_RUN" = 1 ]; then
           [ -z "$SELECTED_RUN_ID" ] \
             || SUPERSEDED_DETAIL="$SUPERSEDED_DETAIL${SEP}earlier run: $SELECTED_RUN_ID"
           TERMINAL_PR=$NEWEST_PR
-          emit_run "done" "$SUPERSEDED_DETAIL" "$TERMINAL_PR"
+          emit_run "done" "$SUPERSEDED_DETAIL" "$TERMINAL_PR" "$(nm_ledger_full_head)"
           ;;
         failed)
           if [ "$NEWEST_ROW_AGREES" != 1 ]; then
@@ -1606,7 +1682,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     esac
   fi
 
-  emit_run "$RUN_STATE" "$RUN_DETAIL" "$TERMINAL_PR"
+  emit_run "$RUN_STATE" "$RUN_DETAIL" "$TERMINAL_PR" "$RUN_FULL_HEAD"
 fi
 
 # --- fallback: no run attributed to this crew ------------------------------
