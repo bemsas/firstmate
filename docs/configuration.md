@@ -1155,10 +1155,9 @@ The worker's ready report submits a candidate with `head <full SHA>` after the U
 Worker completion and legacy checklist results can still be inspected.
 Current-state reads, PR registration and the merge path require acceptance for the candidate.
 The no-mistakes pre-validation handoff can start its ordinary pipeline while current state still shows a candidate awaiting acceptance.
-A protected task with an attributed no-mistakes run reports completed delivery only when that run's full head matches the accepted candidate, including a run still monitoring the PR and a ledger run that replaced an earlier failure.
+A protected task with an attributed no-mistakes run reads as completed in current state only when that run's full head matches the accepted candidate, including a run still monitoring the PR and a ledger run that replaced an earlier failure.
 The run record supplies the full head; where only the abbreviated ledger row answers, it must name exactly one commit in the task copy.
 A different or unavailable run head is reported as blocked with both heads.
-A secondmate home holds the child's `done` report to its parent on the same reading.
 A terminal publishing run without a PR identity remains blocked.
 When the pipeline explicitly skips publication and there is no current PR candidate, it reports a pause and explains what was skipped.
 Registration and merge also check the live PR identity and read the target branch tip directly.

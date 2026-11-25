@@ -15,13 +15,9 @@
 # bin/fm-parent-channel-lib.sh from this unstamped payload:
 #   <state> [key=child-outcome-<child>-<state>-<fp8>]: child <child> <state>: <note> [pr=<url>] [mode=<mode>] [yolo=<posture>] [report=data/<child>/report.md]
 # carrying the child's recorded PR, delivery mode, merge posture, and scout
-# report pointer, without consulting fm-crew-state.sh except for a protected
-# ship `done:`. A ship `done:` is published only when bin/fm-dod-lib.sh accepts
-# the named head, so an unpushed copy is not reported upstream as ready. One
-# that requires supervisor acceptance (fm_dod_acceptance_required) is also held
-# while fm-crew-state.sh blocks it on the run attributed to the child
-# (run_permits_ledger_done below). Those reads share half the scan budget, and
-# one that does not fit waits for a later scan. The cadence path uses
+# report pointer, without consulting fm-crew-state.sh. A ship `done:` is
+# published only when bin/fm-dod-lib.sh accepts the named head, so an
+# unpushed copy is not reported upstream as ready. The cadence path uses
 # fm-crew-state.sh, which applies the same gate: a no-mistakes
 # pre-validation `done: {summary}` still reads done (the pipeline handoff),
 # while a CI-ready or direct-PR/local-only done whose head lives only in the
@@ -42,8 +38,7 @@
 # caller that already holds the child's meta lock, which bin/fm-teardown.sh
 # does before it removes the child's record; it exits 0 when the line is
 # delivered or nothing is owed, and non-zero when the parent channel could not
-# be written or a protected done's run could not be read, so teardown refuses
-# instead of discarding an undelivered outcome.
+# be written, so teardown refuses instead of discarding an undelivered outcome.
 # The cadence-gated scan below then evaluates at most once per
 # FM_INACTIVE_RECONCILE_SECS (default 900, valid 60..1800) per home, except
 # that --startup performs the same scan immediately in the locked session
@@ -543,40 +538,12 @@ claim_inactive_report_for_ledger() { # <task> <incarnation> <state> <ledger-fing
   return 1
 }
 
-# The canonical current-state line for one child, with forge reads off.
-read_crew_state() { # <timeout> <id>
-  fm_run_timed "$1" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
-    "$CREW_STATE_BIN" "$2" 2>/dev/null
-}
-
-# Whether the run attributed to a child lets its protected done reach the parent.
-# bin/fm-crew-state.sh owns run attribution and the accepted-head decision; only
-# its run-step answers count, so a child with no attributed run, and one whose run
-# recorded no completion (working, failed, cancelled), keep the ledger's own word.
-# 0 publish, 1 the run blocks this done, 2 the run could not be established.
-run_permits_ledger_done() { # <id>
-  local id=$1 left=$FM_INACTIVE_RECONCILE_BUDGET_SECS line
-  if [ -n "${LEDGER_READ_DEADLINE:-}" ]; then
-    left=$((LEDGER_READ_DEADLINE - $(date +%s)))
-    [ "$left" -ge 1 ] || return 2
-  fi
-  line=$(read_crew_state "$left" "$id") || return 2
-  case "$line" in
-    'state: blocked · source: run-step'*) return 1 ;;
-    'state: unknown · source: run-step · run cancelled: no verdict'*) return 0 ;;
-    'state: unknown · source: run-step'*) return 2 ;;
-    'state: '*) return 0 ;;
-    *) return 2 ;;
-  esac
-}
-
 # The ledger-first parent delivery for one direct child, for a caller holding
 # the child's meta lock. Returns 0 when the line is delivered, already
 # delivered, or nothing is owed, and 1 when it is owed but the parent channel
-# could not be written (the notice is queued once per record) or a protected
-# done's run could not be read.
+# could not be written (the notice is queued once per record).
 report_child_ledger_locked() { # <id> <meta>
-  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line candidate kind protected=0
+  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line candidate
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
@@ -585,23 +552,14 @@ report_child_ledger_locked() { # <id> <meta>
   candidate=$(fm_dod_pr_url_from_done_note "$(status_line_note "$last")") || candidate=
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
-  if [ "$state" = "done" ] && [ ! -f "$(record_path "$fingerprint" reported)" ]; then
-    kind=$(meta_field "$meta" kind)
-    if [ "$mode" != local-only ] &&
-      fm_dod_acceptance_required "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$id" "$candidate"; then
-      protected=1
-    fi
-    if { [ "$protected" = 1 ] || [ ! -f "$(record_path "$fingerprint" pending)" ]; } \
-      && ! fm_dod_accept_ship_done "$kind" "$mode" \
-        "$(meta_field "$meta" worktree)" "$(meta_field "$meta" project)" "$last" \
-        "$STATE" "$id" "$meta" meta-locked >/dev/null; then
-      return 0
-    fi
-    if [ "$protected" = 1 ] && [ "${kind:-ship}" = ship ]; then
-      run_permits_ledger_done "$id" || { [ "$?" -eq 1 ] && return 0; return 1; }
-      # The child appends without this lock; a newer line is a separate event.
-      [ "$(child_terminal_ledger_line "$status")" = "$last" ] || return 1
-    fi
+  if [ "$state" = "done" ] && [ ! -f "$(record_path "$fingerprint" reported)" ] \
+    && { [ ! -f "$(record_path "$fingerprint" pending)" ] ||
+      { [ "$mode" != local-only ] &&
+        fm_dod_acceptance_required "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$id" "$candidate"; }; } \
+    && ! fm_dod_accept_ship_done "$(meta_field "$meta" kind)" "$mode" \
+      "$(meta_field "$meta" worktree)" "$(meta_field "$meta" project)" "$last" \
+      "$STATE" "$id" "$meta" meta-locked >/dev/null; then
+    return 0
   fi
   outcome_key="child-outcome-$id-$state-${fingerprint:0:8}"
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct upstream "$pr" || return 1
@@ -638,13 +596,11 @@ report_child_ledger_locked() { # <id> <meta>
 
 # Every direct child's ledger, under its meta lock. File reads, plus a local
 # git reachability check for a ship done: with no delivery record yet.
-# A protected done claim rechecks acceptance and its run before retrying parent
-# delivery, so it runs on every poll in a secondmate home; a delivery failure is
-# already queued as a notice and never fails the scan.
+# A protected done claim rechecks acceptance before retrying parent delivery, so it
+# runs on every poll in a secondmate home; a delivery failure is already queued as a
+# notice and never fails the scan.
 ledger_pass() {
-  local meta id lock LEDGER_READ_DEADLINE
-  # Rounded up, so a one-second budget still admits a read.
-  LEDGER_READ_DEADLINE=$(( $(date +%s) + (FM_INACTIVE_RECONCILE_BUDGET_SECS + 1) / 2 ))
+  local meta id lock
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     id=$(basename "$meta" .meta)
@@ -718,7 +674,8 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   age=$(last_activity_age "$meta" "$status" "$turn")
   [ "$age" -ge "$FM_INACTIVE_RECONCILE_SECS" ] || return 0
   started=$(date +%s)
-  state_line=$(read_crew_state "$timeout" "$id") || state_rc=$?
+  state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
+    "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
   last=$(last_status_line "$status")
   if [ -n "$self" ]; then
@@ -814,7 +771,6 @@ scan() {
   local startup=${1:-0} self='' cursor deadline rc=0 marker_rc=0
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
-  deadline=$(( $(date +%s) + FM_INACTIVE_RECONCILE_BUDGET_SECS ))
   if self=$(home_secondmate_id); then
     # The ledger-first delivery is per poll, not per cadence.
     ledger_pass
@@ -833,6 +789,7 @@ scan() {
       "inactive terminal outcomes remain unreconciled: invalid .fm-secondmate-home marker" || true
     return 0
   fi
+  deadline=$(( $(date +%s) + FM_INACTIVE_RECONCILE_BUDGET_SECS ))
   SCAN_FIRST_VISIT_PENDING=1
   scan_pass "$cursor" after "$deadline" "$self" || rc=$?
   if [ "$rc" -eq 0 ] && [ -n "$cursor" ]; then
