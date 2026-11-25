@@ -798,7 +798,16 @@ done
 body=$(jq -r "$expr" "$FM_FAKE_GH_JSON") || exit 1
 printf 'api_response:\n  body: "%s"\n  truncated: %s\n' "$body" "$([ -n "${FM_FAKE_GH_TRUNCATED:-}" ] && echo true || echo false)"
 SH
-  chmod +x "$1/fakebin/gh-axi"
+  # The Darwin half of review_spawn's host; every other key is the real sysctl's.
+  cat > "$1/fakebin/sysctl" <<'SH'
+#!/usr/bin/env bash
+case "${2:-}" in
+  vm.loadavg) echo '{ 0.00 0.00 0.00 }' ;;
+  kern.memorystatus_level) echo 60 ;;
+  *) PATH=/usr/sbin:/sbin:/usr/bin:/bin exec sysctl "$@" ;;
+esac
+SH
+  chmod +x "$1/fakebin/gh-axi" "$1/fakebin/sysctl"
   : > "$1/gh.log"
 }
 
@@ -823,8 +832,10 @@ forge_answer() {  # <case-dir> <total-count> [<node>...]
   printf '%s\n' "$@" | jq -s --argjson t "$total" --arg def "${FORGE_DEFAULT-main}" '{data: {repository: {defaultBranchRef: (if $def == "" then null else {name: $def} end), pullRequests: {totalCount: $t, nodes: .}}}}' > "$out"
 }
 
-# Review spawns read an idle, roomy host fixture, so the always-on host gate
-# can never decide a review case on this machine's live load or memory.
+# Review spawns read an idle, roomy host fixture on every platform, so the
+# always-on host gate can never decide a review case on this machine's live load
+# or memory: review_forge's sysctl answers the Darwin probes and a fixture /proc
+# the others. The core count stays real, and a load of 0.00 is under every limit.
 review_spawn() {  # <case-dir> <id> [pane-path]
   FM_PROC_ROOT_OVERRIDE=$(host_proc "$1" review 0.00 60) \
     FM_FAKE_GH_LOG="$1/gh.log" FM_FAKE_GH_JSON="$1/forge.json" spawn_ship "$@"
@@ -834,6 +845,31 @@ review_spawn() {  # <case-dir> <id> [pane-path]
 # handoff recorded long before the spawn's forge read.
 age_record() {  # <meta>
   perl -e 'utime(time - 600, time - 600, $ARGV[0]) or exit 1' "$1"
+}
+
+# The fixture host decides on both probe families: this "machine" is overloaded
+# behind it, whichever platform the gate believes it is on. What is faked is only
+# what the gate reads (uname, sysctl, /proc); no other Darwin behavior is claimed.
+test_review_spawns_never_read_this_machines_load_or_memory() {
+  local case_dir out rc os
+  for os in Darwin Linux; do
+    case_dir=$(make_case "review-host-$os" task-c)
+    github_target "$case_dir"
+    review_forge "$case_dir"
+    forge_answer "$case_dir" 0
+    mkdir -p "$case_dir/machine"
+    # shellcheck disable=SC2016 # expanded by the fake sysctl
+    printf '#!/usr/bin/env bash\ncase "${2:-}" in vm.loadavg) echo "{ 100000.00 1.00 1.00 }" ;; kern.memorystatus_level) echo 1 ;; *) exit 1 ;; esac\n' > "$case_dir/machine/sysctl"
+    # shellcheck disable=SC2016 # expanded by the fake uname
+    printf '#!/usr/bin/env bash\n[ "${1:-}" != -s ] || { echo %s; exit 0; }\nPATH=/usr/bin:/bin exec uname "$@"\n' "$os" > "$case_dir/machine/uname"
+    chmod +x "$case_dir/machine/sysctl" "$case_dir/machine/uname"
+    rc=0
+    out=$(PATH="$case_dir/machine:$PATH" review_spawn "$case_dir" task-c) || rc=$?
+    assert_not_contains "$out" "host is overloaded" "a review spawn read this machine through its $os probes"
+    expect_code 0 "$rc" "a review spawn under the $os probes was not admitted: $out"
+    assert_contains "$out" "spawned task-c" "a review spawn under the $os probes did not launch"
+  done
+  pass "a review spawn is judged on its fixture host under both the Darwin and the Linux probes, never on this machine"
 }
 
 test_review_capacity_admits_below_the_cap_with_one_bounded_call() {
@@ -1182,6 +1218,7 @@ test_lane_capacity_gate_is_opt_in
 test_lane_capacity_gate_defers_without_leaving_anything_behind
 test_lane_capacity_gate_refuses_an_unreadable_opt_in
 test_host_gate_defers_an_overloaded_host_and_keeps_the_task_queued
+test_review_spawns_never_read_this_machines_load_or_memory
 test_review_capacity_admits_below_the_cap_with_one_bounded_call
 test_review_capacity_defers_a_full_queue_without_leaving_anything_behind
 test_review_capacity_counts_unpublished_work_once
