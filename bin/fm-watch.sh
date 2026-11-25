@@ -3501,11 +3501,26 @@ park_ring_after_output() {
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 }
 
-# Ring what a park tick printed. A held outcome is rung only while its wake row
-# is still queued, decided and printed under the queue lock an acknowledgement
-# consumes rows under, so one acknowledged after the tick read its receipt is
-# never rung. A lock not free within the wait, or a queue that cannot be read,
-# proves nothing: the line is not rung here, and its row, while it stays queued,
+# Whether the episode its lane is held for now is still queued as <held-line> and
+# not acknowledged. The drain commits the receipt before it removes the row, so a
+# row whose removal failed is acknowledged all the same.
+park_held_ringable_locked() {  # <held-line>
+  local id episode rc=0
+  id=${1#held }
+  id=${id%%:*}
+  episode=$(awk -F= '$1 == "parked_at" { parked = $2 } $1 == "held" { held = $2 } END { print parked "-" held }' \
+    "$STATE/$id.review-park" 2>/dev/null) || return 1
+  fm_wake_queue_has_payload_locked check "review-park-held:$id:$episode" "check: park-on-review: $1" || return 1
+  fm_wake_park_held_acked "$id" "$episode" || rc=$?
+  [ "$rc" -eq 1 ]
+}
+
+# Ring what a park tick printed. A held outcome is rung only while its exact
+# episode's wake row is queued and unacknowledged, decided and printed under the
+# queue lock an acknowledgement commits its receipt and consumes rows under, so
+# one acknowledged after the tick read its receipt is never rung. A lock not free
+# within the wait, or a record, queue, or receipt that cannot be read, proves
+# nothing: the line is not rung here, and its row, while it stays queued,
 # surfaces through resurface_after_downtime.
 PARK_RING_LOCK_SECS=10
 park_ring() {  # <tick-output>
@@ -3518,7 +3533,7 @@ park_ring() {  # <tick-output>
     case "$line" in
       'held '*)
         [ "$locked" -eq 1 ] || continue
-        fm_wake_queue_has_payload_locked check review-park-held: "check: park-on-review: $line" || continue
+        park_held_ringable_locked "$line" || continue
         held=1
         ;;
     esac

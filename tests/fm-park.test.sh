@@ -115,7 +115,8 @@ SH
   # record that says held while held.mv.fail exists, and for one that carries
   # the published marker, after running it, while marker.mv.hook exists (unless
   # marker.mv.keep lets that write go on). It fails for the lane's held receipt
-  # while receipt.mv.fail exists. Retiring the lane's park record, by rm or by
+  # while receipt.mv.fail exists, and for the wake queue while queue.mv.fail
+  # exists. Retiring the lane's park record, by rm or by
   # moving it away, fails while retire.fail exists, and runs retire.before or
   # retire.after, once, around it.
   cat > "$fakebin/mv" <<SH
@@ -139,6 +140,7 @@ if [ "\$last" = "$world/state/lane.review-park" ]; then
   fi
 fi
 [ "\$last" != "$world/state/.review-park-held-acked-lane" ] || [ ! -e "$world/receipt.mv.fail" ] || exit 1
+[ "\$last" != "$world/state/.wake-queue" ] || [ ! -e "$world/queue.mv.fail" ] || exit 1
 PATH=/usr/bin:/bin exec mv "\$@"
 SH
   # exit.hook runs once as a park process removes its temporary directory, its
@@ -1623,7 +1625,7 @@ run_watcher() {  # <world>
 # tick printed it. Ordinary delivery, a different outcome of the same tick, and
 # another wake's row are untouched, and evidence that cannot be read never rings.
 test_held_outcome_acknowledged_before_delivery_is_not_rung() {
-  local w out parked held row
+  local w out parked held row how
   # Two lanes in one tick: both rows are acknowledged inside the second's
   # marker write, after the first was published.
   w=$(make_world ack-between-lanes "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
@@ -1680,6 +1682,42 @@ test_held_outcome_acknowledged_before_delivery_is_not_rung() {
   run_watcher "$w" || fail "watch-acked-mixed: the watcher failed: $(cat "$w/watch.err")"
   [ "$(cat "$w/watch.out")" = "check: park-on-review: cleaned up other: PR x merged" ] || fail "watch-acked-mixed: $(cat "$w/watch.out")"
   [ "$(awk -F '\t' '{print $4}' "$w/state/.wake-queue")" = unrelated ] || fail "watch-acked-mixed: wake queue: $(cat "$w/state/.wake-queue")"
+
+  # An acknowledgement cut between the two things it commits: its receipt is
+  # durable but its queue update failed, so the row is still queued. Alone it is
+  # not rung; beside another outcome only that one is. A receipt of an earlier
+  # episode stops nothing, and the retained row is delivered by the next drain.
+  for how in alone mixed earlier; do
+    w=$(make_world "watch-partial-$how" "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+    gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+    : > "$w/state/.review-park-held-acked-lane"
+    if [ "$how" = earlier ]; then
+      printf '1-1\n' > "$w/state/.review-park-held-acked-lane"
+    else
+      { printf ': > "%s"\n' "$w/queue.mv.fail"
+        drain_and_ack_lines "$w" | sed "s|^PATH=/usr/bin:/bin$|PATH=$w/fakebin:/usr/bin:/bin|"
+        printf 'rm -f "%s"\n' "$w/queue.mv.fail"; } > "$w/exit.hook"
+    fi
+    [ "$how" = alone ] || printf 'cleaned up other: PR x merged\n' > "$w/state/.review-park-report-other-1-1"
+    run_watcher "$w" || true
+    [ "$(held_rows "$w")" = 1 ] && [ ! -e "$w/state/.wake-queue.lock" ] || fail "watch-partial-$how: the row or its queue lock was not left as the drain needs it"
+    if [ "$how" = earlier ]; then
+      grep -q 'held lane: ' "$w/watch.out" || fail "watch-partial-earlier: another episode's receipt stopped the ring: $(cat "$w/watch.out" "$w/watch.err")"
+    else
+      row="$(sed -n 's/^parked_at=//p' "$w/state/lane.review-park")-$(sed -n 's/^held=//p' "$w/state/lane.review-park")"
+      if [ -e "$w/hook.acked" ] || ! grep -qF 'acknowledged wakes could not be consumed safely' "$w/hook.out" \
+        || ! grep -qxF "$row" "$w/state/.review-park-held-acked-lane"; then
+        fail "watch-partial-$how: the fixture did not leave a partial acknowledgement: $(cat "$w/hook.err" "$w/hook.out")"
+      fi
+      ! grep -q 'held lane: ' "$w/watch.out" || fail "watch-partial-$how: an acknowledged outcome was rung: $(cat "$w/watch.out")"
+    fi
+    [ "$how" != mixed ] || [ "$(cat "$w/watch.out")" = "check: park-on-review: cleaned up other: PR x merged" ] || fail "watch-partial-mixed: $(cat "$w/watch.out")"
+    drain_and_ack "$w" "watch-partial-$how"
+    [ "$(grep -c 'held lane: ' "$w/drain.out")" = 1 ] || fail "watch-partial-$how: the drain did not deliver the retained row once: $(cat "$w/drain.out")"
+    [ "$(held_rows "$w")" = 0 ] || fail "watch-partial-$how: the retained row could not be acknowledged"
+    out=$(run_park "$w" tick 2>&1)
+    case "$out" in *'held lane'*) fail "watch-partial-$how: published again: $out" ;; esac
+  done
 
   # A queue made unreadable once the tick has queued and printed the held line
   # does not ring it; that watcher may still wake for something else. The exact

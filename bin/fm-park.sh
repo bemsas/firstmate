@@ -1032,18 +1032,9 @@ held_unpublished() {  # <id> <episode>
   fm_wake_queue_has_key_locked check "review-park-held:$1:$2" || rc=$?
   case "$rc" in 0) HELD_SEEN=queued; return 1 ;; 1) ;; *) return 1 ;; esac
   rc=0
-  held_acked "$1" "$2" || rc=$?
+  fm_wake_park_held_acked "$1" "$2" || rc=$?
   case "$rc" in 0) HELD_SEEN=acked; return 1 ;; 1) ;; *) return 1 ;; esac
   HELD_SEEN=
-}
-
-# Whether the drain acknowledged this episode: 0 yes, 1 no, 2 unreadable.
-held_acked() {  # <id> <episode>
-  local receipt="$STATE/.review-park-held-acked-$1" rc=0
-  [ -e "$receipt" ] || [ -L "$receipt" ] || return 1
-  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 2
-  grep -qxF -- "$2" "$receipt" 2>/dev/null || rc=$?
-  return "$rc"
 }
 
 # Appends one wake row within what the tick has left. With nothing left it still
@@ -1088,7 +1079,7 @@ ring_held() {
   set -- ${HELD_RINGS[@]+"${HELD_RINGS[@]}"}
   while [ "$#" -gt 0 ]; do
     rc=0
-    held_acked "$1" "$2" || rc=$?
+    fm_wake_park_held_acked "$1" "$2" || rc=$?
     [ "$rc" -ne 1 ] || printf '%s\n' "$3"
     shift 3
   done

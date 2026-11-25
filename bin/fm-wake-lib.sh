@@ -2883,16 +2883,16 @@ fm_wake_queue_has_key_locked() {
     'NF >= 5 && $3 == kind && $4 == key { found = 1 } END { exit !found }'
 }
 
-# fm_wake_queue_has_payload_locked <kind> <key-prefix> <payload>: the same answer
-# for a row whose key starts with <key-prefix> and whose payload is <payload>.
+# fm_wake_queue_has_payload_locked <kind> <key> <payload>: the same answer for a
+# row whose payload is also <payload>.
 fm_wake_queue_has_payload_locked() {
   local rows payload
   [ -e "$FM_WAKE_QUEUE" ] || [ -L "$FM_WAKE_QUEUE" ] || return 1
   rows=$(cat -- "$FM_WAKE_QUEUE" 2>/dev/null) || return 2
   payload=$(printf '%s' "$3" | fm_wake_clean_field) || return 2
   # Through the environment, so a backslash in the payload stays itself.
-  printf '%s\n' "$rows" | FM_WAKE_MATCH=$payload awk -F '\t' -v kind="$1" -v prefix="$2" \
-    'NF >= 5 && $3 == kind && index($4, prefix) == 1 && $5 == ENVIRON["FM_WAKE_MATCH"] { found = 1 } END { exit !found }'
+  printf '%s\n' "$rows" | FM_WAKE_MATCH=$payload awk -F '\t' -v kind="$1" -v key="$2" \
+    'NF >= 5 && $3 == kind && $4 == key && $5 == ENVIRON["FM_WAKE_MATCH"] { found = 1 } END { exit !found }'
 }
 
 # fm_wake_queued_carries_locked: 0 iff an unacknowledged queued row of <kind>
@@ -3008,6 +3008,16 @@ fm_wake_commit_secondmate_stall_receipts_through() { # <cutoff> [<rows-file>]
   ' "$FM_WAKE_QUEUE" 2>/dev/null)
 }
 
+# Whether the drain acknowledged this held review-park episode: 0 yes, 1 no,
+# 2 unreadable. Its row can still be queued: the receipt is committed first.
+fm_wake_park_held_acked() { # <task> <episode>
+  local receipt="$STATE/.review-park-held-acked-$1" rc=0
+  [ -e "$receipt" ] || [ -L "$receipt" ] || return 1
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 2
+  grep -qxF -- "$2" "$receipt" 2>/dev/null || rc=$?
+  return "$rc"
+}
+
 # Commit the receipt of every held review-park outcome an acknowledgement is
 # about to consume, under the queue lock and before its row is removed, so a
 # park tick interrupted after its append never publishes that episode again
@@ -3037,13 +3047,10 @@ fm_wake_commit_park_held_receipts_through() { # <cutoff> [<rows-file>]
     task=${key%:*}
     [ -e "$STATE/$task.review-park" ] || continue
     receipt="$STATE/.review-park-held-acked-$task"
-    if [ -e "$receipt" ] || [ -L "$receipt" ]; then
-      [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
-      rc=0
-      grep -qxF -- "$episode" "$receipt" 2>/dev/null || rc=$?
-      [ "$rc" -ne 0 ] || continue
-      [ "$rc" -eq 1 ] || return 1
-    fi
+    rc=0
+    fm_wake_park_held_acked "$task" "$episode" || rc=$?
+    [ "$rc" -ne 0 ] || continue
+    [ "$rc" -eq 1 ] || return 1
     # Named as drain scratch, so a later drain removes one a crash left behind.
     tmp=$(mktemp "$STATE/.wake-queue.ack.XXXXXX") || return 1
     if ! { { [ ! -e "$receipt" ] || awk '1' "$receipt"; } && printf '%s\n' "$episode"; } > "$tmp" \
