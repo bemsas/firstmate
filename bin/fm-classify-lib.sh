@@ -1301,7 +1301,9 @@ EOF
 # shared fold rule retires removes one.
 #
 # The cursor format is `version` (FM_OPEN_DECISIONS_FOLD_VERSION plus the task
-# kind, as `<n>:<kind>`), `offset`, `ident`, then the folded open set.
+# kind, as `<n>:<kind>`, with an `:override-<sum>` suffix when a classification
+# override is in effect), `offset`, `ident`, then the folded open set. `offset`
+# only ever ends a complete newline-terminated record.
 # The optional timed view uses a separate `.timed` cursor and adds `:timed3`
 # to the version; status_open_decisions_incremental owns its row format.
 # FM_OPEN_DECISIONS_FOLD_VERSION must be bumped whenever
@@ -1362,10 +1364,31 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # malformed worker stamp whose colons used to pose as the head/note separator
 # no longer opens or closes anything; cursors folded under that reading are
 # discarded.
+# 10: the persisted offset advances only past complete newline-terminated
+# records, so a later append can never join a fragment the cursor already
+# folded, and a cursor folded under a classification override records that
+# override in its version; cursors from earlier versions may have ended inside
+# a record, so they are discarded.
+# 11: the writer reads its bytes through the same open descriptor whose
+# device, inode and extent it certifies against the identity it persists, so a
+# file renamed over the status path between the identity read and the byte read
+# can no longer lend the earlier identity to another file's rows; version-10
+# cursors were written without that proof, so they are discarded.
 # Version 4 was already spent on the bracketed-tag parser change above, and a
 # cursor persisted under that reading predates this one, so it must still be
 # discarded and rebuilt from byte 0 under the new reading.
-FM_OPEN_DECISIONS_FOLD_VERSION=9
+FM_OPEN_DECISIONS_FOLD_VERSION=11
+
+# Fold-version suffix naming any classification override in effect, so a cursor
+# folded under one is never trusted by a fold without it, or the reverse.
+_fm_open_decisions_override_suffix() {
+  local sum
+  [ -n "${FM_CLASSIFY_RESOLVE_VERB:-}${FM_CLASSIFY_CAPTAIN_HELD_VERB:-}${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-}" ] || return 0
+  sum=$(printf 'resolve=%s\nheld=%s\nreserved=%s\n' "${FM_CLASSIFY_RESOLVE_VERB:-}" \
+    "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-}" "${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-}" | LC_ALL=C cksum) || sum=unknown
+  sum=${sum//[!0-9]/-}
+  printf ':override-%s' "$sum"
+}
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
@@ -1380,13 +1403,15 @@ _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
 
 # One stat exec sets _FM_STAT_IDENTITY and _FM_STAT_SIZE for <file>, because
 # the drain reads identity and size of every status file several times and
-# each exec is slow on a loaded host.
-_fm_status_stat_fields() {  # <file>
-  local out dev_ino epoch birth rest
+# each exec is slow on a loaded host. --follow reads the file a link names,
+# such as an open descriptor's /proc entry, instead of the link itself.
+_fm_status_stat_fields() {  # <file> [--follow]
+  local out dev_ino epoch birth rest follow=
+  [ "${2:-}" != --follow ] || follow=1
   if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
-    out=$(LC_ALL=C /usr/bin/stat -f '%d:%i%t%z%t%B%t%FB' "$1" 2>/dev/null) || return 1
+    out=$(LC_ALL=C /usr/bin/stat ${follow:+-L} -f '%d:%i%t%z%t%B%t%FB' "$1" 2>/dev/null) || return 1
   else
-    out=$(LC_ALL=C stat -c $'%d:%i\t%s\t%W\t%w' "$1" 2>/dev/null) || return 1
+    out=$(LC_ALL=C stat ${follow:+-L} -c $'%d:%i\t%s\t%W\t%w' "$1" 2>/dev/null) || return 1
   fi
   dev_ino=${out%%$'\t'*}; rest=${out#*$'\t'}
   _FM_STAT_SIZE=${rest%%$'\t'*}; rest=${rest#*$'\t'}
@@ -1461,14 +1486,64 @@ _fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
   ' "$f" "$start" "$length"
 }
 
+# Certified sibling of _fm_status_read_span for the cursor writer: print the
+# span only when the bytes come from the file <identity> names. One descriptor
+# is opened first; the path's full identity must then still equal <identity>,
+# and that same descriptor's device and inode must equal its device and inode.
+# The held descriptor keeps its inode from being reused, so together these
+# prove the bytes come from the identified file, birth time included. The
+# descriptor's size must cover the requested extent before and after the read;
+# append-only growth past it is allowed. Any mismatch returns 3 and prints
+# nothing the caller may persist. Injected test readers keep the uncertified
+# path because they replace the very reads this certifies.
+_fm_status_read_span_certified() {  # <status-file> <start-offset> <byte-length> <identity>
+  local f=$1 start=$2 length=$3 expect=$4 dev_ino rest
+  if [ -n "${FM_STATUS_SPAN_READER:-}${FM_STATUS_IDENTITY_READER:-}${FM_STATUS_SIZE_READER:-}" ]; then
+    _fm_status_read_span "$f" "$start" "$length"
+    return
+  fi
+  case "$expect" in
+    strong:*|weak:*) rest=${expect#*:} ;;
+    *) return 3 ;;
+  esac
+  dev_ino=${rest%%:*}; rest=${rest#*:}
+  dev_ino="$dev_ino:${rest%%:*}"
+  case "$dev_ino" in *[!0-9:]*|:*|*:|*:*:*) return 3 ;; esac
+  # The group only reads <f>: stat by path, bytes through the held descriptor.
+  # shellcheck disable=SC2094
+  {
+    _fm_status_stat_fields "$f" || return 3
+    [ "$_FM_STAT_IDENTITY" = "$expect" ] || return 3
+    perl -MFcntl=:DEFAULT -e '
+      my ($dev_ino, $start, $length) = @ARGV;
+      open(my $file, "<&=", 8) or exit 1;
+      my $end = $start + $length;
+      my @st = stat($file) or exit 3;
+      "$st[0]:$st[1]" eq $dev_ino && $st[7] >= $end or exit 3;
+      sysseek($file, $start, 0) == $start or exit 1;
+      my $out = "";
+      while ($length > 0) {
+        my $want = $length > 65536 ? 65536 : $length;
+        my $read = sysread($file, my $chunk, $want);
+        defined($read) && $read > 0 or exit 1;
+        $out .= $chunk;
+        $length -= $read;
+      }
+      @st = stat($file) or exit 3;
+      "$st[0]:$st[1]" eq $dev_ino && $st[7] >= $end or exit 3;
+      print $out or exit 1;
+    ' "$dev_ino" "$start" "$length"
+  } 8< "$f"
+}
+
 status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [timed]
   local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
   local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
-  local target_cursor kind fold_version timed=${3:-}
+  local target_cursor kind fold_version timed=${3:-} fragment_size reported
   case "$timed" in ''|timed) ;; *) return 2 ;; esac
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   kind=$(_fm_status_kind "$f")
-  fold_version="$FM_OPEN_DECISIONS_FOLD_VERSION:$kind"
+  fold_version="$FM_OPEN_DECISIONS_FOLD_VERSION:$kind$(_fm_open_decisions_override_suffix)"
   cf=$(_fm_open_decisions_cursor_path "$f")
   # A separate cursor keeps the ordinary presentation view byte-compatible.
   # Timed rows are <key> TAB <verb> TAB <epoch-or-unknown> TAB
@@ -1543,9 +1618,15 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [
     cursor_dirty=1
   fi
 
+  # The cursor persists only complete records. A trailing fragment still folds
+  # into what this call returns, matching the whole-file fold, but is never
+  # persisted, so the next call refolds it once its record completes.
+  reported=$open
   if [ "$offset" -lt "$size" ]; then
     chunk_file="$cf.read.$$"
-    _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
+    # The bytes must come from the file cur_ident names, or rows from a file
+    # rotated in after the identity read would be persisted under it.
+    _fm_status_read_span_certified "$f" "$offset" "$((size - offset))" "$cur_ident" > "$chunk_file" 2>/dev/null \
       || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
     chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) \
       || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
@@ -1553,6 +1634,8 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [
     case "$chunk_size" in
       ''|*[!0-9]*) rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0 ;;
     esac
+    [ "$chunk_size" -eq "$((size - offset))" ] \
+      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
     # Test-only observability seam (off by default, no production behavior
     # change): when set, records exactly how many bytes THIS call folded, so a
     # test can assert the incremental path stays bounded by new appends rather
@@ -1561,12 +1644,25 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [
       && printf '%s\t%s\n' "$f" "$chunk_size" >> "$FM_OPEN_DECISIONS_READ_PROBE"
     resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
     held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
-    while IFS= read -r line || [ -n "$line" ]; do
+    fragment_size=$(LC_ALL=C perl -0777 -ne 'print length($_) - rindex($_, "\n") - 1' "$chunk_file" 2>/dev/null) \
+      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+    case "$fragment_size" in
+      ''|*[!0-9]*) rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0 ;;
+    esac
+    line=
+    while IFS= read -r line; do
       open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind" "$timed")
+      line=
     done < "$chunk_file"
     rm -f "$chunk_file"
-    offset=$size
-    cursor_dirty=1
+    reported=$open
+    if [ "$fragment_size" -gt 0 ] && [ -n "$line" ]; then
+      reported=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind" "$timed")
+    fi
+    if [ "$fragment_size" -lt "$chunk_size" ]; then
+      offset=$((size - fragment_size))
+      cursor_dirty=1
+    fi
   fi
   if [ "$cursor_dirty" -eq 1 ]; then
     target_cursor="$cf.tmp.$$"
@@ -1578,7 +1674,34 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [
     } > "$target_cursor" || return 1
     mv -f "$target_cursor" "$cf" || return 1
   fi
-  printf '%s' "$open"
+  printf '%s' "$reported"
+}
+
+# Read-only exact reuse of the persisted open-decision cursor above: print its
+# folded open set only when it records this fold version and normalized <kind>,
+# exactly <ident>, and exactly <size> bytes, which the caller proves describe
+# the history it captured. The writer persists only complete records under a
+# version naming any override, so a match is exactly the whole-file fold of
+# those bytes; an override in this reader's own environment refuses, because
+# the canonical fold would then differ from the default one. On refusal this prints
+# nothing and returns 1, so the caller keeps status_open_decisions as the
+# canonical fallback; output after a refusal mid-body is partial and the caller
+# must replace it. Never writes the cursor.
+status_open_decisions_cursor_exact() {  # <status-file> <kind> <ident> <size>
+  local f=$1 kind ident=$3 size=$4 cf version offset cursor_ident
+  [ -z "${FM_CLASSIFY_RESOLVE_VERB:-}${FM_CLASSIFY_CAPTAIN_HELD_VERB:-}${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-}" ] || return 1
+  [ -n "$ident" ] || return 1
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  kind=$(_fm_status_kind "$f" "$2")
+  cf=$(_fm_open_decisions_cursor_path "$f")
+  [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ] || return 1
+  {
+    IFS= read -r version && IFS= read -r offset && IFS= read -r cursor_ident &&
+      [ "$version" = "version=$FM_OPEN_DECISIONS_FOLD_VERSION:$kind" ] &&
+      [ "$offset" = "offset=$size" ] &&
+      [ "$cursor_ident" = "ident=$ident" ] &&
+      LC_ALL=C command cat
+  } < "$cf" 2>/dev/null
 }
 
 # Incremental sibling of scan_open_decisions: same fleet-wide directory walk and
@@ -2122,7 +2245,7 @@ status_open_decisions_cursor_offset() {  # <status-file>
   local f=$1 cf offset=0 ident='' version='' cursor_data first rest open=''
   local offset_line ident_line cur_ident size fold_version
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
-  fold_version="$FM_OPEN_DECISIONS_FOLD_VERSION:$(_fm_status_kind "$f")"
+  fold_version="$FM_OPEN_DECISIONS_FOLD_VERSION:$(_fm_status_kind "$f")$(_fm_open_decisions_override_suffix)"
   cf=$(_fm_open_decisions_cursor_path "$f")
   if [ -e "$cf" ] || [ -L "$cf" ]; then
     [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ] || return 1
