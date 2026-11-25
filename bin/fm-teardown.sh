@@ -3792,6 +3792,8 @@ teardown_refute_review_settled() {
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
     "$SCRIPT_DIR/fm-done-check.sh" retire-review "$ID" && return 0
   echo "REFUSED: refute scout $ID still holds an unsettled review; its status is kept." >&2
+  fm_backlog_close_marker_clear "$STATE" "$ID" \
+    || echo "error: $ID's pending backlog close could not be cleared ($FM_BACKLOG_TRANSITION_ERROR); clear it before the next session start replays it" >&2
   return 1
 }
 teardown_refute_review_settled || exit 1
@@ -4253,10 +4255,10 @@ if [ -n "$LAUNCH_HOME_TOKEN" ]; then
 fi
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+teardown_refute_review_settled || exit 1
 # Opt-in fleet activity ledger (docs/fleet-ledger.md), before the status log is
 # retired so its last lines are captured; off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
-teardown_refute_review_settled || exit 1
 teardown_retire_status "$STATE" "$ID" || exit 1
 # The park record goes first: without it no park tick can queue another held
 # wake after the prune, and no acknowledgement can recreate its receipt.

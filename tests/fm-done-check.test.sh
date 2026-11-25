@@ -1479,6 +1479,33 @@ test_native_report_displaces_acceptance() {
   assert_displaced "blocker reported again" rival
   cat "$A/rival.status" > "$A_STATE/rival.status"
 
+  # An interrupted retirement can leave a scout with only its status or only its
+  # task record. Saved evidence still counts and an unsaved blocker still holds.
+  mkdir "$A/partial"
+  mv "$A_STATE/keeper.meta" "$A_STATE/rival.meta" "$A_STATE/arbiter.meta" "$A/partial/"
+  assert_accepted "scouts without task records"
+  accept_refused "cannot be recorded without rival.meta" "$A_VERDICT" refute "$A_ID" rival "$A_HEAD"
+  report_review rival fix
+  assert_displaced "blocker reported again without a task record" rival
+  cat "$A/rival.status" > "$A_STATE/rival.status"
+  mv "$A/partial/"*.meta "$A_STATE/"
+  mv "$A_STATE/keeper.status" "$A_STATE/rival.status" "$A_STATE/arbiter.status" "$A/partial/"
+  assert_accepted "scouts without status"
+  accept_refused "cannot be recorded without arbiter.status" "$A_VERDICT" refute "$A_ID" arbiter "$A_HEAD"
+  mv "$A/partial/"*.status "$A_STATE/"
+  prepare_review_record spare 'Checked app.py. No blocker.' merge
+  assert_displaced "unsaved merge from a complete scout" spare
+  mv "$A_STATE/spare.meta" "$A/partial/"
+  assert_accepted "unsaved merge without a task record"
+  report_review spare fix
+  assert_displaced "unsaved blocker in a remaining status" spare
+  mv "$A/partial/spare.meta" "$A_STATE/"
+  rm "$A_STATE/spare.status"
+  assert_accepted "unsaved merge without a status"
+  write_report spare fix 'Found a blocker in app.py.'
+  assert_displaced "unsaved blocker without a status" spare
+  rm "$A_STATE/spare.meta" "$A_STATE/spare.refute.json"
+
   # Retired scouts keep the saved verdict, and its report must stay exact.
   for scout in keeper rival arbiter; do
     rm "$A_STATE/$scout.meta" "$A_STATE/$scout.status"
@@ -1565,6 +1592,14 @@ test_scout_retirement_keeps_unrecorded_blocker() {
   # An unrecorded blocker for a superseded candidate holds nothing.
   prepare_review_record late 'Found a blocker in app.py.' fix
   assert_retirement_held "unrecorded blocker" late
+  cp "$A_POLICY" "$A/reviewed.policy"
+  (umask 077; jq '.criteria="The value is two or more."' "$A/reviewed.policy" > "$A_POLICY")
+  accept_refused "did not sign off" "$A_VERDICT" refute "$A_ID" late "$A_HEAD"
+  retire_scout late && fail "a policy re-pin released an unrecorded blocker"
+  assert_grep "unsaved blocker 'Refute $A_BASE $A_HEAD fix'" "$A/retire.out" "the hold should name the blocker"
+  assert_grep "publish and report a fresh exact candidate against the current approved base and policy" \
+    "$A/retire.out" "the hold should name a remedy that works after a policy re-pin"
+  cat "$A/reviewed.policy" > "$A_POLICY"
   printf 'value = 42\n' > "$A_REPO/app.py"
   accept_candidate
   assert_retired "superseded candidate" late
@@ -1575,11 +1610,23 @@ test_scout_retirement_keeps_unrecorded_blocker() {
   record_review tardy
   accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL" >/dev/null || fail "could not accept the tardy scout's review"
   printf 'done [at=1]: Refute %s %s fix\n' "$A_BASE" "$A_HEAD" > "$A/late.report"
+  local backlog="$A_HOME/data/backlog.md" ledger="$A_STATE/fleet-ledger.jsonl"
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$backlog"
+  printf '%s\n' 'backend = "markdown"' '' '[markdown]' 'path = "data/backlog.md"' > "$A_HOME/.tasks.toml"
+  (cd "$A_HOME" && tasks-axi add tardy "Review tardy" --kind scout --file "$backlog" &&
+    tasks-axi start tardy --file "$backlog") >/dev/null || fail "could not seed the scout's backlog row"
+  : > "$A_CONFIG/fleet-ledger"
   A_LATE_REPORT="$A/late.report" A_LATE_STATUS="$A_STATE/tardy.status" assert_retirement_held "late report" tardy
   assert_present "$A/late.report.sent" "the fixture should report during teardown"
+  assert_absent "$A_STATE/tardy.backlog-close" "a refused retirement left a close for session start to replay"
+  assert_absent "$ledger" "the fleet ledger reported a refused cleanup"
   write_report tardy fix 'Found a blocker while closing.'
   record_review tardy
   assert_retired "recorded late report" tardy
+  jq -se 'any(.[]; .event == "task.cleaned_up" and .task == "tardy")' "$ledger" >/dev/null ||
+    fail "the fleet ledger missed the completed cleanup"
+  assert_absent "$A_STATE/tardy.backlog-close" "the completed close left its pending record"
+  rm "$A_CONFIG/fleet-ledger" "$A_HOME/.tasks.toml" "$backlog"
   pass "retiring a refute scout never removes the only evidence of a current blocker"
 }
 

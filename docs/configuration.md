@@ -1210,7 +1210,11 @@ After reading the scout's report, the supervisor records that verdict with `bin/
 The saved review counts only while the report and status of every scout dispatched for that candidate match the last row saved for that scout.
 A newer report or verdict displaces it as soon as the scout writes it, and current-state reads, registration and merge refuse until the supervisor records the current review and accepts again.
 Teardown without `--force` refuses to retire a scout whose current blocker is not its saved verdict while that candidate is current, so retirement cannot remove the only evidence of it.
-A retired scout is held to its saved report alone, and an unrecorded blocker in that report holds the candidate until a newer candidate event is reviewed.
+That refusal keeps the scout's record and status, records no cleanup in the fleet ledger and leaves no pending backlog close.
+Record the blocker while the reviewed candidate, base and policy still match, or publish and report a fresh exact candidate against the current approved base and policy.
+A scout missing its task record or status cannot be recorded.
+The latest review's report must still match, as must any status it keeps; another unsaved merge from such a scout is ignored.
+An unsaved blocker in its report or remaining status holds the candidate until a newer candidate event is reviewed.
 Recording the same review again leaves the journal unchanged, so a retry cannot displace a later decision; [`bin/fm-review-verdict.sh`](../bin/fm-review-verdict.sh) owns what counts as a new review.
 The acceptance record binds the task incarnation, policy, base, exact candidate event, executed evidence and latest qualifying review.
 Supervisor-recorded operational pauses, review parks and overdue annotations preserve that event when their append provenance is present.

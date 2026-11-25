@@ -886,6 +886,9 @@ def review_result(task, reviewer, head):
     require(identity == ticket["candidate"] and head == identity["head"]
             and ticket["reviewer"] == reviewer and reviewer != task,
             "review did not sign off on this exact task, base and head")
+    for record in ("meta", "status"):
+        require(os.path.lexists(STATE / f"{reviewer}.{record}"),
+                f"review cannot be recorded without {reviewer}.{record}")
     meta = metadata(reviewer)
     require(meta.get("kind") == "scout" and meta.get("spawn_gen")
             and same_project(meta.get("project"), identity["project"])
@@ -918,7 +921,7 @@ def review_result(task, reviewer, head):
 def reviewer_record(identity, reviewer, ticket, row):
     # What a reviewer reports now, and whether its report and status are the ones
     # its last saved row stands for under the retry rule in review_event.
-    status = STATE / f"{reviewer}.status"
+    status, meta = (STATE / f"{reviewer}.{record}" for record in ("status", "meta"))
     note, event = done_event(reviewer) if os.path.lexists(status) else ("", "")
     path = DATA / reviewer / "report.md"
     report = private_bytes(path, private=False) if os.path.lexists(path) else b""
@@ -929,14 +932,15 @@ def reviewer_record(identity, reviewer, ticket, row):
     verdict = f"Refute {identity['base']} {identity['head']} {row['verdict']}"
     same_report = title == verdict and refute["report"] == digest(report) and refute["ticket"] == ticket
     same_event = (note == verdict and (row["verdict"] == "merge" or refute["event"] == event)
-                  and metadata(reviewer).get("spawn_gen") == refute["generation"])
+                  and (not os.path.lexists(meta)
+                       or metadata(reviewer).get("spawn_gen") == refute["generation"]))
     return note, title, same_report, same_event
 
 
 def require_saved_reports(identity, saved, latest):
     # A native report displaces the saved verdict when it is written, not when a
     # supervisor records it. Compare each reviewer of this candidate with its own
-    # last saved row. A retired scout keeps its ticket and report but no status;
+    # last saved row. A retired scout keeps its ticket and report;
     # retire_review keeps a status that is the only evidence of a blocker.
     tickets = {}
     for path in STATE.glob("*.refute.json"):
@@ -949,15 +953,16 @@ def require_saved_reports(identity, saved, latest):
     pins = f"Refute {identity['base']} {identity['head']} "
     verdicts = (pins + "merge", pins + "fix")
     for reviewer, ticket in sorted(tickets.items()):
-        live = any(os.path.lexists(STATE / f"{reviewer}.{record}") for record in ("meta", "status"))
+        status, meta = (os.path.lexists(STATE / f"{reviewer}.{record}") for record in ("status", "meta"))
         note, title, same_report, same_event = reviewer_record(identity, reviewer, ticket, saved.get(reviewer))
         own = reviewer == latest["reviewer"]
         # A retired scout's unsaved merge can no longer be recorded and cannot
         # weaken a later saved verdict. Its unsaved fix still blocks.
-        reported = title in verdicts and (live or title == pins + "fix")
-        require((same_report or not (own or reported))
-                and (same_event or not ((own and live) or note in verdicts)),
-                f"native review report from {reviewer} is not the saved verdict; record the current review and accept again")
+        blocking = verdicts if status and meta else (pins + "fix",)
+        require((same_report or not (own or title in blocking))
+                and (same_event or not ((own and status) or note in blocking)),
+                f"native review report from {reviewer} is not the saved verdict; record the current review "
+                "and accept again, or review a fresh exact candidate if it can no longer be recorded")
 
 
 def saved_reviews(identity):
@@ -1010,8 +1015,10 @@ def retire_review(reviewer):
     note, title, same_report, same_event = reviewer_record(identity, reviewer, digest(data), saved.get(reviewer))
     fix = f"Refute {identity['base']} {identity['head']} fix"
     require((same_report or title != fix) and (same_event or note != fix),
-            f"{reviewer} reports a blocker that is not its saved verdict; record it with "
-            f"fm-review-verdict.sh refute {task} {reviewer} {identity['head']} before retiring the scout")
+            f"{reviewer} reports unsaved blocker '{fix}' for {task}; record it with "
+            f"fm-review-verdict.sh refute {task} {reviewer} {identity['head']} while the reviewed candidate, "
+            "base and policy still match, or publish and report a fresh exact candidate against the current "
+            "approved base and policy, then retire the scout")
 
 
 def main():
