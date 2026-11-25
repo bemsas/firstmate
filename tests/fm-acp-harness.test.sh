@@ -439,6 +439,48 @@ EOF
   pass "fm-send, fm-peek, and fm-crew-state accept a live acp scout"
 }
 
+# A scout slot with no origin must be at the project's local default-branch tip.
+# A refused one that only lags goes back to the pool; one holding a commit that
+# branch does not keeps its lease, because a forced return would discard it.
+test_originless_slot_off_the_project_tip_is_refused() {
+  local how fakebin out id tip
+  for how in behind ahead; do
+    new_world "originless-$how"
+    git -C "$PROJ_DIR" remote remove origin
+    git -C "$WT_DIR" checkout -q --detach
+    if [ "$how" = behind ]; then
+      git -C "$PROJ_DIR" -c user.name=Test -c user.email=test@example.test commit -q --allow-empty -m advance
+    else
+      git -C "$WT_DIR" -c user.name=Test -c user.email=test@example.test commit -q --allow-empty -m unlanded
+    fi
+    tip=$(git -C "$WT_DIR" rev-parse HEAD)
+    id="slot-$how"
+    fm_test_spawn_brief "$HOME_DIR" "$id"
+    fakebin=$(fm_fakebin "$TMP_ROOT/originless-$how")
+    cat > "$fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$TMP_ROOT/originless-$how/treehouse.log'
+[ "\$1" != get ] || printf '%s\n' '$WT_DIR'
+SH
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/opencode"
+    chmod +x "$fakebin/treehouse" "$fakebin/opencode"
+    out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+      FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+      FM_SPAWN_NO_GUARD=1 PATH="$fakebin:$PATH" "$ROOT/bin/fm-spawn.sh" "$id" "$PROJ_DIR" --scout --harness opencode \
+      --model fake/free --backend acp 2>&1) && fail "$how: an acp scout launched off the project tip: $out"
+    assert_contains "$out" "not the project's local default branch tip" "$how: the refusal did not name the base"
+    assert_equals "$tip" "$(git -C "$WT_DIR" rev-parse HEAD)" "$how: the refusal moved the slot"
+    assert_absent "$HOME_DIR/state/$id.meta" "$how: the refusal published a record"
+    if [ "$how" = behind ]; then
+      assert_grep "return --force $WT_DIR" "$TMP_ROOT/originless-$how/treehouse.log" "a slot that only lags was not returned"
+    else
+      assert_no_grep "return" "$TMP_ROOT/originless-$how/treehouse.log" "a slot holding an unlanded commit was returned"
+      assert_contains "$out" "stays leased to $id" "the kept lease was not named"
+    fi
+  done
+  pass "fm-spawn --backend acp: an origin-less slot off the project tip is refused, and one holding an unlanded commit keeps its lease"
+}
+
 test_acp_current_state
 test_ship_done_gate
 test_control_relaunch
@@ -455,5 +497,6 @@ test_cost_cap_stops_the_run
 test_agent_that_ignores_eof_is_killed
 test_large_command_lists_are_shortened_in_the_log
 test_spawn_and_teardown_through_fm_spawn
+test_originless_slot_off_the_project_tip_is_refused
 
 echo "# all fm-acp-harness tests passed"

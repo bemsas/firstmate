@@ -405,12 +405,12 @@
 #   primary's commit is read from the local object store, so nothing more is
 #   fetched, and every base this picks contains origin's tip, so the reset
 #   discards nothing the origin-only rule would have kept. When no origin
-#   configuration is detected, spawn skips that remote freshness check and
-#   launches from the clean worktree's current HEAD. Relaunch reuses the
-#   recorded worktree without fetching or resetting its base. An unreachable
-#   detected origin, unresolved default branch, or non-clean worktree refuses
-#   a fresh spawn rather than risking a PR based on stale history or
-#   discarding local work.
+#   configuration is detected, spawn fetches and resets nothing: it launches
+#   only a clean worktree already at the project's local default-branch tip.
+#   Relaunch reuses the recorded worktree without fetching or resetting its
+#   base. An unreachable detected origin, unresolved default branch, origin-less
+#   worktree at any other commit, or non-clean worktree refuses a fresh spawn
+#   rather than risking a PR based on stale history or discarding local work.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -4954,7 +4954,7 @@ spawn_base_from_primary_checkout() { # <worktree> <project> <default> <origin-re
   return 1
 }
 
-freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 when the worktree is not clean
+freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 when the worktree is not clean, or an origin-less one is not proven to hold only commits its base has
   local worktree=$1 base=${2:-} project=${3:-} mode=${4:-} default target expected reset_ref actual status
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
@@ -4973,7 +4973,17 @@ freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 w
       echo "error: pooled worktree '$worktree' has no origin, so it cannot start from base branch '$base'" >&2
       return 1
     }
-    return 0
+    # No remote can refresh this slot, so its base is only proven, never reset:
+    # it must already be at the project's own default-branch tip.
+    expected=$(primary_head_commit "${project:-$worktree}") || {
+      echo "error: could not resolve the local default branch tip for origin-less pooled worktree '$worktree'; refusing to launch from an unproven base" >&2
+      return 2
+    }
+    actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+    [ "$actual" != "$expected" ] || return 0
+    echo "error: origin-less pooled worktree '$worktree' is at '${actual:-unknown}', not the project's local default branch tip ('$expected'); refusing to launch and leaving it untouched" >&2
+    git -C "$worktree" merge-base --is-ancestor "$actual" "$expected" 2>/dev/null || return 2
+    return 1
   fi
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
@@ -5165,7 +5175,15 @@ spawn_acp_scout() {
     fi
     SPAWN_SLOT_CLAIMED=1
   fi
-  freshen_spawn_worktree_base "$WT" || { spawn_acp_return_slot; exit 1; }
+  freshen_spawn_worktree_base "$WT" || {
+    # A refused slot that may hold work keeps its lease; a forced return discards.
+    if [ "$?" -eq 2 ]; then
+      echo "error: $WT stays leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS" >&2
+    else
+      spawn_acp_return_slot
+    fi
+    exit 1
+  }
   python3 "$FM_ROOT/bin/fm-worker-guardrails.py" opencode "$WT" "$STATE" "$ID" || {
     spawn_acp_return_slot
     exit 1
