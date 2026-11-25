@@ -1158,6 +1158,7 @@ The no-mistakes pre-validation handoff can start its ordinary pipeline while cur
 A protected task with an attributed no-mistakes run reports completed delivery only when that run's full head matches the accepted candidate, including a run still monitoring the PR and a ledger run that replaced an earlier failure.
 The run record supplies the full head; where only the abbreviated ledger row answers, it must name exactly one commit in the task copy.
 A different or unavailable run head is reported as blocked with both heads.
+A secondmate home holds the child's `done` report to its parent on the same reading.
 A terminal publishing run without a PR identity remains blocked.
 When the pipeline explicitly skips publication and there is no current PR candidate, it reports a pause and explains what was skipped.
 Registration and merge also check the live PR identity and read the target branch tip directly.
@@ -1175,7 +1176,7 @@ To add a new test, pin the supervisor-approved bytes in optional `new_tests` (a 
 New Python tests check common collection overrides, returns in the test body, qualified pytest and unittest skip markers, and simple literal assertions.
 New shell tests check common skip markers, early top-level exits, literal assertions with or without a message, and literal comparisons.
 New JavaScript and TypeScript tests check common skip, focus and todo calls and matching literal expectations outside comments, quoted strings, regular expressions and template text, including inside template interpolations.
-New Go tests check common skip calls.
+New Go tests check common skip calls outside comments, string literals and rune literals.
 These static checks recognize specific patterns.
 The supervisor and independent reviewer assess the pinned test's behavior.
 

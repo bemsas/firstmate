@@ -778,6 +778,179 @@ test_pending_legacy_ship_candidate_waits_for_acceptance() {
   pass "pending legacy ship completion waits for acceptance before parent delivery"
 }
 
+# One protected ship child whose accepted candidate is the worker copy's HEAD, read
+# by the real fm-crew-state.sh over a fixture run record. Acceptance itself is
+# covered by fm-done-check.test.sh; here the offline lookup answers for the named
+# head. Sets PROTECTED_HEAD and OTHER_HEAD, a descendant of it.
+make_protected_world() { # <name> [done-text]
+  local child real_python
+  make_world "$1"; bind_secondmate local
+  write_child "$MATE" child 'working: validating'
+  child="$MATE/projects/child"
+  git -C "$child" checkout -q -b fm/child
+  PROTECTED_HEAD=$(git -C "$child" rev-parse HEAD)
+  OTHER_HEAD=$(git -C "$child" commit-tree -p "$PROTECTED_HEAD" -m 'pipeline fix' "$PROTECTED_HEAD^{tree}")
+  sed '/^pr=/d; /^pr_head=/d' "$MATE/state/child.meta" > "$WORLD/meta"
+  mv "$WORLD/meta" "$MATE/state/child.meta"
+  mkdir "$MATE/config/done-acceptance"
+  printf '%s\n' "${2:-done: PR https://github.com/o/r/pull/1 checks green head $PROTECTED_HEAD}" \
+    > "$MATE/state/child.status"
+  real_python=$(command -v python3)
+  cat > "$WORLD/fakebin/python3" <<SH
+#!/usr/bin/env bash
+if [[ "\${1:-}" == */fm-done-acceptance.py ]]; then
+  [ "\$2" = passing ] && [ "\$5" = $PROTECTED_HEAD ]
+  exit
+fi
+exec '$real_python' "\$@"
+SH
+  # The run record, when one exists, is the whole AXI surface this fixture needs.
+  cat > "$WORLD/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = axi ] || exit 0
+if [ "$#" = 1 ] && [ -e "${0%/*}/../no-inventory" ]; then exit 0; fi
+if [ -e "${0%/*}/../run" ]; then cat "${0%/*}/../run"; fi
+SH
+  printf '#!/usr/bin/env bash\nprintf "read\\n" >> %q\nexec %q "$@"\n' \
+    "$WORLD/crew-reads" "$ROOT/bin/fm-crew-state.sh" > "$WORLD/fakebin/fm-crew-state.sh"
+  chmod +x "$WORLD/fakebin/python3" "$WORLD/fakebin/no-mistakes" "$WORLD/fakebin/fm-crew-state.sh"
+}
+
+write_run() { # <full-head> [status] [outcome]
+  cat > "$WORLD/run" <<EOF
+run:
+  id: "01RUN"
+  branch: fm/child
+  status: ${2:-completed}
+  head: "${1:0:8}"
+  head_sha: $1
+  pr: "https://github.com/o/r/pull/1"
+  findings: none
+outcome: ${3:-passed}
+EOF
+}
+
+protected_crew_state() {
+  PATH="$WORLD/fakebin:$PATH" FM_ROOT_OVERRIDE="$WORLD/root" FM_HOME="$MATE" \
+    FM_STATE_OVERRIDE="$MATE/state" FM_CONFIG_OVERRIDE="$MATE/config" \
+    FM_CREW_STATE_NO_FORGE=1 "$ROOT/bin/fm-crew-state.sh" child
+}
+
+parent_reads() { # prints done once the parent channel carries the child's done
+  if grep -q 'child child done: ' "$MAIN/state/mate.status" 2>/dev/null; then
+    printf 'done\n'
+  else
+    printf 'held\n'
+  fi
+}
+
+# The parent reads a protected done exactly when the current-state read does: one
+# task, one accepted candidate, and a completed run first at another commit and
+# then at that candidate.
+test_protected_ledger_done_follows_the_attributed_run() {
+  local out line
+  make_protected_world protected-run
+  line=$(cat "$MATE/state/child.status")
+
+  write_run "$OTHER_HEAD"
+  out=$(protected_crew_state)
+  assert_contains "$out" 'state: blocked · source: run-step' 'fixture: a different-head run blocks current state'
+  assert_contains "$out" "run head $OTHER_HEAD does not match the accepted candidate $PROTECTED_HEAD" \
+    'fixture: the block names both heads'
+  run_reconcile "$MATE" --startup
+  [ "$(parent_reads)" = held ] || fail 'the parent read done for a run current state blocks'
+  run_report "$MATE" child || fail 'a done its run blocks owes the parent nothing'
+  [ "$(parent_reads)" = held ] || fail 'the report entry point published a done its run blocks'
+  [ "$(outcome_count "$MATE" reported)$(outcome_count "$MATE" pending)" = 00 ] \
+    || fail 'a held done left a delivery record'
+
+  write_run "$PROTECTED_HEAD"
+  out=$(protected_crew_state)
+  assert_contains "$out" 'state: done · source: run-step' 'fixture: the accepted-head run reads done'
+  run_reconcile "$MATE"
+  [ "$(parent_reads)" = 'done' ] || fail 'the accepted-head run was not reported to the parent'
+  [ "$(outcome_count "$MATE" reported)" = 1 ] || fail 'the accepted-head run left no receipt'
+  assert_equals "$line" "$(cat "$MATE/state/child.status")" 'reconciliation rewrote the child ledger'
+  : > "$WORLD/crew-reads"
+  run_reconcile "$MATE"
+  [ ! -s "$WORLD/crew-reads" ] || fail 'a delivered done was read again'
+  [ "$(grep -c 'child child done: ' "$MAIN/state/mate.status")" = 1 ] || fail 'the done was published twice'
+  pass 'a protected done reaches the parent exactly when its attributed run matches the accepted head'
+}
+
+# An earlier failed parent write does not exempt a done from its run.
+test_pending_protected_done_follows_the_attributed_run() {
+  make_protected_world protected-pending
+  write_run "$PROTECTED_HEAD"
+  cp "$MATE/.fm-secondmate-parent" "$WORLD/parent-binding"
+  printf 'schema=fm-secondmate-parent.v1\nroute=invalid\n' > "$MATE/.fm-secondmate-parent"
+  run_reconcile "$MATE" >/dev/null
+  [ "$(outcome_count "$MATE" pending)" = 1 ] || fail 'a failed parent write did not leave a pending delivery'
+  cp "$WORLD/parent-binding" "$MATE/.fm-secondmate-parent"
+  write_run "$OTHER_HEAD"
+  run_reconcile "$MATE"
+  [ "$(parent_reads)" = held ] || fail 'a pending done was published over a different-head run'
+  [ "$(outcome_count "$MATE" pending)" = 1 ] || fail 'a held pending delivery disappeared'
+  write_run "$PROTECTED_HEAD"
+  run_reconcile "$MATE"
+  [ "$(parent_reads)" = 'done' ] || fail 'a pending done at the accepted head was not delivered'
+  pass 'a pending protected done waits for its attributed run before delivery'
+}
+
+# Without a completed run the ledger keeps its own word, and an unprotected or
+# local-only done never reads one.
+test_ledger_done_without_a_completed_run_is_unchanged() {
+  make_protected_world protected-no-run
+  run_reconcile "$MATE"
+  [ "$(parent_reads)" = 'done' ] || fail 'an accepted done with no run was held'
+
+  make_protected_world protected-cancelled
+  write_run "$PROTECTED_HEAD" cancelled cancelled
+  assert_contains "$(protected_crew_state)" 'state: unknown · source: run-step · run cancelled: no verdict' \
+    'fixture: a cancelled run carries no verdict'
+  run_reconcile "$MATE"
+  [ "$(parent_reads)" = 'done' ] || fail 'a cancelled run, which records no completion, held an accepted done'
+
+  make_protected_world protected-local 'done: approved local work'
+  write_run "$OTHER_HEAD"
+  sed 's/^mode=.*/mode=local-only/' "$MATE/state/child.meta" > "$WORLD/meta"
+  mv "$WORLD/meta" "$MATE/state/child.meta"
+  run_reconcile "$MATE"
+  [ "$(parent_reads)" = 'done' ] || fail 'a local-only done was held on a run'
+  [ ! -s "$WORLD/crew-reads" ] || fail 'a local-only done read a run'
+
+  make_protected_world unprotected
+  write_run "$OTHER_HEAD"
+  rmdir "$MATE/config/done-acceptance"
+  run_reconcile "$MATE"
+  [ "$(parent_reads)" = 'done' ] || fail 'a home without acceptance held its done'
+  [ ! -s "$WORLD/crew-reads" ] || fail 'a home without acceptance read a run'
+  pass 'a done with no completed run, a local-only done, and an unprotected done are delivered as before'
+}
+
+# An unsettled read is not a completed run at the accepted head. It waits, the
+# report entry point keeps teardown from discarding it, and later children still
+# get their delivery in the same scan.
+test_unsettled_run_read_holds_a_protected_done() {
+  local rc=0
+  make_protected_world protected-unsettled
+  write_run "$OTHER_HEAD"
+  : > "$WORLD/no-inventory"
+  assert_contains "$(protected_crew_state)" 'state: unknown · source: run-step' 'fixture: the run is unsettled'
+  run_reconcile "$MATE"
+  [ "$(parent_reads)" = held ] || fail 'an unsettled run was published as done'
+  run_report "$MATE" child || rc=$?
+  [ "$rc" -ne 0 ] || fail 'report said nothing was owed while the run is unsettled'
+
+  write_child "$MATE" zlater 'failed: later child'
+  printf '#!/usr/bin/env bash\nsleep 20\n' > "$WORLD/fakebin/fm-crew-state.sh"
+  FM_INACTIVE_RECONCILE_BUDGET_SECS=4 run_reconcile "$MATE"
+  [ "$(parent_reads)" = held ] || fail 'a stalled run read was published as done'
+  grep -Fq 'child zlater failed: later child' "$MAIN/state/mate.status" \
+    || fail 'a stalled run read starved a later child'
+  pass 'an unsettled run read holds a protected done without discarding it or starving later children'
+}
+
 # `report <child>` is the teardown-side delivery: it delivers or says nothing
 # is owed with 0, and returns non-zero only when the channel cannot be written.
 test_report_subcommand_delivers_and_refuses() {
@@ -1520,6 +1693,10 @@ test_secondmate_remote_route_ledger_delivery
 test_report_subcommand_delivers_and_refuses
 test_pending_ledger_done_is_delivered_after_worktree_removal
 test_pending_legacy_ship_candidate_waits_for_acceptance
+test_protected_ledger_done_follows_the_attributed_run
+test_pending_protected_done_follows_the_attributed_run
+test_ledger_done_without_a_completed_run_is_unchanged
+test_unsettled_run_read_holds_a_protected_done
 test_report_avoids_scan_meta_lock_inversion
 test_local_secondmate_rejects_relative_parent_home
 test_invalid_secondmate_marker_blocks_routing

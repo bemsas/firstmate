@@ -599,7 +599,16 @@ def js_signals(data, _path):
 
 
 def go_signals(data, _path):
-    if re.search(rb"\b[A-Za-z_]\w*\s*\.\s*Skip(?:f|Now)?\s*\(", data):
+    # Blank comments and string and rune literals first, so a skip counts only as
+    # code. The leftmost token wins, so a quote or slash inside one opens nothing.
+    # An unterminated token stays in place and is checked as code.
+    code = re.sub(
+        rb"//[^\n]*|/\*[\s\S]*?\*/"
+        rb'|"(?:\\.|[^"\\\n])*"|`[^`]*`'
+        rb"|'(?:\\.|[^'\\\n])+'",
+        lambda token: b" " if token[0].startswith(b"/") else b'""', data,
+    )
+    if re.search(rb"\b[A-Za-z_]\w*\s*\.\s*Skip(?:f|Now)?\s*\(", code):
         return "added skip"
     return None
 

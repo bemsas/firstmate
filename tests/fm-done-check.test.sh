@@ -783,7 +783,25 @@ test.each`
 JS
   pin_new_fixture_test tests/test_iterator.py
   pin_new_fixture_test tests/iterator.test.sh
+  cat > "$A_REPO/src/guide_test.go" <<'GO'
+package guide
+
+// The old suite called t.Skip("offline") here; it now runs everywhere.
+/* Neither t.SkipNow()
+   nor t.Skipf("%s", reason) is needed. */
+func TestGuide(t *testing.T) {
+	quote, tick, escaped := '"', '`', '\''
+	link := "https://example.test/*" // a t.Skip( in prose, with "quotes" and a ` tick
+	want := "call \"t.Skip()\" to defer" + `
+		t.SkipNow() // raw text
+	`
+	if got := guide(quote, tick, escaped, link); got != want {
+		t.Fatalf("got %q; docs say t.Skip(reason)", got)
+	}
+}
+GO
   pin_new_fixture_test src/guide.test.js
+  pin_new_fixture_test src/guide_test.go
   accept_candidate
   accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" pinned-stubs >/dev/null ||
     fail "benign assertions, stubs and titles should be admitted when pinned"
@@ -817,6 +835,11 @@ literal-list-python|tests/test_iterator.py|added trivial assertion|assert [*read
 literal-dict-python|tests/test_iterator.py|added trivial assertion|assert {**read_counts(), "key": 1}
 literal-command-shell|tests/iterator.test.sh|added trivial assertion|test true # standalone check
 go-skip|src/iterator_test.go|added skip|package iterator\nfunc TestExample(t *testing.T) { t.Skip("fixture") }
+after-prose-go|src/iterator_test.go|added skip|package iterator\n// t.Skip is not needed\nfunc TestExample(t *testing.T) {\n\tt.SkipNow()\n}
+after-literals-go|src/iterator_test.go|added skip|package iterator\nfunc TestExample(t *testing.T) { use("https://a/*", '"', '`'); t.Skipf("fixture %d", 1) }
+after-raw-go|src/iterator_test.go|added skip|package iterator\nfunc TestExample(t *testing.T) { use(`"\\\\`); t.Skip() }
+commented-call-go|src/iterator_test.go|added skip|package iterator\nfunc TestExample(t *testing.T) { t./* note */Skip("fixture") }
+unterminated-go|src/iterator_test.go|added skip|package iterator\nfunc TestExample(t *testing.T) { t.Skip() }\n/* open
 unittest-skip|tests/test_iterator.py|added skip|from unittest import skipIf as skip_unavailable\n@skip_unavailable(False, "fixture")\ndef test_iterator():\n    assert selected() == expected()
 early-shell|tests/iterator.test.sh|added early-exit marker|exit 0\nassert_value
 CASES
