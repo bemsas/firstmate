@@ -1450,7 +1450,7 @@ test_native_report_displaces_acceptance() {
   assert_accepted "merge reported again"
 
   # A fresh scout displaces the saved verdict when it reports, not when it is
-  # dispatched. Retiring it does not drop a blocker nobody recorded.
+  # dispatched. A report it leaves behind without a status still blocks.
   prepare_review_record rival 'Found a blocker in app.py.' fix
   mv "$A_HOME/data/rival/report.md" "$A/rival.report"
   mv "$A_STATE/rival.status" "$A/rival.status"
@@ -1487,6 +1487,100 @@ test_native_report_displaces_acceptance() {
   write_report arbiter merge 'Rewritten after retirement.'
   assert_displaced "rewritten report of a retired scout" arbiter
   pass "a native review report displaces the saved verdict at every acceptance entry point before it is recorded"
+}
+
+# The real teardown of a review scout, with a fake terminal and pool.
+retire_scout() {  # <scout>
+  local fake="$A/retire-fakebin" tool
+  if [ ! -d "$fake" ]; then
+    mkdir "$fake"
+    for tool in tmux treehouse no-mistakes; do
+      printf '#!/usr/bin/env bash\nexit 0\n' > "$fake/$tool"
+      chmod +x "$fake/$tool"
+    done
+    cat > "$fake/tmux" <<'STUB'
+#!/usr/bin/env bash
+if [ -n "${A_LATE_REPORT:-}" ] && [ ! -e "$A_LATE_REPORT.sent" ]; then
+  : > "$A_LATE_REPORT.sent"
+  cat "$A_LATE_REPORT" >> "$A_LATE_STATUS"
+fi
+exit 0
+STUB
+  fi
+  if [ ! -d "$A/scratch-$1" ]; then
+    git clone --quiet --branch dev "$A/origin.git" "$A/scratch-$1" || fail "cannot create scratch copy for $1"
+    printf '%s\n' "window=firstmate:fm-$1" "endpoint_task_id=$1" "worktree=$A/scratch-$1" \
+      "mode=no-mistakes" "decisions_reviewed=1" >> "$A_STATE/$1.meta"
+  fi
+  accept_cmd env PATH="$fake:$A_FAKE:$PATH" "$ROOT/bin/fm-teardown.sh" "$1" > "$A/retire.out" 2>&1
+}
+
+assert_retirement_held() {  # <label> <scout>
+  retire_scout "$2"
+  assert_displaced "$1" "$2"
+  assert_grep "REFUSED: refute scout $2" "$A/retire.out" "$1: teardown should explain the hold"
+  assert_present "$A_STATE/$2.status" "$1: teardown removed the only evidence of the blocker"
+  assert_present "$A_STATE/$2.meta" "$1: teardown removed the scout record"
+}
+
+assert_retired() {  # <label> <scout>
+  retire_scout "$2" || fail "$1: teardown refused: $(cat "$A/retire.out")"
+  assert_absent "$A_STATE/$2.status" "$1: retired scout kept its status"
+  assert_absent "$A_STATE/$2.meta" "$1: retired scout kept its record"
+}
+
+test_scout_retirement_keeps_unrecorded_blocker() {
+  accept_reset
+  printf 'value = 41\n' > "$A_REPO/app.py"
+  accept_candidate
+  rm -f "$A_STATE/review-verdicts.jsonl" "$A_STATE/$A_ID.accepted.json"
+  prepare_review_record critic 'Found a blocker in app.py.' fix
+  record_review critic
+  prepare_review_record judge 'Blocker does not reproduce.' merge
+  record_review judge
+  accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL" >/dev/null || fail "could not accept the later review"
+  assert_accepted "later review"
+
+  # The same blocker reported again changes only the scout's status.
+  report_review critic fix
+  assert_retirement_held "blocker reported again" critic
+  record_review critic
+  assert_retired "recorded blocker" critic
+  accept_refused "missing passing fresh-context review" "$SCRIPT" passing "$A_ID" "$A_URL" "$A_HEAD"
+
+  # A blocker announced only in the status is held the same way.
+  prepare_review_record umpire 'Rechecked app.py. No blocker.' merge
+  record_review umpire
+  accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL" >/dev/null || fail "could not accept the newest review"
+  report_review judge fix
+  assert_retirement_held "blocker announced in the status" judge
+  report_review judge merge
+  assert_accepted "withdrawn announcement"
+
+  # Scouts with only recorded evidence retire and the acceptance stands.
+  assert_retired "recorded merge" judge
+  assert_retired "latest recorded merge" umpire
+  assert_accepted "retired scouts"
+
+  # An unrecorded blocker for a superseded candidate holds nothing.
+  prepare_review_record late 'Found a blocker in app.py.' fix
+  assert_retirement_held "unrecorded blocker" late
+  printf 'value = 42\n' > "$A_REPO/app.py"
+  accept_candidate
+  assert_retired "superseded candidate" late
+
+  # A blocker reported while teardown is already closing the scout is held too,
+  # and recording it lets the same teardown finish.
+  prepare_review_record tardy 'Rechecked app.py. Still no blocker.' merge
+  record_review tardy
+  accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL" >/dev/null || fail "could not accept the tardy scout's review"
+  printf 'done [at=1]: Refute %s %s fix\n' "$A_BASE" "$A_HEAD" > "$A/late.report"
+  A_LATE_REPORT="$A/late.report" A_LATE_STATUS="$A_STATE/tardy.status" assert_retirement_held "late report" tardy
+  assert_present "$A/late.report.sent" "the fixture should report during teardown"
+  write_report tardy fix 'Found a blocker while closing.'
+  record_review tardy
+  assert_retired "recorded late report" tardy
+  pass "retiring a refute scout never removes the only evidence of a current blocker"
 }
 
 test_acceptance_inspects_pipeline_objects() {
@@ -1542,6 +1636,7 @@ fi
 if [ "${1:-}" = --review-events ]; then
   test_review_event_retry
   test_native_report_displaces_acceptance
+  test_scout_retirement_keeps_unrecorded_blocker
   exit
 fi
 
@@ -1554,5 +1649,6 @@ test_acceptance_regression
 test_acceptance_entry_points
 test_review_event_retry
 test_native_report_displaces_acceptance
+test_scout_retirement_keeps_unrecorded_blocker
 test_acceptance_inspects_pipeline_objects
 test_acceptance_requires_complete_builder_lineage

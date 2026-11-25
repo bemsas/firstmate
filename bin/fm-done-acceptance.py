@@ -915,11 +915,29 @@ def review_result(task, reviewer, head):
     print(json_bytes(row).decode().strip())
 
 
+def reviewer_record(identity, reviewer, ticket, row):
+    # What a reviewer reports now, and whether its report and status are the ones
+    # its last saved row stands for under the retry rule in review_event.
+    status = STATE / f"{reviewer}.status"
+    note, event = done_event(reviewer) if os.path.lexists(status) else ("", "")
+    path = DATA / reviewer / "report.md"
+    report = private_bytes(path, private=False) if os.path.lexists(path) else b""
+    title = report.partition(b"\n")[0].decode(errors="replace")
+    if row is None:
+        return note, title, False, False
+    refute = row["refute"]
+    verdict = f"Refute {identity['base']} {identity['head']} {row['verdict']}"
+    same_report = title == verdict and refute["report"] == digest(report) and refute["ticket"] == ticket
+    same_event = (note == verdict and (row["verdict"] == "merge" or refute["event"] == event)
+                  and metadata(reviewer).get("spawn_gen") == refute["generation"])
+    return note, title, same_report, same_event
+
+
 def require_saved_reports(identity, saved, latest):
     # A native report displaces the saved verdict when it is written, not when a
     # supervisor records it. Compare each reviewer of this candidate with its own
-    # last saved row under the retry rule in review_event. A retired scout keeps
-    # its ticket and report but no status.
+    # last saved row. A retired scout keeps its ticket and report but no status;
+    # retire_review keeps a status that is the only evidence of a blocker.
     tickets = {}
     for path in STATE.glob("*.refute.json"):
         data = private_bytes(path)
@@ -928,23 +946,11 @@ def require_saved_reports(identity, saved, latest):
             require(path == ticket_for(ticket["reviewer"]), "review dispatch record names another scout")
             tickets[ticket["reviewer"]] = digest(data)
     require(latest["reviewer"] in tickets, "recorded review has no dispatch record for this candidate")
+    pins = f"Refute {identity['base']} {identity['head']} "
+    verdicts = (pins + "merge", pins + "fix")
     for reviewer, ticket in sorted(tickets.items()):
-        status = STATE / f"{reviewer}.status"
-        live = os.path.lexists(status) or os.path.lexists(STATE / f"{reviewer}.meta")
-        note, event = done_event(reviewer) if os.path.lexists(status) else ("", "")
-        path = DATA / reviewer / "report.md"
-        report = private_bytes(path, private=False) if os.path.lexists(path) else b""
-        title = report.partition(b"\n")[0].decode(errors="replace")
-        pins = f"Refute {identity['base']} {identity['head']} "
-        verdicts = (pins + "merge", pins + "fix")
-        same_report = same_event = False
-        if reviewer in saved:
-            row, refute = saved[reviewer], saved[reviewer]["refute"]
-            verdict = pins + row["verdict"]
-            same_report = (title == verdict and refute["report"] == digest(report)
-                           and refute["ticket"] == ticket)
-            same_event = (note == verdict and (row["verdict"] == "merge" or refute["event"] == event)
-                          and metadata(reviewer).get("spawn_gen") == refute["generation"])
+        live = any(os.path.lexists(STATE / f"{reviewer}.{record}") for record in ("meta", "status"))
+        note, title, same_report, same_event = reviewer_record(identity, reviewer, ticket, saved.get(reviewer))
         own = reviewer == latest["reviewer"]
         # A retired scout's unsaved merge can no longer be recorded and cannot
         # weaken a later saved verdict. Its unsaved fix still blocks.
@@ -954,7 +960,7 @@ def require_saved_reports(identity, saved, latest):
                 f"native review report from {reviewer} is not the saved verdict; record the current review and accept again")
 
 
-def passing_review(identity):
+def saved_reviews(identity):
     latest = None
     saved = {}
     for row in journal_rows():
@@ -975,19 +981,49 @@ def passing_review(identity):
                 and matches(ID, row.get("reviewer")) and row["reviewer"] != identity["task"],
                 "recorded review does not identify an independent native scout")
         latest = saved[row["reviewer"]] = row
+    return latest, saved
+
+
+def passing_review(identity):
+    latest, saved = saved_reviews(identity)
     require(latest and latest.get("verdict") == "merge" and "refute" in latest,
             "missing passing fresh-context review for this task and exact head")
     require_saved_reports(identity, saved, latest)
     return digest(json_bytes(latest))
 
 
+def retire_review(reviewer):
+    # Teardown removes the scout's status, which can be the only evidence of a
+    # blocker nobody recorded. Hold retirement until the journal carries it. A
+    # candidate whose ship retired or reported again can no longer be accepted.
+    data = private_bytes(ticket_for(reviewer))
+    ticket = decode(data)
+    identity = ticket["candidate"]
+    task = identity["task"]
+    require(ticket["reviewer"] == reviewer, "review dispatch record names another scout")
+    if not os.path.lexists(POLICY_DIR) or not os.path.lexists(STATE / f"{task}.meta"):
+        return
+    if (done_event(task)[1] != identity["candidate_event"]
+            or metadata(task).get("spawn_gen") != identity["generation"]):
+        return
+    saved = saved_reviews(identity)[1] if os.path.lexists(JOURNAL) else {}
+    note, title, same_report, same_event = reviewer_record(identity, reviewer, digest(data), saved.get(reviewer))
+    fix = f"Refute {identity['base']} {identity['head']} fix"
+    require((same_report or title != fix) and (same_event or note != fix),
+            f"{reviewer} reports a blocker that is not its saved verdict; record it with "
+            f"fm-review-verdict.sh refute {task} {reviewer} {identity['head']} before retiring the scout")
+
+
 def main():
     action, task, *args = sys.argv[1:]
     require(matches(ID, task), "invalid task ID")
-    require(not os.environ.get("FM_TASK_ID") or action in ("passing", "assert"),
+    require(not os.environ.get("FM_TASK_ID") or action in ("passing", "assert", "retire-review"),
             "acceptance and review intake are supervisor operations")
     if action == "spawn-review" and len(args) == 6:
         spawn_review(task, *args)
+        return
+    if action == "retire-review" and not args:
+        retire_review(task)
         return
     if action == "review-result" and len(args) == 2 and matches(ID, args[0]) and matches(SHA, args[1]):
         review_result(task, *args)

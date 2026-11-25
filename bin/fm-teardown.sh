@@ -88,6 +88,8 @@
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
+# An attached refute scout (docs/configuration.md "Done acceptance") also waits
+# until the review journal carries its current blocker.
 # A scratch copy (kind=scout) and a --force run discard untracked content.
 # Treehouse's return resets with `git clean -fd`, which never deletes a nested
 # git repository, so the pool slot stays dirty and later checkouts skip it.
@@ -3781,6 +3783,19 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+# A refute scout's status can be the only evidence of a blocker nobody recorded.
+# bin/fm-done-acceptance.py owns the rule. It is asked again once the endpoint is
+# gone and before the status is retired, so a late report cannot slip between.
+teardown_refute_review_settled() {
+  [ "$FORCE" != "--force" ] || return 0
+  [ -e "$STATE/$ID.refute.json" ] || [ -L "$STATE/$ID.refute.json" ] || return 0
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-done-check.sh" retire-review "$ID" && return 0
+  echo "REFUSED: refute scout $ID still holds an unsettled review; its status is kept." >&2
+  return 1
+}
+teardown_refute_review_settled || exit 1
+
 # A public commitment is not kept until its final reply lands in the ORIGINAL
 # thread, and this cleanup removes the task records that make the promise
 # reconcilable. Refuse while this home still owes a public reply for exactly this
@@ -4241,6 +4256,7 @@ retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 # Opt-in fleet activity ledger (docs/fleet-ledger.md), before the status log is
 # retired so its last lines are captured; off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
+teardown_refute_review_settled || exit 1
 teardown_retire_status "$STATE" "$ID" || exit 1
 # The park record goes first: without it no park tick can queue another held
 # wake after the prune, and no acknowledgement can recreate its receipt.
