@@ -1566,7 +1566,9 @@ test_a_relaunch_is_reported_once_when_its_record_cannot_be_retired() {
     esac
     out=$(for _ in 1 2 3; do run_park "$w" tick 2>&1; done)
     [ -z "$out" ] || fail "retire-$how: reported before its record was retired: $out"
-    grep -q '^resume_attempt=[0-9]' "$w/state/lane.review-park" && grep -qx "pr=$GH_URL" "$w/state/lane.review-park" || fail "retire-$how: the recovery record was lost: $(cat "$w/state/lane.review-park" 2>/dev/null)"
+    if ! grep -q '^resume_attempt=[0-9]' "$w/state/lane.review-park" || ! grep -qx "pr=$GH_URL" "$w/state/lane.review-park"; then
+      fail "retire-$how: the recovery record was lost: $(cat "$w/state/lane.review-park" 2>/dev/null)"
+    fi
     rm -f "$w/retire.fail"
     out=$(for _ in 1 2 3; do run_park "$w" tick 2>&1; done)
     [ "$(printf '%s\n' "$out" | grep -c '^relaunched lane: PR ')" = 1 ] || fail "retire-$how: not reported exactly once: $out"
@@ -1582,6 +1584,7 @@ test_a_relaunch_is_reported_once_when_its_record_cannot_be_retired() {
     # shellcheck disable=SC2016  # The hook expands these when it runs.
     printf 'for _ in $(seq 1 100); do [ ! -s "%s" ] || break; sleep 0.05; done\nkill -KILL "$(cat "%s")"\n' "$w/tick.pid" "$w/tick.pid" > "$w/retire.$when"
     # Before the rename, the mv that would make it is killed too.
+    # shellcheck disable=SC2016  # The hook expands $PPID when it runs.
     [ "$when" = after ] || printf 'kill -KILL "$PPID"; exit 1\n' >> "$w/retire.$when"
     ( FM_TEST_EXEC_PARK=1 run_park "$w" tick ) > "$w/tick.out" 2>/dev/null &
     pid=$!
@@ -1633,7 +1636,9 @@ test_held_outcome_acknowledged_before_delivery_is_not_rung() {
   [ -e "$w/hook.acked" ] || fail "ack-between-lanes: the fixture did not acknowledge: $(cat "$w/hook.err" "$w/hook.out")"
   grep -q 'held a-lane: ' "$w/hook.out" || fail "ack-between-lanes: the drain did not present the first lane: $(cat "$w/hook.out")"
   [ -z "$out" ] || fail "ack-between-lanes: an acknowledged outcome was rung: $out"
-  grep -qx 'held_reported=1' "$w/state/a-lane.review-park" && grep -qx 'held_reported=1' "$w/state/lane.review-park" || fail "ack-between-lanes: not marked reported"
+  if ! grep -qx 'held_reported=1' "$w/state/a-lane.review-park" || ! grep -qx 'held_reported=1' "$w/state/lane.review-park"; then
+    fail "ack-between-lanes: not marked reported"
+  fi
 
   # A receipt that cannot be read by the time of the print rings nothing; the
   # row stays queued.
@@ -1660,7 +1665,9 @@ test_held_outcome_acknowledged_before_delivery_is_not_rung() {
   gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
   drain_and_ack_lines "$w" > "$w/exit.hook"
   run_watcher "$w" || true
-  [ -e "$w/hook.acked" ] && grep -q 'held lane: ' "$w/hook.out" || fail "watch-acked: the fixture did not acknowledge: $(cat "$w/hook.err" "$w/hook.out")"
+  if [ ! -e "$w/hook.acked" ] || ! grep -q 'held lane: ' "$w/hook.out"; then
+    fail "watch-acked: the fixture did not acknowledge: $(cat "$w/hook.err" "$w/hook.out")"
+  fi
   ! grep -q 'held lane: ' "$w/watch.out" || fail "watch-acked: an acknowledged outcome was rung: $(cat "$w/watch.out")"
   [ "$(held_rows "$w")" = 0 ] && [ ! -e "$w/state/.wake-queue.lock" ] || fail "watch-acked: rows or the queue lock were left"
 
