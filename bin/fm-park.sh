@@ -82,7 +82,12 @@
 # relaunched only by a deliberate resume once the host has room. Every resume
 # first records resume_attempt=, beside the hold or resume_error= a deliberate
 # one starts from; a deliberate resume the gate refuses drops it again and keeps
-# that outcome. An attempt whose outcome could not be recorded is settled by a
+# that outcome. The attempt is also the identity of the bin/fm-control.sh it
+# starts, which launches only while the record still carries it, judged under
+# the lane's lifecycle lock (state/.control-<id>.lock). Settling an attempt and
+# starting a deliberate one take that lock too, so a relaunch whose park action
+# was cut before it got that far launches nothing once its attempt is settled or
+# replaced. An attempt whose outcome could not be recorded is settled by a
 # later tick, never retried, once no bin/fm-control.sh it started still runs: a
 # running agent is its replacement, so the lane is unparked and reported as
 # relaunched, and otherwise it is held. That report and a detached resume's own
@@ -188,7 +193,8 @@
 # with held_reason once failing checks or a host resource gate refusal stopped
 # automatic relaunch, plus
 # held_reported once that episode's wake row is known to be recorded, and
-# resume_attempt with resume_trigger while a relaunch has no recorded outcome),
+# resume_attempt, <epoch>-<unique>, with resume_trigger while a relaunch has no
+# recorded outcome),
 # mode 0600, published by rename.
 # GraphQL and jq programs below are literal, not shell expressions.
 # shellcheck disable=SC2016
@@ -253,6 +259,11 @@ lock_try() {  # <lock-path>
   LOCKS_HELD="$LOCKS_HELD $1"
 }
 
+unlock() {  # <lock-path>
+  LOCKS_HELD=${LOCKS_HELD/" $1"/}
+  fm_lock_release "$1" || true
+}
+
 # The epoch second a tick must end by; empty outside tick.
 DEADLINE=
 # step_secs <secs> prints that bound cut to what the tick has left, and fails
@@ -265,6 +276,9 @@ step_secs() {  # <secs>
   if [ "$left" -lt "$1" ]; then printf '%s\n' "$left"; else printf '%s\n' "$1"; fi
 }
 lane_lock() { printf '%s/.review-park-%s.lock' "$STATE" "$1"; }
+# The lane's lifecycle lock (bin/fm-control.sh). A relaunch started by a park
+# action that was killed can outlive it, holding this.
+control_lock() { printf '%s/.control-%s.lock' "$STATE" "$1"; }
 
 # Succeeds while another park action holds the lane.
 lane_busy() {  # <id>
@@ -314,14 +328,6 @@ report_text() {  # <report-file>
       ;;
     *) cat -- "$1" ;;
   esac
-}
-
-# Succeeds while the lane's lifecycle lock (bin/fm-control.sh) has a live holder.
-# A relaunch started by a park action that was killed can outlive it.
-control_busy() {  # <id>
-  local lock="$STATE/.control-$1.lock" pid
-  pid=$(cat "$lock/pid" 2>/dev/null) || return 1
-  fm_lock_holder_alive "$lock" "$pid"
 }
 
 agent_idle() {  # <id>
@@ -797,7 +803,7 @@ resume_refused() {  # <id> <trigger>
 # Automatic resumes run through cmd_run.
 AUTO_RESUME=0
 cmd_resume() {
-  local id=${1-} trigger pr head note out rc=0 gate_rc=0 rec
+  local id=${1-} trigger pr head note out rc=0 gate_rc=0 rec attempt
   task_id_ok "$id" || die "usage: fm-park.sh resume <task-id> --trigger <text>" 2
   shift
   [ "${1-}" = --trigger ] && [ -n "${2-}" ] || die "usage: fm-park.sh resume <task-id> --trigger <text>" 2
@@ -815,9 +821,11 @@ cmd_resume() {
   # that, so nothing here may replace the pending record.
   [ -z "$(record_get "$id" pending)" ] || die "$id: its agent's stop is not confirmed yet, so nothing was tried; the next tick settles it"
   # A deliberate resume may follow a relaunch that started its agent and was cut
-  # short before saying so, so it never replaces a running agent.
+  # short before saying so, so it never replaces a running agent. The lifecycle
+  # lock is held from this read until the new attempt is on record: a relaunch
+  # an earlier attempt started either holds it now or finds its attempt replaced.
   if [ "$AUTO_RESUME" = 0 ]; then
-    ! control_busy "$id" || die "$id: another lifecycle action on it is still running, so nothing was tried"
+    lock_try "$(control_lock "$id")" || die "$id: another lifecycle action on it is still running, so nothing was tried"
     case "$(lane_agent "$id")" in
       dead) ;;
       alive)
@@ -833,8 +841,10 @@ cmd_resume() {
   # it can let a tick relaunch again, and an interruption after the launch can
   # be settled. A hold or failure this resume started from stays on record until
   # the attempt ends. Without the attempt's record nothing is tried.
-  record_edit "$id" "resume_attempt=$(date +%s)" "resume_trigger=$(printf '%s' "$trigger" | tr '\n' ' ')" \
+  attempt="$(date +%s)-$$-$RANDOM$RANDOM"
+  record_edit "$id" "resume_attempt=$attempt" "resume_trigger=$(printf '%s' "$trigger" | tr '\n' ' ')" \
     || die "$id: the relaunch attempt could not be recorded, so nothing was tried"
+  [ "$AUTO_RESUME" = 1 ] || unlock "$(control_lock "$id")"
   note="$PARK_TMP/note"
   {
     printf 'This lane was parked on review: PR %s was clean and ready to merge at head %s, so its previous agent was stopped.\n' "$pr" "$head"
@@ -852,7 +862,7 @@ cmd_resume() {
   # it, and worded as the attempt it still is; while the record stays, crew
   # state still reads the record, not this.
   status_append "$id" "working [at=$(date +%s)]: attempting relaunch from review park: $trigger"
-  out=$(FM_HOME=$FM_HOME fm_run_timed "$ACTION_SECS" "$CONTROL_BIN" "$id" relaunch --note-file "$note" 2>&1) || rc=$?
+  out=$(FM_HOME=$FM_HOME FM_CONTROL_PARK_ATTEMPT=$attempt fm_run_timed "$ACTION_SECS" "$CONTROL_BIN" "$id" relaunch --note-file "$note" 2>&1) || rc=$?
   if [ "$rc" -eq 75 ]; then
     resume_refused "$id" "$trigger"
     return 75
@@ -1108,7 +1118,9 @@ settle_attempt() {  # <id>
   lock_try "$(lane_lock "$id")" || return 0
   [ -n "$(record_get "$id" resume_attempt)" ] || return 0
   step_secs 1 >/dev/null || return 0
-  ! control_busy "$id" || return 0
+  # Held until the outcome is on record, so a relaunch this attempt started that
+  # has not reached its own lock yet finds the attempt gone and launches nothing.
+  lock_try "$(control_lock "$id")" || return 0
   state=$(lane_agent "$id")
   if [ "$state" = alive ]; then
     report_retire "$id" settled

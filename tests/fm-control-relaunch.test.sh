@@ -495,6 +495,149 @@ test_overloaded_host_defers_relaunch_and_secondmate_launch_before_any_change() {
   pass "an overloaded host defers fm-control relaunch before the stop, fm-spawn --relaunch before the record, and a fresh secondmate before its home is touched; load rising after the check defers after the stop with exit 75 and the lane left without an agent"
 }
 
+# --- review-park resume startup ---------------------------------------------
+
+# park_startup_case <name> <id>: a parked ship lane whose agent is stopped, with
+# the lease-command lock held, so the fm-control a resume starts waits in lease
+# arbitration, before its own lifecycle lock, until $dir/release exists.
+park_startup_case() {
+  local dir
+  dir=$(new_case "$1" "$2")
+  add_ship_task "$dir" "$2" claude
+  printf 'zsh' > "$dir/fake/command"
+  echo 'pr=https://github.com/example/repo/pull/7' >> "$dir/home/state/$2.meta"
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' \
+    'head=0123456789012345678901234567890123456789' 'parked_at=1' 'slot_leased=no' \
+    > "$dir/home/state/$2.review-park"
+  : > "$dir/control.rcs"
+  # The real fm-control; its output and exit stay readable once its park died.
+  cat > "$dir/control" <<SH
+#!/usr/bin/env bash
+rc=0
+"$CONTROL" "\$@" > "$dir/control.\$\$.out" 2>&1 || rc=\$?
+cat "$dir/control.\$\$.out"
+printf '%s\n' "\$rc" >> "$dir/control.rcs"
+exit "\$rc"
+SH
+  printf '#!/bin/sh\nexit 0\n' > "$dir/host-gate"
+  chmod +x "$dir/control" "$dir/host-gate"
+  # shellcheck disable=SC2016 # expanded by the holder's own shell
+  FM_HOME="$dir/home" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$2/home/state/.fm-lease-command.lock" || exit 1
+    : > "$2/held"
+    while [ ! -e "$2/release" ]; do /bin/sleep 0.05; done
+    fm_lock_release "$2/home/state/.fm-lease-command.lock"
+  ' _ "$ROOT" "$dir" >/dev/null 2>&1 &
+  wait_path "$dir/held" "the lease-command lock was never held"
+  printf '%s\n' "$dir"
+}
+
+wait_path() {  # <path> <failure>
+  local _
+  for _ in $(seq 1 400); do [ ! -e "$1" ] || return 0; /bin/sleep 0.05; done
+  fail "$2"
+}
+
+# Waits until <count> fm-control runs ended, however their parks did.
+wait_controls() {  # <case-dir> <count>
+  local _
+  for _ in $(seq 1 600); do
+    [ "$(wc -l < "$1/control.rcs")" -lt "$2" ] || return 0
+    /bin/sleep 0.05
+  done
+  fail "$1: fewer than $2 lifecycle actions ended"
+}
+
+run_park_lane() {  # <case-dir> <args...>: replaces this shell
+  local dir=$1; shift
+  mkdir -p "$dir/user-home"
+  exec env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u PI_CODING_AGENT \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' FM_SUPERVISION_ACTOR=main \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_LOCK_WAITING="${FM_FAKE_LOCK_WAITING:-}" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    FM_PARK_CONTROL_BIN="$dir/control" FM_PARK_HOST_GATE_BIN="$dir/host-gate" \
+    "$ROOT/bin/fm-park.sh" "$@"
+}
+
+launches() { grep -cE 'encode launch-brief|Firstmate operational input waiting: read' "$1/fake/literal" || true; }
+
+# Starts a resume and kills it while the fm-control it started still waits in
+# lease arbitration, before that control's own lifecycle lock.
+cut_resume_in_startup() {  # <case-dir> <id>
+  local pid rc=0
+  ( FM_FAKE_LOCK_WAITING="$1/waiting" run_park_lane "$1" resume "$2" --trigger "first try" ) > "$1/cut.out" 2>&1 &
+  pid=$!
+  wait_path "$1/waiting" "the relaunch never reached lease arbitration"
+  kill -KILL "$pid"
+  wait "$pid" 2>/dev/null || rc=$?
+  expect_code 137 "$rc" "the resume was not killed: $(cat "$1/cut.out")"
+  grep -q '^resume_attempt=[0-9]' "$1/home/state/$2.review-park" || fail "the cut resume left no attempt"
+  [ ! -e "$1/home/state/.control-$2.lock" ] || fail "the relaunch was already past lease arbitration"
+}
+
+# A resume cut while its relaunch is still starting leaves one attempt. Settling
+# it holds the lane, and the relaunch it left behind launches nothing after that;
+# a deliberate resume then relaunches exactly once.
+test_resume_cut_during_relaunch_startup_never_launches_behind_a_hold() {
+  local dir out rc=0 state
+  dir=$(park_startup_case park-cut-hold pk1)
+  state="$dir/home/state"
+  cut_resume_in_startup "$dir" pk1
+  out=$( (run_park_lane "$dir" tick) 2>&1 )
+  assert_contains "$out" "held pk1: " "the cut attempt was not settled as a hold: $out"
+  : > "$dir/release"
+  wait_controls "$dir" 1
+  assert_equals 0 "$(launches "$dir")" "a relaunch left behind launched after its lane was held"
+  [ "$(cat "$dir/fake/command")" = zsh ] || fail "a held lane has a running agent"
+  grep -q '^held=' "$state/pk1.review-park" || fail "the hold was lost: $(cat "$state/pk1.review-park")"
+  assert_contains "$(cat "$dir"/control.*.out)" "is no longer on task pk1's park record; nothing was changed" \
+    "the relaunch left behind did not name its settled attempt"
+
+  out=$( (run_park_lane "$dir" resume pk1 --trigger "operator retry") 2>&1 ) || rc=$?
+  expect_code 0 "$rc" "a deliberate resume of the held lane must recover it: $out"
+  assert_contains "$out" "relaunched pk1: " "the recovery was not reported"
+  assert_equals 1 "$(launches "$dir")" "the recovery did not launch exactly once"
+  [ "$(cat "$dir/fake/command")" = claude ] && [ ! -e "$state/pk1.review-park" ] || fail "the recovered lane is still parked"
+  pass "a relaunch whose resume was cut in startup launches nothing once its lane is held, and a deliberate resume recovers it once"
+}
+
+# A deliberate resume replaces an attempt whose relaunch is still starting: that
+# relaunch launches nothing and the new one launches once. Uncut, a relaunch held
+# up in startup launches once and no tick settles it meanwhile.
+test_only_the_recorded_resume_attempt_launches() {
+  local dir out rc pid
+  dir=$(park_startup_case park-replaced pk2)
+  cut_resume_in_startup "$dir" pk2
+  rm -f "$dir/waiting"
+  ( FM_FAKE_LOCK_WAITING="$dir/waiting" run_park_lane "$dir" resume pk2 --trigger "operator retry" ) > "$dir/second.out" 2>&1 &
+  pid=$!
+  wait_path "$dir/waiting" "the second relaunch never reached lease arbitration"
+  for _ in $(seq 1 200); do ! grep -q 'resume_trigger=operator retry' "$dir/home/state/pk2.review-park" || break; /bin/sleep 0.05; done
+  : > "$dir/release"
+  rc=0; wait "$pid" || rc=$?
+  wait_controls "$dir" 2
+  expect_code 0 "$rc" "the deliberate resume did not succeed: $(cat "$dir/second.out")"
+  assert_equals 1 "$(launches "$dir")" "the replaced attempt's relaunch launched too"
+  assert_no_grep "/exit" "$dir/fake/literal" "a relaunch stopped the replacement another attempt started"
+  [ "$(cat "$dir/fake/command")" = claude ] && [ ! -e "$dir/home/state/pk2.review-park" ] || fail "the resumed lane is still parked"
+
+  dir=$(park_startup_case park-uncut pk3)
+  ( FM_FAKE_LOCK_WAITING="$dir/waiting" run_park_lane "$dir" resume pk3 --trigger "operator retry" ) > "$dir/only.out" 2>&1 &
+  pid=$!
+  wait_path "$dir/waiting" "the relaunch never reached lease arbitration"
+  out=$( (run_park_lane "$dir" tick) 2>&1 )
+  [ -z "$out" ] || fail "an attempt under way was settled: $out"
+  : > "$dir/release"
+  rc=0; wait "$pid" || rc=$?
+  expect_code 0 "$rc" "an uncut resume did not succeed: $(cat "$dir/only.out")"
+  assert_equals 1 "$(launches "$dir")" "an uncut resume did not launch exactly once"
+  [ ! -e "$dir/home/state/pk3.review-park" ] || fail "an uncut resume left the lane parked"
+  pass "only the relaunch of the recorded resume attempt launches, once"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -3460,6 +3603,8 @@ test_herdr_rebind_stays_in_the_recorded_session
 test_herdr_reclaim_refuses_an_agent_that_came_back
 test_herdr_reclaim_keeps_the_task_whole
 test_overloaded_host_defers_relaunch_and_secondmate_launch_before_any_change
+test_resume_cut_during_relaunch_startup_never_launches_behind_a_hold
+test_only_the_recorded_resume_attempt_launches
 test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it

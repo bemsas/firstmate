@@ -196,6 +196,12 @@
 #   - A composer that visibly holds pending text refuses before an exit command
 #     is typed, so existing text is preserved instead of being concatenated.
 #
+# FM_CONTROL_PARK_ATTEMPT names the review-park relaunch attempt bin/fm-park.sh
+# started this action for. Under the lifecycle lock, before anything else, the
+# action refuses unless the lane's park record still carries that attempt, so
+# one left starting after its park action was cut launches nothing once another
+# owner settled the attempt. Unset, nothing is checked.
+#
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
 #   FM_CONTROL_SETTLE_WAIT       adapter acknowledgement wait after interrupt (5)
@@ -235,6 +241,8 @@ fi
 }
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+PARK_ATTEMPT=${FM_CONTROL_PARK_ATTEMPT:-}
+unset FM_CONTROL_PARK_ATTEMPT
 [ -d "$STATE" ] || {
   echo "error: state dir '$STATE' is missing; fm-control cannot resolve tasks for FM_HOME '$FM_HOME'" >&2
   exit 1
@@ -416,6 +424,8 @@ CONTROL_LOCK_HELD=1
 # only once the lock is held: a process that loses the lock runs the same
 # trap, and would remove the file the lock holder is reading.
 FM_COMPOSER_DIALOG_SINK=$STATE/$ID.composer-dialog
+[ -z "$PARK_ATTEMPT" ] || [ "$(fm_meta_get "$STATE/$ID.review-park" resume_attempt)" = "$PARK_ATTEMPT" ] \
+  || die "the review-park relaunch attempt this was started for is no longer on task $ID's park record; nothing was changed"
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ]; then
   case "$RAW_ID" in
