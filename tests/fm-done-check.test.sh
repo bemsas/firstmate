@@ -772,6 +772,7 @@ assert true != "$actual"
 assert_true "$(ready)" "true when ready"
 assert_equals ready "$state" "ready state"
 printf '%s\n' "usage: run.sh; exit 77 when tools are missing" 'or run.sh | skip-list; assert true' > "$usage"
+printf '%s\n' "Examples mention eval; exit 77 when prerequisites are missing."
 find "$fixtures" -type f -exec test -s {} \; || exit 1
 exit 0
 SH
@@ -845,6 +846,10 @@ after-quoted-shell|tests/iterator.test.sh|added skip|printf "usage; see docs"; e
 between-quoted-shell|tests/iterator.test.sh|added skip|run 'a;b' && skip "later"
 substitution-shell|tests/iterator.test.sh|added skip|value="$(load "a"; exit 77)"
 evaluated-shell|tests/iterator.test.sh|added skip|eval "load; exit 77"
+evaluated-after-prose-shell|tests/iterator.test.sh|added skip|run "docs mention eval; see" && eval "load; exit 77"
+evaluated-quoted-command-shell|tests/iterator.test.sh|added skip|"eval" "load; exit 77"
+evaluated-in-substitution-shell|tests/iterator.test.sh|added skip|value="mention $(eval "load; exit 77")"
+trapped-shell|tests/iterator.test.sh|added skip|trap "load; exit 77" EXIT
 multiline-shell|tests/iterator.test.sh|added skip|value='first\nlast'; exit 77; run 'b'
 literal-command-shell|tests/iterator.test.sh|added trivial assertion|test true # standalone check
 go-skip|src/iterator_test.go|added skip|package iterator\nfunc TestExample(t *testing.T) { t.Skip("fixture") }
@@ -1328,6 +1333,24 @@ test_review_event_retry() {
   jq -c 'if .refute then del(.refute.event) else . end' "$journal" > "$A/journal"
   cat "$A/journal" > "$journal"
   assert_review_retry third "row without an event"
+
+  # A fix in such a row stays recorded while its scout reports nothing new.
+  prepare_review_record fourth 'Both blockers are fixed.' merge
+  record_review fourth
+  assert_review_retry second "fix without an event, before a later merge"
+  assert_equals fourth:merge "$(effective_review)" "a retried fix without an event displaced a later merge"
+  # Reporting it again, or revising its report, is still new evidence.
+  report_review second fix
+  record_review second
+  assert_equals second:fix "$(effective_review)" "a fix reported after its row without an event must block again"
+  assert_review_retry second "fix reported after its row without an event"
+  jq -c 'if .refute then del(.refute.event) else . end' "$journal" > "$A/journal"
+  cat "$A/journal" > "$journal"
+  assert_review_retry second "newest fix without an event"
+  n=$(grep -c . "$journal")
+  printf 'Found another blocker in app.py.\n' > "$A_HOME/data/second/report.md"
+  record_review second
+  assert_equals "$((n + 1))" "$(grep -c . "$journal")" "a revised report is new beside a row without an event"
   cp "$journal" "$A/journal"
   printf 'not a verdict\n' >> "$journal"
   accept_refused "done acceptance" "$A_VERDICT" refute "$A_ID" first "$A_HEAD"

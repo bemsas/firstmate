@@ -499,11 +499,14 @@ SHELL_QUOTED = re.compile(r"""\\.|'[^']*'|"(?:\\.|[^"\\])*\"""")
 def shell_commands(lines):
     # Separators inside a complete quoted argument are data. A line whose quotes
     # do not pair starts text this line reader cannot follow, so from there every
-    # separator counts, as it does where quoted text holds or becomes code.
+    # separator counts, as it does where quoted text holds or becomes code. An
+    # eval or trap spelled inside quoted text with a space in it runs nothing:
+    # only an unquoted word or one whole quoted word can be the command.
     paired = True
     for line in lines:
         paired = paired and not re.search(r"['\"]", SHELL_QUOTED.sub("", line))
-        if paired and not re.search(r"\$'|[$<>]\(|`|\b(?:eval|trap)\b|\s-\w*c\s", line):
+        words = SHELL_QUOTED.sub(lambda quoted: "''" if re.search(r"\s", quoted[0]) else quoted[0], line)
+        if paired and not (re.search(r"\$'|[$<>]\(|`|\s-\w*c\s", line) or re.search(r"\b(?:eval|trap)\b", words)):
             line = SHELL_QUOTED.sub(lambda quoted: re.sub(r"[;&|]", " ", quoted[0]), line)
         yield re.split(r"[;&|]+\s*", line)
 
@@ -869,6 +872,18 @@ def review_event(row):
     return {**row, "refute": {key: value for key, value in row["refute"].items() if key not in ignored}}
 
 
+def already_recorded(old, row, status_ns):
+    refute = old.get("refute")
+    if not isinstance(refute, dict):
+        return False
+    # A row from before events were kept cannot name its fix report. It stands
+    # for the current one only if the scout's status is no newer than the row.
+    unnamed = row["verdict"] == "fix" and "event" not in refute
+    if unnamed:
+        old = {**old, "refute": {**refute, "event": row["refute"]["event"]}}
+    return review_event(old) == review_event(row) and (not unnamed or status_ns <= refute["recorded_ns"])
+
+
 def review_result(task, reviewer, head):
     ticket_bytes = private_bytes(ticket_for(reviewer))
     ticket = decode(ticket_bytes)
@@ -885,6 +900,7 @@ def review_result(task, reviewer, head):
     require(independent_model(identity, harness, model),
             "reviewer model is not independent of the builder")
     note, event = done_event(reviewer)
+    status_ns = (STATE / f"{reviewer}.status").lstat().st_mtime_ns
     verdict = re.fullmatch(rf"Refute {identity['base']} {identity['head']} (merge|fix)", note)
     require(verdict, "scout did not report a verdict for the exact pinned base and head")
     report = private_bytes(DATA / reviewer / "report.md", private=False)
@@ -898,7 +914,7 @@ def review_result(task, reviewer, head):
     # fm-review-verdict.sh holds the writer lock from this read through its
     # append, so a retry keeps the first row's identity, time and position.
     recorded = list(journal_rows()) if os.path.lexists(JOURNAL) else []
-    if any(isinstance(old.get("refute"), dict) and review_event(old) == review_event(row) for old in recorded):
+    if any(already_recorded(old, row, status_ns) for old in recorded):
         print("review already recorded; the journal is unchanged", file=sys.stderr)
         return
     print(json_bytes(row).decode().strip())
