@@ -2874,6 +2874,18 @@ fm_wake_queue_has_key_locked() {
     'NF >= 5 && $3 == kind && $4 == key { found = 1 } END { exit !found }'
 }
 
+# fm_wake_queue_has_payload_locked <kind> <key-prefix> <payload>: the same answer
+# for a row whose key starts with <key-prefix> and whose payload is <payload>.
+fm_wake_queue_has_payload_locked() {
+  local rows payload
+  [ -e "$FM_WAKE_QUEUE" ] || [ -L "$FM_WAKE_QUEUE" ] || return 1
+  rows=$(cat -- "$FM_WAKE_QUEUE" 2>/dev/null) || return 2
+  payload=$(printf '%s' "$3" | fm_wake_clean_field) || return 2
+  # Through the environment, so a backslash in the payload stays itself.
+  printf '%s\n' "$rows" | FM_WAKE_MATCH=$payload awk -F '\t' -v kind="$1" -v prefix="$2" \
+    'NF >= 5 && $3 == kind && index($4, prefix) == 1 && $5 == ENVIRON["FM_WAKE_MATCH"] { found = 1 } END { exit !found }'
+}
+
 # fm_wake_queued_carries_locked: 0 iff an unacknowledged queued row of <kind>
 # for exactly <key> carries <needle> in its payload. The payload-shaped twin of
 # fm_wake_queued_keys_locked, for a publisher that must write one wake of a

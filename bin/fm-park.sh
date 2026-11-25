@@ -80,12 +80,18 @@
 # relaunch the host resource gate refuses exits 75 and holds the lane (held=
 # with the capacity reason, below): reported once, never retried by tick, and
 # relaunched only by a deliberate resume once the host has room. Every resume
-# first records resume_attempt=; an attempt whose outcome could not be recorded
-# is settled by a later tick, never retried: a running agent is its replacement,
-# so the lane is unparked and reported as relaunched, and otherwise it is held.
+# first records resume_attempt=, beside the hold or resume_error= a deliberate
+# one starts from; a deliberate resume the gate refuses drops it again and keeps
+# that outcome. An attempt whose outcome could not be recorded is settled by a
+# later tick, never retried, once no bin/fm-control.sh it started still runs: a
+# running agent is its replacement, so the lane is unparked and reported as
+# relaunched, and otherwise it is held. That report and a detached resume's own
+# are published by renaming the park record into them, one step that either
+# retires the park and reports it once or leaves the record for the next tick.
 # No resume touches a park whose stop is still pending, and a deliberate one
-# relaunches only an agent confirmed stopped: a running one is left alone and
-# unparks the lane, and one that cannot be read refuses.
+# refuses while a lifecycle action on the lane still runs and relaunches only an
+# agent confirmed stopped: a running one is left alone and unparks the lane, and
+# one that cannot be read refuses.
 #
 # land waits for any other park action on the lane to finish, runs
 # bin/fm-teardown.sh <task-id> (never --force), so every teardown gate still
@@ -149,7 +155,9 @@
 # state/.review-park-held-acked-<id> (bin/fm-wake-lib.sh), and never adds a
 # second; a queue or receipt it cannot read leaves the hold pending. A row whose
 # marker cannot be written is rung once it can, and one already acknowledged is
-# not rung.
+# not rung: tick prints held lines last, after reading their receipts, and the
+# watcher decides for each one again under the queue lock it prints under
+# (park_ring in bin/fm-watch.sh).
 #
 # A lane action started by tick (park, resume) or by the merge poll (land) runs
 # detached, as fm-park.sh run, in its own process group with stdio closed, so it
@@ -158,7 +166,9 @@
 # held by every park, resume and land), so a lane runs one action at a time and
 # tick skips a lane whose lock is held. Its stdout outcome line, if any, is
 # published as state/.review-park-report-<id>-<epoch>-<pid> (a park refusal
-# prints none), and the next tick reports it.
+# prints none), and the next tick reports it. A report that is a retired park
+# record adds .relaunched or .settled to that name and is reported from its
+# fields.
 # Forge reads are bounded by FM_PARK_READ_SECS (default 15). Each lifecycle
 # call an action makes (bin/fm-control.sh exit or relaunch, bin/fm-teardown.sh)
 # is bounded by FM_PARK_ACTION_SECS (default 900), a hang backstop well above
@@ -177,8 +187,9 @@
 # until the stop is confirmed, resume_error after a failed relaunch, and held
 # with held_reason once failing checks or a host resource gate refusal stopped
 # automatic relaunch, plus
-# held_reported once that episode's wake row is known to be recorded), mode
-# 0600, published by rename.
+# held_reported once that episode's wake row is known to be recorded, and
+# resume_attempt with resume_trigger while a relaunch has no recorded outcome),
+# mode 0600, published by rename.
 # GraphQL and jq programs below are literal, not shell expressions.
 # shellcheck disable=SC2016
 set -eu
@@ -282,6 +293,37 @@ report_write() {  # <id> <line>
   fi
 }
 
+# Retires a park whose relaunch succeeded by renaming its record into the report
+# the next tick collects. That one step either leaves the record, with its
+# attempt, for a later tick to settle or leaves exactly one report, so a failed
+# or interrupted retirement neither loses the success nor reports it twice.
+report_retire() {  # <id> <relaunched|settled>
+  mv -f -- "$(record_path "$1")" "$STATE/.review-park-report-$1-$(date +%s)-$$.$2"
+}
+
+# Prints the outcome a report file carries.
+report_text() {  # <report-file>
+  local id note=
+  case "$1" in
+    *.relaunched|*.settled)
+      [ -r "$1" ] || return 1
+      id=${1##*/.review-park-report-}
+      id=${id%-*-*}
+      [ "${1##*.}" = relaunched ] || note=' (the relaunch ended before recording its outcome; its agent is running and was left alone)'
+      printf 'relaunched %s: PR %s - %s%s\n' "$id" "$(fm_meta_get "$1" pr)" "$(fm_meta_get "$1" resume_trigger)" "$note"
+      ;;
+    *) cat -- "$1" ;;
+  esac
+}
+
+# Succeeds while the lane's lifecycle lock (bin/fm-control.sh) has a live holder.
+# A relaunch started by a park action that was killed can outlive it.
+control_busy() {  # <id>
+  local lock="$STATE/.control-$1.lock" pid
+  pid=$(cat "$lock/pid" 2>/dev/null) || return 1
+  fm_lock_holder_alive "$lock" "$pid"
+}
+
 agent_idle() {  # <id>
   local verdict
   verdict=$(fm_busy_classify_meta "$STATE/$1.meta" "$1" "$STATE" 2>/dev/null || true)
@@ -311,6 +353,20 @@ record_write() {  # <id> <key=value>...
     rm -f -- "$tmp"
     return 1
   fi
+}
+
+# Rewrites the record with each <key=value> set and each bare <key> dropped,
+# keeping every other line.
+record_edit() {  # <id> <key|key=value>...
+  local id=$1 line arg
+  local -a out=()
+  shift
+  while IFS= read -r line; do
+    for arg in "$@"; do [ "${line%%=*}" != "${arg%%=*}" ] || continue 2; done
+    out+=("$line")
+  done < "$(record_path "$id")" || return 1
+  for arg in "$@"; do case "$arg" in *=*) out+=("$arg") ;; esac; done
+  record_write "$id" ${out[@]+"${out[@]}"}
 }
 
 status_append() {  # <id> <line>
@@ -726,12 +782,15 @@ hold_lane() {  # <id> <reason>
 # (a parked lane's agent is already stopped) - holds the lane, so an overloaded
 # host can never be fed by automatic review relaunches. When that hold cannot
 # be recorded, the attempt recorded before it already keeps every tick from
-# relaunching. A lane already held, or waiting on resume_error, keeps its
-# record. The caller holds the lane lock.
+# relaunching. A lane already held, or waiting on resume_error, goes back to that
+# record without the attempt. The caller holds the lane lock.
 resume_refused() {  # <id> <trigger>
   local id=$1
   echo "deferred: $id was not relaunched: this host is overloaded; the lane stays parked and nothing retries it - resume it by hand with bin/fm-park.sh resume $id --trigger <text> once the host is back under the host gate's limits (bin/fm-capacity.sh --host-gate)" >&2
-  [ -z "$(record_get "$id" held)" ] && [ -z "$(record_get "$id" resume_error)" ] || return 0
+  if [ -n "$(record_get "$id" held)$(record_get "$id" resume_error)" ]; then
+    record_edit "$id" resume_attempt resume_trigger || true
+    return 0
+  fi
   hold_lane "$id" "relaunch refused by the host resource gate ($2)" || return 0
 }
 
@@ -758,10 +817,11 @@ cmd_resume() {
   # A deliberate resume may follow a relaunch that started its agent and was cut
   # short before saying so, so it never replaces a running agent.
   if [ "$AUTO_RESUME" = 0 ]; then
+    ! control_busy "$id" || die "$id: another lifecycle action on it is still running, so nothing was tried"
     case "$(lane_agent "$id")" in
       dead) ;;
       alive)
-        rm -f -- "$rec"
+        rm -f -- "$rec" || die "$id: its agent is already running, so nothing was relaunched, but its park record could not be removed"
         die "$id: its agent is already running, so nothing was relaunched and the lane is no longer parked; steer it with bin/fm-send.sh"
         ;;
       *) die "$id: its agent could not be confirmed stopped, so nothing was tried" ;;
@@ -770,12 +830,11 @@ cmd_resume() {
   pr=$(record_get "$id" pr)
   head=$(record_get "$id" head)
   # The attempt is consumed before admission is tried, so no lost write after
-  # it can let a tick relaunch again. Without that record nothing is tried.
-  if [ -z "$(record_get "$id" held)" ] && [ -z "$(record_get "$id" resume_error)" ]; then
-    record_write "$id" "pr=$pr" "head=$head" "parked_at=$(record_get "$id" parked_at)" \
-      "slot_leased=$(record_get "$id" slot_leased)" "resume_attempt=$(date +%s)" \
-      "resume_trigger=$(printf '%s' "$trigger" | tr '\n' ' ')" || die "$id: the relaunch attempt could not be recorded, so nothing was tried"
-  fi
+  # it can let a tick relaunch again, and an interruption after the launch can
+  # be settled. A hold or failure this resume started from stays on record until
+  # the attempt ends. Without the attempt's record nothing is tried.
+  record_edit "$id" "resume_attempt=$(date +%s)" "resume_trigger=$(printf '%s' "$trigger" | tr '\n' ' ')" \
+    || die "$id: the relaunch attempt could not be recorded, so nothing was tried"
   note="$PARK_TMP/note"
   {
     printf 'This lane was parked on review: PR %s was clean and ready to merge at head %s, so its previous agent was stopped.\n' "$pr" "$head"
@@ -804,7 +863,12 @@ cmd_resume() {
     printf 'relaunch-failed %s: PR %s (%s): %s\n' "$id" "$pr" "$trigger" "$(printf '%s\n' "$out" | tail -1)"
     return 1
   fi
-  rm -f -- "$rec"
+  # A record that cannot be retired keeps its attempt, which a later tick settles.
+  if [ "$AUTO_RESUME" = 1 ]; then
+    report_retire "$id" relaunched || return 1
+    return 0
+  fi
+  rm -f -- "$rec" || die "$id: it was relaunched, but its park record could not be removed; the next tick settles it"
   printf 'relaunched %s: PR %s - %s\n' "$id" "$pr" "$trigger"
 }
 
@@ -905,12 +969,12 @@ watch_parked() {  # <id>
     # Relaunching replaces the agent, so wait until the stop is confirmed.
     [ -e "$(record_path "$id")" ] && [ -z "$(record_get "$id" pending)" ] || return 0
   fi
-  [ -z "$(record_get "$id" resume_error)" ] || return 0
-  [ -z "$(record_get "$id" held)" ] || { watch_held "$id"; return 0; }
   if [ -n "$(record_get "$id" resume_attempt)" ]; then
     ( LOCKS_HELD=; trap release_locks EXIT; settle_attempt "$id" ) || true
     return 0
   fi
+  [ -z "$(record_get "$id" resume_error)" ] || return 0
+  [ -z "$(record_get "$id" held)" ] || { watch_held "$id"; return 0; }
   pr=$(record_get "$id" pr)
   head=$(record_get "$id" head)
   parked=$(record_get "$id" parked_at)
@@ -952,7 +1016,7 @@ held_episode() { printf '%s-%s\n' "$(record_get "$1" parked_at)" "$(record_get "
 held_unpublished() {  # <id> <episode>
   local rc=0
   HELD_SEEN=gone
-  [ -n "$(record_get "$1" held)" ] && [ -z "$(record_get "$1" held_reported)" ] || return 1
+  [ -n "$(record_get "$1" held)" ] && [ -z "$(record_get "$1" held_reported)$(record_get "$1" resume_attempt)" ] || return 1
   [ "$(held_episode "$1")" = "$2" ] || return 1
   HELD_SEEN=unreadable
   fm_wake_queue_has_key_locked check "review-park-held:$1:$2" || rc=$?
@@ -982,16 +1046,19 @@ tick_append() {  # <guard or ''> <kind> <key> <payload> [<guard args>...]
 }
 
 # Publish a held lane's outcome: one wake row keyed by the episode, then the
-# held_reported marker, then the line for the watcher to ring. The held record
+# held_reported marker, then the line ring_held prints. The held record
 # is the pending outcome until that marker is durable, so a tick that dies or
 # fails before the append leaves it for the next one, and one that dies or
 # fails after it finds its own row or receipt and only finishes the marker.
 # Only the tick, which holds the tick lock, publishes, and it never waits for
-# the queue lock while holding a lane lock.
+# the queue lock while holding a lane lock. A lane whose relaunch attempt is not
+# settled yet has no outcome to publish.
 HELD_SEEN=
+HELD_RINGS=()
 publish_held() {  # <id>
   local id=$1 episode line rc=0
-  [ -e "$(record_path "$id")" ] && [ -n "$(record_get "$id" held)" ] && [ -z "$(record_get "$id" held_reported)" ] || return 0
+  [ -e "$(record_path "$id")" ] && [ -n "$(record_get "$id" held)" ] \
+    && [ -z "$(record_get "$id" held_reported)$(record_get "$id" resume_attempt)" ] || return 0
   ! lane_busy "$id" || return 0
   episode=$(held_episode "$id")
   line="held $id: PR $(record_get "$id" pr) - $(record_get "$id" held_reason); automatic relaunch stopped and the lane stays parked; once its agent is confirmed stopped, resume it by hand with bin/fm-park.sh resume $id --trigger <text>"
@@ -999,11 +1066,22 @@ publish_held() {  # <id>
   case "$rc:$HELD_SEEN" in 0:*|3:queued|3:acked) ;; *) return 0 ;; esac
   ( LOCKS_HELD=; trap release_locks EXIT; lock_try "$(lane_lock "$id")" || exit 1
     [ "$(held_episode "$id")" = "$episode" ] || exit 1
-    record_write "$id" "pr=$(record_get "$id" pr)" "head=$(record_get "$id" head)" \
-      "parked_at=$(record_get "$id" parked_at)" "slot_leased=$(record_get "$id" slot_leased)" \
-      "held=$(record_get "$id" held)" "held_reason=$(record_get "$id" held_reason)" held_reported=1 ) || return 0
-  # A row acknowledged before this tick, or since its append, is not rung again.
-  held_acked "$id" "$episode" || printf '%s\n' "$line"
+    record_edit "$id" held_reported=1 ) || return 0
+  HELD_RINGS+=("$id" "$episode" "$line")
+}
+
+# Prints this tick's held lines. One whose row was acknowledged, before this
+# tick or since its append, is not rung again, and neither is one whose receipt
+# cannot be read: its queued row stays the durable outcome.
+ring_held() {
+  local rc
+  set -- ${HELD_RINGS[@]+"${HELD_RINGS[@]}"}
+  while [ "$#" -gt 0 ]; do
+    rc=0
+    held_acked "$1" "$2" || rc=$?
+    [ "$rc" -ne 1 ] || printf '%s\n' "$3"
+    shift 3
+  done
 }
 
 # Hold a parked lane whose checks are failing, under the lane lock so it never
@@ -1014,29 +1092,31 @@ hold_failing() {  # <id> <parked_at> <head> <reason>
   local id=$1 parked=$2 head=$3
   lock_try "$(lane_lock "$id")" || return 0
   [ -e "$(record_path "$id")" ] && [ -z "$(record_get "$id" held)" ] || return 0
-  [ -z "$(record_get "$id" pending)" ] && [ -z "$(record_get "$id" resume_error)" ] || return 0
+  [ -z "$(record_get "$id" pending)$(record_get "$id" resume_error)$(record_get "$id" resume_attempt)" ] || return 0
   [ "$(record_get "$id" parked_at)" = "$parked" ] && [ "$(record_get "$id" head)" = "$head" ] || return 0
   hold_lane "$id" "$4"
 }
 
 # A finished attempt that left no outcome - its hold or error could not be
-# written, or it was killed - is never retried. A running agent is the
-# replacement it started, so the lane is unparked and the relaunch reported (the
-# report first, so no interruption loses it); otherwise it is held once storage
-# allows, saying so when the agent could not be confirmed stopped.
+# written, its record could not be retired, or it was killed - is never retried.
+# A running agent is the replacement it started, so the lane is unparked and the
+# relaunch reported in one step; otherwise it is held once storage allows, saying
+# so when the agent could not be confirmed stopped, and naming the hold a
+# deliberate attempt started from.
 settle_attempt() {  # <id>
-  local id=$1 state doubt=''
+  local id=$1 state doubt='' prior
   lock_try "$(lane_lock "$id")" || return 0
-  [ -n "$(record_get "$id" resume_attempt)" ] && [ -z "$(record_get "$id" held)" ] && [ -z "$(record_get "$id" resume_error)" ] || return 0
+  [ -n "$(record_get "$id" resume_attempt)" ] || return 0
   step_secs 1 >/dev/null || return 0
+  ! control_busy "$id" || return 0
   state=$(lane_agent "$id")
   if [ "$state" = alive ]; then
-    report_write "$id" "relaunched $id: PR $(record_get "$id" pr) - $(record_get "$id" resume_trigger) (the relaunch ended before recording its outcome; its agent is running and was left alone)" || return 1
-    rm -f -- "$(record_path "$id")"
-    return 0
+    report_retire "$id" settled
+    return
   fi
   [ "$state" = dead ] || doubt=', and its agent could not be confirmed stopped: confirm that before any resume'
-  hold_lane "$id" "a relaunch attempt ($(record_get "$id" resume_trigger)) was refused or ended without a recorded outcome$doubt"
+  prior=$(record_get "$id" held_reason)
+  hold_lane "$id" "a relaunch attempt ($(record_get "$id" resume_trigger)) was refused or ended without a recorded outcome$doubt${prior:+; held before it: $prior}"
 }
 
 watch_unparked() {  # <id>
@@ -1106,12 +1186,13 @@ cmd_tick() {
   command -v jq >/dev/null 2>&1 || return 0
   lock_try "$STATE/.review-park-tick.lock" || return 0
   DEADLINE=$(( $(date +%s) + TICK_SECS ))
-  local lines='' line
+  local lines='' line text
   local -a reports=()
   for rec in "$STATE"/.review-park-report-*; do
     [ -f "$rec" ] || continue
+    text=$(report_text "$rec") || continue
     reports+=("$rec")
-    lines+=$(cat -- "$rec")$'\n'
+    lines+=$text$'\n'
   done
   for rec in "$STATE"/*.review-park-land; do
     [ -e "$rec" ] || continue
@@ -1140,8 +1221,12 @@ cmd_tick() {
     lines+=$(visit_lanes "$STATE/.review-park-tick-next-unparked" watch_unparked ${unparked[@]+"${unparked[@]}"})$'\n' || true
   fi
   for id in ${parked[@]+"${parked[@]}"}; do publish_held "$id"; done
-  lines=$(printf '%s' "$lines" | grep -v '^$') || return 0
-  tick_append '' check park-on-review "check: park-on-review: $(printf '%s\n' "$lines" | paste -sd ';' - | sed 's/;/; /g')" || return 0
+  lines=$(printf '%s' "$lines" | grep -v '^$') || lines=
+  if [ -n "$lines" ]; then
+    tick_append '' check park-on-review "check: park-on-review: $(printf '%s\n' "$lines" | paste -sd ';' - | sed 's/;/; /g')" || lines=
+  fi
+  ring_held
+  [ -n "$lines" ] || return 0
   rm -f -- ${reports[@]+"${reports[@]}"}
   while IFS= read -r line; do
     case "$line" in "closed "*:*) line=${line#closed }; : > "$STATE/.review-park-closed-${line%%:*}" ;; esac
@@ -1157,7 +1242,9 @@ cmd_list() {
     printf '%s\tPR %s\thead %s\tparked %s%s\n' "$id" "$(record_get "$id" pr)" \
       "$(record_get "$id" head | cut -c1-12)" \
       "$(date -u -r "$(record_get "$id" parked_at)" +%Y-%m-%dT%H:%MZ 2>/dev/null || date -u -d "@$(record_get "$id" parked_at)" +%Y-%m-%dT%H:%MZ 2>/dev/null || record_get "$id" parked_at)" \
-      "$([ -z "$(record_get "$id" pending)" ] || printf '\tparking; stop not yet confirmed')$([ -z "$(record_get "$id" resume_error)" ] || printf '\trelaunch failed; run fm-park.sh resume by hand')$([ -z "$(record_get "$id" resume_attempt)" ] || printf '\trelaunch attempted; no outcome recorded yet')$([ -z "$(record_get "$id" held)" ] || printf '\theld: %s; run fm-park.sh resume by hand' "$(record_get "$id" held_reason)")"
+      "$([ -z "$(record_get "$id" pending)" ] || printf '\tparking; stop not yet confirmed')$(if [ -n "$(record_get "$id" resume_attempt)" ]; then printf '\trelaunch attempted; no outcome recorded yet'
+        elif [ -n "$(record_get "$id" resume_error)" ]; then printf '\trelaunch failed; run fm-park.sh resume by hand'
+        elif [ -n "$(record_get "$id" held)" ]; then printf '\theld: %s; run fm-park.sh resume by hand' "$(record_get "$id" held_reason)"; fi)"
   done
 }
 

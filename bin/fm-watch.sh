@@ -3497,6 +3497,44 @@ procevent_surface_queued() {
   wake "$reason"
 }
 
+park_ring_after_output() {
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+}
+
+# Ring what a park tick printed. A held outcome is rung only while its wake row
+# is still queued, decided and printed under the queue lock an acknowledgement
+# consumes rows under, so one acknowledged after the tick read its receipt is
+# never rung. A lock not free within the wait, or a queue that cannot be read,
+# proves nothing: the line is not rung here, and its row, while it stays queued,
+# surfaces through resurface_after_downtime.
+PARK_RING_LOCK_SECS=10
+park_ring() {  # <tick-output>
+  local line lines='' held=0 locked=0
+  if printf '%s\n' "$1" | grep -q '^held ' \
+    && fm_lock_acquire_wait_max "$FM_WAKE_QUEUE_LOCK" "$PARK_RING_LOCK_SECS"; then
+    locked=1
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      'held '*)
+        [ "$locked" -eq 1 ] || continue
+        fm_wake_queue_has_payload_locked check review-park-held: "check: park-on-review: $line" || continue
+        held=1
+        ;;
+    esac
+    lines="${lines:+$lines; }$line"
+  done <<< "$1"
+  if [ "$held" -eq 1 ]; then
+    # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
+    FM_WAKE_POST_OUTPUT_ACTION=park_ring_after_output
+  elif [ "$locked" -eq 1 ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  fi
+  [ -n "$lines" ] || return 0
+  touch "$STATE/.last-check"
+  wake "check: park-on-review: $lines"
+}
+
 run_check_process() {
   local c=$1
   shift
@@ -4660,14 +4698,10 @@ EOF
     # Parked-on-review lanes, close detection, opt-in automatic parking, and
     # the outcomes of detached park, relaunch, and cleanup actions
     # (bin/fm-park.sh owns all of them, bounds the whole tick, and records its
-    # wake before printing it, so the watcher only rings).
+    # wake before printing it, so the watcher only rings: park_ring above).
     park_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
       "$SCRIPT_DIR/fm-park.sh" tick 2>/dev/null) || true
-    if [ -n "$park_out" ]; then
-      reason="check: park-on-review: $(printf '%s' "$park_out" | paste -sd ';' - | sed 's/;/; /g')"
-      touch "$STATE/.last-check"
-      wake "$reason"
-    fi
+    [ -z "$park_out" ] || park_ring "$park_out"
     touch "$STATE/.last-check"
     [ -z "$check_outputs" ] || wake "$check_outputs"
   fi

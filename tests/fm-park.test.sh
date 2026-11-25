@@ -115,11 +115,20 @@ SH
   # record that says held while held.mv.fail exists, and for one that carries
   # the published marker, after running it, while marker.mv.hook exists (unless
   # marker.mv.keep lets that write go on). It fails for the lane's held receipt
-  # while receipt.mv.fail exists.
+  # while receipt.mv.fail exists. Retiring the lane's park record, by rm or by
+  # moving it away, fails while retire.fail exists, and runs retire.before or
+  # retire.after, once, around it.
   cat > "$fakebin/mv" <<SH
 #!/usr/bin/env bash
 src= last=
 for a in "\$@"; do src=\$last; last=\$a; done
+if [ "\$src" = "$world/state/lane.review-park" ]; then
+  [ ! -e "$world/retire.fail" ] || exit 1
+  [ ! -e "$world/retire.before" ] || { PATH=/usr/bin:/bin mv "$world/retire.before" "$world/retire.ran"; sh "$world/retire.ran"; }
+  PATH=/usr/bin:/bin mv "\$@" || exit 1
+  [ ! -e "$world/retire.after" ] || { PATH=/usr/bin:/bin mv "$world/retire.after" "$world/retire.ran"; sh "$world/retire.ran"; }
+  exit 0
+fi
 if [ "\$last" = "$world/state/lane.review-park" ]; then
   [ ! -e "$world/record.mv.fail" ] || exit 1
   if [ -e "$world/held.mv.fail" ] && grep -q '^held=' "\$src"; then exit 1; fi
@@ -131,6 +140,19 @@ if [ "\$last" = "$world/state/lane.review-park" ]; then
 fi
 [ "\$last" != "$world/state/.review-park-held-acked-lane" ] || [ ! -e "$world/receipt.mv.fail" ] || exit 1
 PATH=/usr/bin:/bin exec mv "\$@"
+SH
+  # exit.hook runs once as a park process removes its temporary directory, its
+  # last act, after everything it prints.
+  cat > "$fakebin/rm" <<SH
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    "$world/state/lane.review-park") [ ! -e "$world/retire.fail" ] || exit 1 ;;
+    */fm-park.??????)
+      [ ! -e "$world/exit.hook" ] || { PATH=/usr/bin:/bin mv "$world/exit.hook" "$world/exit.hook.ran"; sh "$world/exit.hook.ran"; } ;;
+  esac
+done
+PATH=/usr/bin:/bin exec rm "\$@"
 SH
   cat > "$fakebin/fm-teardown.sh" <<SH
 #!/usr/bin/env bash
@@ -1325,26 +1347,49 @@ test_resume_waits_for_a_pending_stop() {
   pass "a resume refuses while the park's stop is unconfirmed, keeps the pending record, and works once the stop is settled"
 }
 
+# Runs a deliberate resume that is killed by the process whose pid wait is
+# written into the world's stub by the caller.
+resume_until_killed() {  # <world>
+  local pid rc=0
+  rm -f "$1/resume.pid"
+  ( FM_TEST_EXEC_PARK=1 run_park "$1" resume lane --trigger "operator retry" ) > "$1/cut.out" 2>&1 &
+  pid=$!
+  printf '%s\n' "$pid" > "$1/resume.pid"
+  wait "$pid" 2>/dev/null || rc=$?
+  expect_code 137 "$rc" "the resume was not killed: $(cat "$1/cut.out")"
+}
+
+# The shell lines that kill the resume resume_until_killed started.
+kill_resume_lines() {  # <world>
+  # shellcheck disable=SC2016  # The stub expands these when it runs.
+  printf 'for _ in $(seq 1 100); do [ ! -s "%s" ] || break; sleep 0.05; done\nkill -KILL "$(cat "%s")"\n' "$1/resume.pid" "$1/resume.pid"
+}
+
+# The relaunch starts the replacement, then the park action is killed.
+cut_relaunch() {  # <world>
+  cat > "$1/fakebin/fm-control.sh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$1/control.log"
+: > "$1/agent.alive"
+$(kill_resume_lines "$1")
+SH
+  resume_until_killed "$1"
+}
+
+# Leaves the lane held by failing checks, or with a failed relaunch on record.
+leave_outcome() {  # <world> <held|resume_error>
+  case "$2" in
+    held) gh_fixture "$1/gh.1.json" 'rollup="FAILURE"'; run_park "$1" tick >/dev/null 2>&1 ;;
+    *) : > "$1/control.fail"; run_park "$1" resume lane --trigger first >/dev/null 2>&1 || true; rm -f "$1/control.fail" "$1/control.log" "$1/gate.log" ;;
+  esac
+  grep -q "^$2=" "$1/state/lane.review-park" || fail "$1: the fixture did not record $2"
+}
+
 # A relaunch that started its agent and was killed before recording that is
 # reconciled, never held with advice to resume, and no deliberate resume
 # replaces a running agent or one that cannot be read.
 test_interrupted_relaunch_never_replaces_its_running_agent() {
-  local w out rc pid how
-  # The relaunch starts the replacement, then the park action is killed.
-  cut_relaunch() {  # <world>
-    cat > "$1/fakebin/fm-control.sh" <<SH
-#!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$1/control.log"
-: > "$1/agent.alive"
-for _ in \$(seq 1 100); do [ ! -s "$1/resume.pid" ] || break; sleep 0.05; done
-kill -KILL "\$(cat "$1/resume.pid")"
-SH
-    ( FM_TEST_EXEC_PARK=1 run_park "$1" resume lane --trigger "operator retry" ) > "$1/cut.out" 2>&1 &
-    pid=$!
-    printf '%s\n' "$pid" > "$1/resume.pid"
-    rc=0; wait "$pid" 2>/dev/null || rc=$?
-    expect_code 137 "$rc" "the resume was not killed after its relaunch: $(cat "$1/cut.out")"
-  }
+  local w out rc how
   w=$(make_world cut-relaunch "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
   cut_relaunch "$w"
   grep -q '^resume_attempt=[0-9]' "$w/state/lane.review-park" || fail "cut-relaunch: the fixture left no attempt"
@@ -1367,23 +1412,280 @@ SH
   cmp -s "$w/held.before" "$w/state/lane.review-park" || fail "cut-unknown: the refused resume changed the record"
   [ "$(grep -c ' relaunch ' "$w/control.log")" = 1 ] || fail "cut-unknown: the unconfirmed agent was replaced: $(cat "$w/control.log")"
 
-  # A deliberate resume cut the same way records no attempt of its own, so the
-  # next one finds the running agent on a held or a failed lane.
+  # A second deliberate resume before any tick finds the running agent on a
+  # held or a failed lane, and leaves the tick nothing to report.
   for how in held resume_error; do
     w=$(make_world "cut-$how" "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
-    case "$how" in
-      held) gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'; run_park "$w" tick >/dev/null 2>&1 ;;
-      *) : > "$w/control.fail"; run_park "$w" resume lane --trigger first >/dev/null 2>&1 || true; rm -f "$w/control.fail" "$w/control.log" ;;
-    esac
-    grep -q "^$how=" "$w/state/lane.review-park" || fail "cut-$how: the fixture did not record $how"
+    leave_outcome "$w" "$how"
     cut_relaunch "$w"
     rc=0; out=$(run_park "$w" resume lane --trigger again 2>&1) || rc=$?
     expect_code 1 "$rc" "cut-$how: a resume over a running agent was not refused: $out"
     case "$out" in *"already running, so nothing was relaunched and the lane is no longer parked"*) ;; *) fail "cut-$how: $out" ;; esac
     [ "$(grep -c ' relaunch ' "$w/control.log")" = 1 ] || fail "cut-$how: the running agent was replaced: $(cat "$w/control.log")"
     [ ! -e "$w/state/lane.review-park" ] || fail "cut-$how: a running lane stayed parked"
+    out=$(for _ in 1 2; do run_park "$w" tick 2>&1; done)
+    [ -z "$out" ] || fail "cut-$how: the tick reported an attempt already answered: $out"
   done
   pass "a relaunch cut after starting its agent is reported as relaunched and unparked, an unreadable one is held saying so, and no deliberate resume replaces a running or unconfirmed agent"
+}
+
+# A deliberate resume of a lane that is held, or whose last relaunch failed,
+# records its attempt too, beside that outcome: cut after its launch it is
+# settled by the tick without another launch, cut before it the lane is held
+# once, and one the host gate refuses leaves the record as it found it.
+test_deliberate_resume_of_a_held_or_failed_lane_is_settled_when_cut() {
+  local w out rc how rows
+  for how in held resume_error; do
+    w=$(make_world "recut-$how" "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+    leave_outcome "$w" "$how"
+    rows=$(held_rows "$w")
+    cut_relaunch "$w"
+    grep -q '^resume_attempt=[0-9]' "$w/state/lane.review-park" || fail "recut-$how: the deliberate attempt was not recorded"
+    grep -q "^$how=" "$w/state/lane.review-park" || fail "recut-$how: the attempt dropped the outcome it started from"
+    out=$(FM_HOME="$w" FM_STATE_OVERRIDE="$w/state" "$ROOT/bin/fm-crew-state.sh" lane 2>&1 | head -1)
+    case "$out" in "state: paused"*"no recorded outcome yet"*) ;; *) fail "recut-$how: crew state: $out" ;; esac
+    out=$(run_park "$w" list)
+    case "$out" in *"run fm-park.sh resume by hand"*) fail "recut-$how: list advises a resume: $out" ;; *"relaunch attempted; no outcome recorded yet"*) ;; *) fail "recut-$how: list: $out" ;; esac
+    out=$(for _ in 1 2 3; do run_park "$w" tick 2>&1; done)
+    [ "$(printf '%s\n' "$out" | grep -c '^relaunched lane: PR .* - operator retry ')" = 1 ] || fail "recut-$how: not reported as relaunched exactly once: $out"
+    [ ! -e "$w/state/lane.review-park" ] || fail "recut-$how: a running lane stayed parked: $(cat "$w/state/lane.review-park")"
+    [ "$(grep -c ' relaunch ' "$w/control.log")" = 1 ] || fail "recut-$how: launched again: $(cat "$w/control.log")"
+    case "$out" in *held*) fail "recut-$how: a running replacement was held: $out" ;; esac
+    [ "$(held_rows "$w")" = "$rows" ] || fail "recut-$how: a held outcome was queued for a running lane"
+
+    # Cut before anything launched: held once, naming the attempt, and resumable.
+    w=$(make_world "precut-$how" "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+    leave_outcome "$w" "$how"
+    cp "$w/fakebin/fm-capacity.sh" "$w/fm-capacity.sh.orig"
+    { printf '#!/usr/bin/env bash\n'; kill_resume_lines "$w"; } > "$w/fakebin/fm-capacity.sh"
+    resume_until_killed "$w"
+    mv "$w/fm-capacity.sh.orig" "$w/fakebin/fm-capacity.sh"
+    sleep 1
+    out=$(for _ in 1 2 3; do run_park "$w" tick 2>&1; done)
+    [ "$(printf '%s\n' "$out" | grep -c '^held lane: ')" = 1 ] || fail "precut-$how: not held exactly once: $out"
+    case "$out" in *"a relaunch attempt (operator retry) was refused or ended without a recorded outcome"*) ;; *) fail "precut-$how: $out" ;; esac
+    [ "$how" != held ] || case "$out" in *"held before it: checks are failing on "*) ;; *) fail "precut-$how: the earlier hold was lost: $out" ;; esac
+    [ ! -e "$w/control.log" ] || fail "precut-$how: a tick launched: $(cat "$w/control.log")"
+    out=$(run_park "$w" resume lane --trigger "second retry" 2>&1) || fail "precut-$how: manual resume failed: $out"
+    [ "$out" = "relaunched lane: PR $GH_URL - second retry" ] || fail "precut-$how: manual resume: $out"
+
+    # Refused by the host gate, before or after fm-control's stop: no new outcome.
+    for rc in host.overloaded control.defer; do
+      w=$(make_world "regate-$how-$rc" "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+      leave_outcome "$w" "$how"
+      cp "$w/state/lane.review-park" "$w/record.before"
+      : > "$w/$rc"
+      if out=$(run_park "$w" resume lane --trigger "operator retry" 2>&1); then fail "regate-$how: a refused resume succeeded: $out"; fi
+      cmp -s "$w/record.before" "$w/state/lane.review-park" || fail "regate-$how-$rc: a refused resume changed the record: $(cat "$w/state/lane.review-park")"
+      out=$(for _ in 1 2 3; do run_park "$w" tick 2>&1; done)
+      [ -z "$out" ] || fail "regate-$how-$rc: a refused resume reported a second outcome: $out"
+      [ "$(cat "$w/control.log" 2>/dev/null | grep -c ' relaunch ')" = "$([ "$rc" = control.defer ] && echo 1 || echo 0)" ] || fail "regate-$how-$rc: retried after a refusal: $(cat "$w/control.log")"
+    done
+
+    # An attempt that cannot be recorded is not made.
+    w=$(make_world "norecord-$how" "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+    leave_outcome "$w" "$how"
+    : > "$w/record.mv.fail"
+    rc=0; out=$(run_park "$w" resume lane --trigger "operator retry" 2>&1) || rc=$?
+    expect_code 1 "$rc" "norecord-$how: a resume without its attempt record went ahead: $out"
+    [ ! -e "$w/gate.log" ] && [ ! -e "$w/control.log" ] || fail "norecord-$how: admission or a relaunch was tried"
+  done
+
+  # A check failure read while a relaunch starts does not replace its attempt.
+  w=$(make_world hold-over-attempt "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  printf 'printf "resume_attempt=1\\nresume_trigger=review\\n" >> "%s"\n' "$w/state/lane.review-park" > "$w/gh.1.sh"
+  run_park "$w" tick >/dev/null 2>&1
+  grep -qx 'resume_attempt=1' "$w/state/lane.review-park" || fail "hold-over-attempt: the attempt was lost: $(cat "$w/state/lane.review-park")"
+  ! grep -q '^held=' "$w/state/lane.review-park" || fail "hold-over-attempt: an attempt under way was held"
+  : > "$w/agent.alive"
+  out=$(for _ in 1 2 3; do run_park "$w" tick 2>&1; done)
+  [ "$(printf '%s\n' "$out" | grep -c '^relaunched lane: ')" = 1 ] && [ ! -e "$w/state/lane.review-park" ] || fail "hold-over-attempt: a running lane stayed parked: $out"
+  pass "a deliberate resume of a held or failed lane records its attempt beside that outcome: cut after the launch it is settled without another, cut before it is held once, refused it leaves the record unchanged, and unrecorded it is not made"
+}
+
+# A relaunch whose park action was killed can still be running: until its
+# fm-control.sh ends, nothing settles the attempt or replaces it.
+test_killed_resume_waits_for_its_surviving_relaunch() {
+  local w out rc how
+  for how in parked held; do
+    w=$(make_world "survivor-$how" "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+    [ "$how" = parked ] || leave_outcome "$w" held
+    cat > "$w/fakebin/fm-control.sh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$w/control.log"
+FM_STATE_OVERRIDE="$w/state"
+. "$ROOT/bin/fm-wake-lib.sh"
+fm_lock_try_acquire "$w/state/.control-lane.lock" || exit 1
+$(kill_resume_lines "$w")
+for _ in \$(seq 1 600); do [ ! -e "$w/launch" ] || break; sleep 0.05; done
+: > "$w/agent.alive"
+fm_lock_release "$w/state/.control-lane.lock"
+: > "$w/launched"
+SH
+    resume_until_killed "$w"
+    cp "$w/state/lane.review-park" "$w/record.before"
+    out=$(for _ in 1 2 3; do run_park "$w" tick 2>&1; done)
+    [ -z "$out" ] || fail "survivor-$how: an attempt still under way was settled: $out"
+    rc=0; out=$(run_park "$w" resume lane --trigger again 2>&1) || rc=$?
+    expect_code 1 "$rc" "survivor-$how: a second resume was not refused: $out"
+    case "$out" in *"another lifecycle action on it is still running"*) ;; *) fail "survivor-$how: $out" ;; esac
+    cmp -s "$w/record.before" "$w/state/lane.review-park" || fail "survivor-$how: the attempt's record changed: $(cat "$w/state/lane.review-park")"
+    : > "$w/launch"
+    for _ in $(seq 1 200); do [ ! -e "$w/launched" ] || break; sleep 0.05; done
+    [ -e "$w/launched" ] || fail "survivor-$how: the surviving relaunch never finished"
+    out=$(for _ in 1 2 3; do run_park "$w" tick 2>&1; done)
+    [ "$(printf '%s\n' "$out" | grep -c '^relaunched lane: ')" = 1 ] && [ ! -e "$w/state/lane.review-park" ] || fail "survivor-$how: a running lane stayed parked: $out"
+    [ "$(grep -c ' relaunch ' "$w/control.log")" = 1 ] || fail "survivor-$how: launched again: $(cat "$w/control.log")"
+  done
+  pass "an attempt whose relaunch outlived its killed park action is settled only once that relaunch ends, and never relaunched meanwhile"
+}
+
+# A relaunch that succeeded is reported once however its park record's
+# retirement fails or is cut: until the record is retired it keeps the attempt
+# and nothing is reported, and after it there is exactly one report.
+test_a_relaunch_is_reported_once_when_its_record_cannot_be_retired() {
+  local w out rc how when pid
+  for how in auto settled deliberate; do
+    w=$(make_world "retire-$how" "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+    if [ "$how" = auto ] || [ "$how" = deliberate ]; then
+      printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/control.log"\n: > "%s/agent.alive"\n' "$w" "$w" > "$w/fakebin/fm-control.sh"
+    fi
+    : > "$w/retire.fail"
+    case "$how" in
+      auto)
+        gh_fixture "$w/gh.1.json" decision=CHANGES_REQUESTED
+        out=$(run_park "$w" tick 2>&1)
+        [ -z "$out" ] || fail "retire-auto: $out"
+        wait_lane_settled "$w" retire-auto "$w/agent.alive" ;;
+      settled) cut_relaunch "$w" ;;
+      deliberate)
+        rc=0; out=$(run_park "$w" resume lane --trigger "operator retry" 2>&1) || rc=$?
+        expect_code 1 "$rc" "retire-deliberate: an unretired relaunch claimed success: $out"
+        case "$out" in *"its park record could not be removed; the next tick settles it"*) ;; *) fail "retire-deliberate: $out" ;; esac ;;
+    esac
+    out=$(for _ in 1 2 3; do run_park "$w" tick 2>&1; done)
+    [ -z "$out" ] || fail "retire-$how: reported before its record was retired: $out"
+    grep -q '^resume_attempt=[0-9]' "$w/state/lane.review-park" && grep -qx "pr=$GH_URL" "$w/state/lane.review-park" || fail "retire-$how: the recovery record was lost: $(cat "$w/state/lane.review-park" 2>/dev/null)"
+    rm -f "$w/retire.fail"
+    out=$(for _ in 1 2 3; do run_park "$w" tick 2>&1; done)
+    [ "$(printf '%s\n' "$out" | grep -c '^relaunched lane: PR ')" = 1 ] || fail "retire-$how: not reported exactly once: $out"
+    [ "$(grep -o 'relaunched lane: ' "$w/state/.wake-queue" | wc -l | tr -d ' ')" = 1 ] || fail "retire-$how: wake queue: $(cat "$w/state/.wake-queue")"
+    [ ! -e "$w/state/lane.review-park" ] || fail "retire-$how: a running lane stayed parked"
+    [ "$(grep -c ' relaunch ' "$w/control.log")" = 1 ] || fail "retire-$how: launched again: $(cat "$w/control.log")"
+  done
+
+  # A tick killed just before or just after it retires the record.
+  for when in before after; do
+    w=$(make_world "retire-cut-$when" "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+    cut_relaunch "$w"
+    # shellcheck disable=SC2016  # The hook expands these when it runs.
+    printf 'for _ in $(seq 1 100); do [ ! -s "%s" ] || break; sleep 0.05; done\nkill -KILL "$(cat "%s")"\n' "$w/tick.pid" "$w/tick.pid" > "$w/retire.$when"
+    # Before the rename, the mv that would make it is killed too.
+    [ "$when" = after ] || printf 'kill -KILL "$PPID"; exit 1\n' >> "$w/retire.$when"
+    ( FM_TEST_EXEC_PARK=1 run_park "$w" tick ) > "$w/tick.out" 2>/dev/null &
+    pid=$!
+    printf '%s\n' "$pid" > "$w/tick.pid"
+    rc=0; wait "$pid" 2>/dev/null || rc=$?
+    expect_code 137 "$rc" "retire-cut-$when: the tick was not killed: $(cat "$w/tick.out")"
+    wait_lane_settled "$w" "retire-cut-$when" "$w/retire.ran"
+    [ ! -s "$w/tick.out" ] || fail "retire-cut-$when: the killed tick reported: $(cat "$w/tick.out")"
+    out=$(for _ in 1 2 3; do run_park "$w" tick 2>&1; done)
+    [ "$(printf '%s\n' "$out" | grep -c '^relaunched lane: PR .* - operator retry ')" = 1 ] || fail "retire-cut-$when: not reported exactly once: $out"
+    [ ! -e "$w/state/lane.review-park" ] || fail "retire-cut-$when: a running lane stayed parked"
+  done
+  pass "a successful relaunch is reported exactly once when retiring its park record fails or is cut, and the record keeps its attempt until then"
+}
+
+# The shell lines that drain and acknowledge everything queued in a world.
+drain_and_ack_lines() {  # <world>
+  cat <<SH
+PATH=/usr/bin:/bin
+FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" "$ROOT/bin/fm-wake-drain.sh" > "$1/hook.out" 2> "$1/hook.err"
+set -- \$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation \([A-Za-z0-9._-]*\)\$/\1 \2/p' "$1/hook.err")
+FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" "$ROOT/bin/fm-wake-drain.sh" --ack-through "\$1" --recovery-generation "\$2" >> "$1/hook.out" 2>&1 && : > "$1/hook.acked"
+SH
+}
+
+# One watcher cycle over a world, until it rings or 30s pass.
+run_watcher() {  # <world>
+  perl -e 'alarm 30; exec @ARGV or exit 127' env FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" FM_CONFIG_OVERRIDE="$1/config" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_CHECK_INTERVAL=0 FM_POLL=0.1 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
+    FM_PARK_CONTROL_BIN="$1/fakebin/fm-control.sh" FM_PARK_HOST_GATE_BIN="$1/fakebin/fm-capacity.sh" \
+    PATH="$1/fakebin:$PATH" "$ROOT/bin/fm-watch.sh" > "$1/watch.out" 2> "$1/watch.err"
+}
+
+# A held outcome acknowledged after the tick checked it is never delivered:
+# not by a tick that goes on to other lanes, and not by the watcher after the
+# tick printed it. Ordinary delivery, a different outcome of the same tick, and
+# another wake's row are untouched, and evidence that cannot be read never rings.
+test_held_outcome_acknowledged_before_delivery_is_not_rung() {
+  local w out
+  # Two lanes in one tick: both rows are acknowledged inside the second's
+  # marker write, after the first was published.
+  w=$(make_world ack-between-lanes "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  cp "$w/state/lane.meta" "$w/state/a-lane.meta"
+  cp "$w/state/lane.review-park" "$w/state/a-lane.review-park"
+  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  : > "$w/marker.mv.keep"
+  drain_and_ack_lines "$w" > "$w/marker.mv.hook"
+  out=$(run_park "$w" tick 2>/dev/null; run_park "$w" tick 2>/dev/null)
+  [ -e "$w/hook.acked" ] || fail "ack-between-lanes: the fixture did not acknowledge: $(cat "$w/hook.err" "$w/hook.out")"
+  grep -q 'held a-lane: ' "$w/hook.out" || fail "ack-between-lanes: the drain did not present the first lane: $(cat "$w/hook.out")"
+  [ -z "$out" ] || fail "ack-between-lanes: an acknowledged outcome was rung: $out"
+  grep -qx 'held_reported=1' "$w/state/a-lane.review-park" && grep -qx 'held_reported=1' "$w/state/lane.review-park" || fail "ack-between-lanes: not marked reported"
+
+  # A receipt that cannot be read by the time of the print rings nothing; the
+  # row stays queued.
+  if [ "$(id -u)" -ne 0 ]; then
+    w=$(make_world print-unreadable-receipt "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+    gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+    : > "$w/marker.mv.keep"
+    printf ': > "%s"; chmod 000 "%s"\n' "$w/state/.review-park-held-acked-lane" "$w/state/.review-park-held-acked-lane" > "$w/marker.mv.hook"
+    out=$(run_park "$w" tick 2>/dev/null)
+    [ -z "$out" ] && [ "$(held_rows "$w")" = 1 ] || fail "print-unreadable-receipt: $(held_rows "$w") rows, printed: $out"
+  fi
+
+  # The watcher: nothing acknowledged, so it rings the held outcome.
+  w=$(make_world watch-held "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  run_watcher "$w" || fail "watch-held: the watcher failed: $(cat "$w/watch.err")"
+  grep -q '^check: park-on-review: held lane: PR ' "$w/watch.out" || fail "watch-held: not rung: $(cat "$w/watch.out" "$w/watch.err")"
+  [ "$(held_rows "$w")" = 1 ] && [ ! -e "$w/state/.wake-queue.lock" ] || fail "watch-held: the row or its queue lock was not left as the drain needs it"
+  drain_and_ack "$w" watch-held
+  [ "$(held_rows "$w")" = 0 ] || fail "watch-held: the rung row could not be acknowledged"
+
+  # Acknowledged between the tick's print and the watcher's ring.
+  w=$(make_world watch-acked "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  drain_and_ack_lines "$w" > "$w/exit.hook"
+  run_watcher "$w" || true
+  [ -e "$w/hook.acked" ] && grep -q 'held lane: ' "$w/hook.out" || fail "watch-acked: the fixture did not acknowledge: $(cat "$w/hook.err" "$w/hook.out")"
+  ! grep -q 'held lane: ' "$w/watch.out" || fail "watch-acked: an acknowledged outcome was rung: $(cat "$w/watch.out")"
+  [ "$(held_rows "$w")" = 0 ] && [ ! -e "$w/state/.wake-queue.lock" ] || fail "watch-acked: rows or the queue lock were left"
+
+  # The same, with another outcome in that tick: only it is rung, and a wake
+  # queued after the acknowledgement keeps its row.
+  w=$(make_world watch-acked-mixed "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  printf 'cleaned up other: PR x merged\n' > "$w/state/.review-park-report-other-1-1"
+  { drain_and_ack_lines "$w"; printf 'FM_STATE_OVERRIDE="%s" bash -c %s\n' "$w/state" "'. \"$ROOT/bin/fm-wake-lib.sh\"; fm_wake_append check unrelated \"check: unrelated\"'"; } > "$w/exit.hook"
+  run_watcher "$w" || fail "watch-acked-mixed: the watcher failed: $(cat "$w/watch.err")"
+  [ "$(cat "$w/watch.out")" = "check: park-on-review: cleaned up other: PR x merged" ] || fail "watch-acked-mixed: $(cat "$w/watch.out")"
+  [ "$(awk -F '\t' '{print $4}' "$w/state/.wake-queue")" = unrelated ] || fail "watch-acked-mixed: wake queue: $(cat "$w/state/.wake-queue")"
+
+  # A queue that cannot be read does not ring the line; its row stays queued.
+  if [ "$(id -u)" -ne 0 ]; then
+    w=$(make_world watch-unreadable "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+    gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+    printf 'chmod 200 "%s"\n' "$w/state/.wake-queue" > "$w/exit.hook"
+    run_watcher "$w" || true
+    chmod 600 "$w/state/.wake-queue"
+    ! grep -q 'held lane: ' "$w/watch.out" || fail "watch-unreadable: rung without evidence: $(cat "$w/watch.out")"
+    [ -s "$w/watch.out" ] || fail "watch-unreadable: the queued row woke nothing: $(cat "$w/watch.err")"
+    [ "$(held_rows "$w")" = 1 ] || fail "watch-unreadable: the row was lost"
+  fi
+  pass "a held outcome acknowledged after its check is rung by neither the tick nor the watcher, unreadable evidence rings nothing, and ordinary and unrelated wakes are delivered as before"
 }
 
 test_edited_comment_beyond_first_hundred_triggers_relaunch() {
@@ -1823,6 +2125,10 @@ fm_test_run \
   test_tick_publication_stays_within_its_deadline \
   test_resume_waits_for_a_pending_stop \
   test_interrupted_relaunch_never_replaces_its_running_agent \
+  test_deliberate_resume_of_a_held_or_failed_lane_is_settled_when_cut \
+  test_killed_resume_waits_for_its_surviving_relaunch \
+  test_a_relaunch_is_reported_once_when_its_record_cannot_be_retired \
+  test_held_outcome_acknowledged_before_delivery_is_not_rung \
   test_closed_pr_is_reported_once \
   test_tick_parks_clean_idle_lanes_only_when_opted_in \
   test_land_requires_opt_in_but_always_cleans_parked \
