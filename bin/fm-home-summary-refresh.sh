@@ -31,6 +31,18 @@
 # teardown use that mode so this side-band publication can never change their
 # result. Without it, failures are printed and returned to the direct caller
 # for tests and diagnostics.
+#
+# The watcher's detached trigger (--best-effort with FM_HOME_SUMMARY_IF_IDLE=1)
+# also backs off after a failed or timed-out attempt: it records the
+# consecutive failure count and the next allowed attempt epoch in
+# state/.home-summary-refresh.backoff and skips, exiting zero, until then. The
+# delay doubles from FM_HOME_SUMMARY_RETRY_BASE (default 60 seconds) up to
+# FM_HOME_SUMMARY_RETRY_MAX (default 1800 seconds); a malformed record, or one
+# naming a time beyond that cap, is ignored. Eligibility is rechecked, and the
+# record is written or cleared, only under the refresh lock. Any successful
+# publication clears the record, and a timed-out attempt records nothing when
+# another outcome changed the record or the ledger while it ran. Every other
+# invocation neither reads nor writes it.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,10 +55,13 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 LEDGER="$STATE/home-summary.json"
 ERROR_LOG="$STATE/.home-summary-refresh.log"
 REFRESH_LOCK="$STATE/.home-summary-refresh.lock"
+BACKOFF_FILE="$STATE/.home-summary-refresh.backoff"
 ERROR_LOG_MAX_BYTES=${FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES:-65536}
 HOME_SUMMARY_TIMEOUT=${FM_HOME_SUMMARY_TIMEOUT:-60}
 HOME_SUMMARY_IF_IDLE=${FM_HOME_SUMMARY_IF_IDLE:-0}
 HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
+RETRY_BASE=${FM_HOME_SUMMARY_RETRY_BASE:-60}
+RETRY_MAX=${FM_HOME_SUMMARY_RETRY_MAX:-1800}
 BEST_EFFORT=0
 HOME_SUMMARY_MODE=parent
 HOME_SUMMARY_ERROR=
@@ -87,8 +102,20 @@ esac
 case "$HOME_SUMMARY_INTERVAL" in
   ''|*[!0-9]*|0) HOME_SUMMARY_INTERVAL=300 ;;
 esac
+case "$RETRY_BASE" in
+  ''|*[!0-9]*|0|0?*|???????*) RETRY_BASE=60 ;;
+esac
+case "$RETRY_MAX" in
+  ''|*[!0-9]*|0|0?*|???????*) RETRY_MAX=1800 ;;
+esac
+[ "$RETRY_MAX" -ge "$RETRY_BASE" ] || RETRY_MAX=$RETRY_BASE
+# Only the watcher's detached trigger combines best-effort with if-idle.
+WATCHER_BACKOFF=0
+if [ "$BEST_EFFORT" -eq 1 ] && [ "$HOME_SUMMARY_IF_IDLE" -eq 1 ]; then
+  WATCHER_BACKOFF=1
+fi
 
-if [ "$HOME_SUMMARY_MODE" != parent ]; then
+if [ "$HOME_SUMMARY_MODE" != parent ] || [ "$WATCHER_BACKOFF" -eq 1 ]; then
   # shellcheck source=bin/fm-wake-lib.sh
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -133,6 +160,12 @@ home_summary_refresh_once() {
   fi
   HOME_SUMMARY_LOCK_HELD=1
   if [ "$HOME_SUMMARY_IF_IDLE" -eq 1 ] && home_summary_is_fresh; then
+    return 0
+  fi
+  # Retry eligibility is decided again under the lock, where every backoff
+  # write and clear also happens, so a watcher attempt that waited behind
+  # another attempt's failure honors the cooldown that failure set.
+  if [ "$WATCHER_BACKOFF" -eq 1 ] && home_summary_backoff_read --active >/dev/null; then
     return 0
   fi
   HOME_SUMMARY_TMP=$(umask 077; mktemp "$STATE/.home-summary.json.XXXXXX") || {
@@ -202,6 +235,7 @@ home_summary_refresh_once() {
     return 1
   fi
   HOME_SUMMARY_TMP=
+  rm -f -- "$BACKOFF_FILE" 2>/dev/null || true
   fm_lock_release "$REFRESH_LOCK"
   HOME_SUMMARY_LOCK_HELD=0
   trap - EXIT HUP INT TERM
@@ -228,6 +262,47 @@ home_summary_log_failure() {
   fi
 }
 
+# Print the consecutive failure count from a well-formed watcher backoff
+# record whose next attempt lies within RETRY_MAX of now; with --active,
+# succeed only while that record still defers the next attempt.
+home_summary_backoff_read() {  # [--active]
+  local line failures next now
+  [ -f "$BACKOFF_FILE" ] && [ ! -L "$BACKOFF_FILE" ] || return 1
+  IFS= read -r line < "$BACKOFF_FILE" 2>/dev/null || return 1
+  case "$line" in
+    failures=[1-9]*' 'next=[1-9]*) ;;
+    *) return 1 ;;
+  esac
+  failures=${line%% *}; failures=${failures#failures=}
+  next=${line#* next=}
+  case "$failures$next" in *[!0-9]*) return 1 ;; esac
+  [ "${#failures}" -le 2 ] && [ "${#next}" -le 12 ] || return 1
+  now=$(date +%s) || return 1
+  [ "$next" -le $((now + RETRY_MAX)) ] || return 1
+  if [ "${1:-}" = --active ]; then
+    [ "$now" -lt "$next" ] || return 1
+  fi
+  printf '%s' "$failures"
+}
+
+home_summary_backoff_record() {
+  local failures doublings delay now tmp
+  failures=$(home_summary_backoff_read) || failures=0
+  [ "$failures" -ge 30 ] || failures=$((failures + 1))
+  delay=$RETRY_BASE
+  doublings=$((failures - 1))
+  while [ "$doublings" -gt 0 ] && [ "$delay" -lt "$RETRY_MAX" ]; do
+    delay=$((delay * 2))
+    doublings=$((doublings - 1))
+  done
+  [ "$delay" -le "$RETRY_MAX" ] || delay=$RETRY_MAX
+  now=$(date +%s) || return 0
+  tmp="$BACKOFF_FILE.tmp.${BASHPID:-$$}"
+  printf 'failures=%s next=%s\n' "$failures" "$((now + delay))" > "$tmp" 2>/dev/null \
+    && mv -f -- "$tmp" "$BACKOFF_FILE" 2>/dev/null
+  rm -f -- "$tmp" 2>/dev/null || true
+}
+
 if [ "$HOME_SUMMARY_MODE" = log-failure ]; then
   HOME_SUMMARY_ERROR=${FM_HOME_SUMMARY_PARENT_ERROR:-"refresh worker failed"}
   HOME_SUMMARY_FAILURE_STAMP=${FM_HOME_SUMMARY_PARENT_STAMP:-}
@@ -235,7 +310,78 @@ if [ "$HOME_SUMMARY_MODE" = log-failure ]; then
   exit 0
 fi
 
+# A timed-out worker no longer holds the refresh lock when its parent records
+# the backoff. The parent therefore records only after taking that lock itself,
+# skipping when another attempt or publication holds it, and only when nothing
+# moved since its own attempt began: the backoff record is byte-identical and
+# the ledger is still the file a hard link pinned (or still absent). Any other
+# writer's newer outcome, success or failure, therefore stands.
+ATTEMPT_LEDGER=
+ATTEMPT_LEDGER_STATE=unpinned
+ATTEMPT_RECORD=
+PARENT_LOCK_HELD=0
+home_summary_backoff_line() {
+  local line=
+  if [ -e "$BACKOFF_FILE" ] || [ -L "$BACKOFF_FILE" ]; then
+    IFS= read -r line < "$BACKOFF_FILE" 2>/dev/null || [ -n "$line" ] || line='?'
+    printf 'present:%s' "$line"
+  else
+    printf absent
+  fi
+}
+
+home_summary_attempt_pin() {
+  if [ ! -e "$LEDGER" ]; then
+    ATTEMPT_LEDGER_STATE=absent
+    return 0
+  fi
+  ATTEMPT_LEDGER="$STATE/.home-summary-attempt.${BASHPID:-$$}"
+  if ln -f -- "$LEDGER" "$ATTEMPT_LEDGER" 2>/dev/null; then
+    ATTEMPT_LEDGER_STATE=pinned
+  else
+    ATTEMPT_LEDGER=
+  fi
+}
+
+home_summary_attempt_unchanged() {
+  case "$ATTEMPT_LEDGER_STATE" in
+    absent) [ ! -e "$LEDGER" ] ;;
+    pinned) [ "$LEDGER" -ef "$ATTEMPT_LEDGER" ] ;;
+    *) return 0 ;;
+  esac
+}
+
+# shellcheck disable=SC2329 # Invoked by the parent's EXIT trap below.
+home_summary_attempt_release() {
+  [ -z "$ATTEMPT_LEDGER" ] || rm -f -- "$ATTEMPT_LEDGER" 2>/dev/null || true
+  ATTEMPT_LEDGER=
+  if [ "$PARENT_LOCK_HELD" -eq 1 ]; then
+    fm_lock_release "$REFRESH_LOCK" || true
+    PARENT_LOCK_HELD=0
+  fi
+}
+
+home_summary_parent_record_failure() {
+  fm_lock_try_acquire "$REFRESH_LOCK" || return 0
+  PARENT_LOCK_HELD=1
+  if home_summary_attempt_unchanged \
+    && [ "$(home_summary_backoff_line)" = "$ATTEMPT_RECORD" ]; then
+    home_summary_backoff_record
+  fi
+  fm_lock_release "$REFRESH_LOCK" || true
+  PARENT_LOCK_HELD=0
+}
+
 if [ "$HOME_SUMMARY_MODE" = parent ]; then
+  if [ "$WATCHER_BACKOFF" -eq 1 ]; then
+    home_summary_backoff_read --active >/dev/null && exit 0
+    trap home_summary_attempt_release EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    ATTEMPT_RECORD=$(home_summary_backoff_line)
+    home_summary_attempt_pin
+  fi
   attempt_stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || attempt_stamp=
   if fm_run_timed "$HOME_SUMMARY_TIMEOUT" env \
     FM_HOME_SUMMARY_WORKER_BEST_EFFORT="$BEST_EFFORT" \
@@ -245,6 +391,7 @@ if [ "$HOME_SUMMARY_MODE" = parent ]; then
   else
     refresh_rc=$?
   fi
+  [ "$WATCHER_BACKOFF" -eq 0 ] || home_summary_parent_record_failure
   if [ "$BEST_EFFORT" -eq 1 ]; then
     if [ "$refresh_rc" -eq 124 ]; then
       parent_error="refresh exceeded its ${HOME_SUMMARY_TIMEOUT}-second deadline"
@@ -270,6 +417,7 @@ else
   refresh_rc=$?
 fi
 if [ "$BEST_EFFORT" -eq 1 ]; then
+  [ "$WATCHER_BACKOFF" -eq 0 ] || home_summary_backoff_record
   home_summary_log_failure
   exit 0
 fi
