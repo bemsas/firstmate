@@ -1623,7 +1623,7 @@ run_watcher() {  # <world>
 # tick printed it. Ordinary delivery, a different outcome of the same tick, and
 # another wake's row are untouched, and evidence that cannot be read never rings.
 test_held_outcome_acknowledged_before_delivery_is_not_rung() {
-  local w out
+  local w out parked held row
   # Two lanes in one tick: both rows are acknowledged inside the second's
   # marker write, after the first was published.
   w=$(make_world ack-between-lanes "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
@@ -1681,18 +1681,33 @@ test_held_outcome_acknowledged_before_delivery_is_not_rung() {
   [ "$(cat "$w/watch.out")" = "check: park-on-review: cleaned up other: PR x merged" ] || fail "watch-acked-mixed: $(cat "$w/watch.out")"
   [ "$(awk -F '\t' '{print $4}' "$w/state/.wake-queue")" = unrelated ] || fail "watch-acked-mixed: wake queue: $(cat "$w/state/.wake-queue")"
 
-  # A queue that cannot be read does not ring the line; its row stays queued.
+  # A queue made unreadable once the tick has queued and printed the held line
+  # does not ring it; that watcher may still wake for something else. The exact
+  # row stays queued under the downtime episode its append opened, so the next
+  # watcher, with the queue readable again, rings the recovery wake and the
+  # drain delivers that row once.
   if [ "$(id -u)" -ne 0 ]; then
     w=$(make_world watch-unreadable "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
     gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
     printf 'chmod 200 "%s"\n' "$w/state/.wake-queue" > "$w/exit.hook"
     run_watcher "$w" || true
-    chmod 600 "$w/state/.wake-queue"
+    [ -e "$w/exit.hook.ran" ] && [ ! -r "$w/state/.wake-queue" ] || fail "watch-unreadable: the fixture left the queue readable"
     ! grep -q 'held lane: ' "$w/watch.out" || fail "watch-unreadable: rung without evidence: $(cat "$w/watch.out")"
-    [ -s "$w/watch.out" ] || fail "watch-unreadable: the queued row woke nothing: $(cat "$w/watch.err")"
-    [ "$(held_rows "$w")" = 1 ] || fail "watch-unreadable: the row was lost"
+    chmod 600 "$w/state/.wake-queue"
+    parked=$(sed -n 's/^parked_at=//p' "$w/state/lane.review-park")
+    held=$(sed -n 's/^held=//p' "$w/state/lane.review-park")
+    row="review-park-held:lane:$parked-$held"$'\t'"check: park-on-review: held lane: PR $GH_URL - $(sed -n 's/^held_reason=//p' "$w/state/lane.review-park"); "
+    if [ "$(held_rows "$w")" != 1 ] || ! grep -qF -- $'\tcheck\t'"$row" "$w/state/.wake-queue"; then
+      fail "watch-unreadable: its exact row is not queued once: $(cat "$w/state/.wake-queue")"
+    fi
+    grep -qx 'pending:downtime:[A-Za-z0-9._-]*' "$w/state/.watcher-down" || fail "watch-unreadable: the append opened no downtime episode: $(cat "$w/state/.watcher-down")"
+    run_watcher "$w" || fail "watch-unreadable: the recovery watcher failed: $(cat "$w/watch.err")"
+    [ "$(cat "$w/watch.out")" = "check: rearm-resurface" ] || fail "watch-unreadable: not the recovery wake: $(cat "$w/watch.out" "$w/watch.err")"
+    drain_and_ack "$w" watch-unreadable
+    [ "$(grep -cF -- $'\tcheck\t'"$row" "$w/drain.out")" = 1 ] || fail "watch-unreadable: the drain did not deliver its row once: $(cat "$w/drain.out")"
+    [ "$(held_rows "$w")" = 0 ] || fail "watch-unreadable: the delivered row could not be acknowledged"
   fi
-  pass "a held outcome acknowledged after its check is rung by neither the tick nor the watcher, unreadable evidence rings nothing, and ordinary and unrelated wakes are delivered as before"
+  pass "a held outcome acknowledged after its check is rung by neither the tick nor the watcher, unreadable evidence rings no held line and its row is delivered once readable, and ordinary and unrelated wakes are delivered as before"
 }
 
 test_edited_comment_beyond_first_hundred_triggers_relaunch() {

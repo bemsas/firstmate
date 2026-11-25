@@ -3327,6 +3327,186 @@ test_wake_queue_prune_task() {
   pass "fm_wake_queue_prune_task: prunes wakes for target task without touching other tasks"
 }
 
+# A publisher that already holds the queue lock finishes before the prune takes
+# its snapshot, whether the queue was missing, empty or already had rows.
+test_wake_queue_prune_waits_for_a_held_publisher() {
+  local dir state queued pruner publisher waited
+  for queued in missing empty rows; do
+    dir=$(make_case "prune-race-$queued")
+    state="$dir/state"
+    mkdir -p "$dir/lockbin"
+    # The prune's lock wait sleeps between tries; its first sleep is the proof
+    # that it is waiting.
+    cat > "$dir/lockbin/sleep" <<SH
+#!/usr/bin/env bash
+: > "$dir/prune-waiting"
+PATH=/usr/bin:/bin exec sleep "\$@"
+SH
+    chmod +x "$dir/lockbin/sleep"
+    case "$queued" in
+      empty) : > "$state/.wake-queue" ;;
+      rows) append_wake "$state" signal task-b.status "signal: earlier" || fail "prune-race-$queued: seed append failed" ;;
+    esac
+    cat > "$dir/publisher.sh" <<'SH'
+. "$1/bin/fm-wake-lib.sh"
+fm_lock_try_acquire "$FM_WAKE_QUEUE_LOCK" || exit 1
+trap 'fm_lock_release "$FM_WAKE_QUEUE_LOCK"' EXIT
+: > "$2/publisher-holds"
+for _ in $(seq 1 600); do [ ! -f "$2/publish" ] || break; sleep 0.05; done
+[ -f "$2/publish" ] || exit 1
+fm_wake_append_locked check review-park-held:task-a:100-200 "check: park-on-review: held task-a" || exit 1
+fm_wake_append_locked check review-park-held:task-b:100-200 "check: park-on-review: held task-b" || exit 1
+SH
+    FM_STATE_OVERRIDE="$state" bash "$dir/publisher.sh" "$ROOT" "$dir" &
+    publisher=$!
+    for _ in $(seq 1 200); do [ ! -f "$dir/publisher-holds" ] || break; sleep 0.05; done
+    [ -f "$dir/publisher-holds" ] || fail "prune-race-$queued: the publisher never took the queue lock"
+    ( rc=0
+      PATH="$dir/lockbin:$PATH" FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-wake-lib.sh"; fm_wake_queue_prune_task "$1" task-a ""' "$ROOT" "$state" || rc=$?
+      : > "$dir/prune-done"
+      exit "$rc" ) &
+    pruner=$!
+    for _ in $(seq 1 200); do
+      if [ -f "$dir/prune-waiting" ] || [ -f "$dir/prune-done" ]; then break; fi
+      sleep 0.05
+    done
+    waited=1
+    if [ ! -f "$dir/prune-waiting" ] || [ -f "$dir/prune-done" ]; then waited=0; fi
+    : > "$dir/publish"
+    wait "$publisher" || fail "prune-race-$queued: the publisher failed"
+    wait "$pruner" || fail "prune-race-$queued: the prune failed"
+    [ "$waited" -eq 1 ] || fail "prune-race-$queued: the prune did not wait for the publisher holding the queue lock"
+    ! grep -q 'review-park-held:task-a:' "$state/.wake-queue" || fail "prune-race-$queued: the pruned task's row survived"
+    grep -q 'review-park-held:task-b:' "$state/.wake-queue" || fail "prune-race-$queued: another task's row was removed"
+    [ "$queued" != rows ] || grep -q 'task-b.status' "$state/.wake-queue" || fail "prune-race-$queued: an earlier row was removed"
+    [ ! -e "$state/.wake-queue.lock" ] || fail "prune-race-$queued: the queue lock was left held"
+  done
+
+  # Nothing to prune releases the lock too.
+  for queued in missing empty; do
+    dir=$(make_case "prune-none-$queued")
+    state="$dir/state"
+    [ "$queued" = missing ] || : > "$state/.wake-queue"
+    FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-wake-lib.sh"; fm_wake_queue_prune_task "$1" task-a "" && [ ! -e "$FM_WAKE_QUEUE_LOCK" ]' "$ROOT" "$state" \
+      || fail "prune-none-$queued: an empty prune failed or kept the queue lock"
+    [ ! -s "$state/.wake-queue" ] || fail "prune-none-$queued: the prune wrote rows"
+  done
+  pass "fm_wake_queue_prune_task: a publisher holding the queue lock finishes before the prune, which keeps unrelated rows and always releases the lock"
+}
+
+# One append that fails after publishing recovery evidence over an announced
+# episode, so it owes a restore: its sequence file is a directory. Its guard
+# spends <spent> seconds of the caller's clock, and between its publication and
+# its restore another process may take the marker lock, until released (held) or
+# for about a second (brief). Prints the status and the marker before and after,
+# then what later appends in the same shell do.
+bounded_restore_case() {  # <case-dir> <budget|unbounded> <spent> <free|held|brief>
+  local dir=$1 real_cat
+  real_cat=$(command -v cat) || return 1
+  mkdir -p "$dir/lockbin" "$dir/again"
+  cat > "$dir/holder.sh" <<'SH'
+. "$1/bin/fm-wake-lib.sh"
+fm_lock_try_acquire "$STATE/.watcher-down.lock" || exit 1
+trap 'fm_lock_release "$STATE/.watcher-down.lock"' EXIT
+: > "$2/marker-held"
+n=2400
+[ "$3" != brief ] || n=20
+for _ in $(seq 1 "$n"); do [ ! -f "$2/release-marker" ] || exit 0; sleep 0.05; done
+SH
+  # The append reads its sequence after releasing the marker lock it published
+  # under and before its restore.
+  cat > "$dir/lockbin/cat" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = "$dir/state/.wake-queue.seq" ] && [ "$4" != free ] && [ ! -e "$dir/marker-held" ]; then
+  PATH=/usr/bin:/bin FM_STATE_OVERRIDE="$dir/state" bash "$dir/holder.sh" "$ROOT" "$dir" "$4" >/dev/null 2>&1 &
+  for _ in \$(seq 1 200); do [ ! -e "$dir/marker-held" ] || break; sleep 0.05; done
+fi
+exec "$real_cat" "\$@"
+SH
+  chmod +x "$dir/lockbin/cat"
+  # The alarm only ends a wait that outlives its budget.
+  PATH="$dir/lockbin:$PATH" FM_STATE_OVERRIDE="$dir/state" perl -e 'alarm 60; exec @ARGV or exit 127' bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1/bin/fm-wake-lib.sh"
+    marker="$STATE/.watcher-down"
+    shown() { fm_recovery_marker_read "$marker" && printf "%s=%s\n" "$1" "$FM_RECOVERY_MARKER_TOKEN"; }
+    spend() { SECONDS=$((SECONDS + $1)); }
+    refuse() { return 1; }
+    printf "announced:downtime:first\n" > "$marker"
+    mkdir "$STATE/.wake-queue.seq"
+    shown before
+    rc=0
+    if [ "$2" = unbounded ]; then
+      fm_wake_append_guarded spend check k "check: k" "$3" 2>/dev/null || rc=$?
+    else
+      fm_wake_append_within "$2" spend check k "check: k" "$3" 2>/dev/null || rc=$?
+    fi
+    printf "rc=%s\n" "$rc"
+    shown after || exit 1
+    [ ! -e "$FM_WAKE_QUEUE_LOCK" ] || printf "queue-lock=held\n"
+    : > "$4/release-marker"
+    # Neither a refused append nor one that publishes a first token of its own
+    # has anything to restore.
+    rc=0
+    fm_wake_append_guarded refuse check k2 "check: k2" || rc=$?
+    printf "refused-rc=%s\n" "$rc"
+    shown refused || exit 1
+    mv "$marker" "$marker.earlier"
+    rc=0
+    fm_wake_append_within 5 "" check k3 "check: k3" 2>/dev/null || rc=$?
+    printf "fresh-rc=%s\n" "$rc"
+    shown fresh || exit 1
+    # Nor does an unbounded append inherit the bounded one'"'"'s deadline.
+    rmdir "$STATE/.wake-queue.seq"
+    bash "$4/holder.sh" "$1" "$4/again" brief &
+    for _ in $(seq 1 200); do [ ! -e "$4/again/marker-held" ] || break; sleep 0.05; done
+    [ -e "$4/again/marker-held" ] || exit 1
+    fm_wake_append check last "check: last" || exit 1
+    wait
+    printf "last=%s\n" "$(awk -F "\t" "{print \$4}" "$FM_WAKE_QUEUE")"
+  ' _ "$ROOT" "$2" "$3" "$dir"
+}
+
+test_bounded_append_restores_recovery_within_its_own_deadline() {
+  local dir out rc before after name budget spent holder want
+  while read -r name budget spent holder want; do
+    dir=$(make_case "bounded-restore-$name")
+    rc=0
+    out=$(bounded_restore_case "$dir" "$budget" "$spent" "$holder") || rc=$?
+    : > "$dir/release-marker"
+    [ "$rc" -eq 0 ] || fail "bounded-restore-$name: the append outlived its deadline or a later one failed ($rc): $out"
+    before=$(printf '%s\n' "$out" | sed -n 's/^before=//p')
+    after=$(printf '%s\n' "$out" | sed -n 's/^after=//p')
+    [ "$before" = announced:downtime:first ] || fail "bounded-restore-$name: fixture: $out"
+    [ "$holder" = free ] || [ -e "$dir/marker-held" ] || fail "bounded-restore-$name: fixture: the marker lock was not taken"
+    printf '%s\n' "$out" | grep -qx 'rc=1' || fail "bounded-restore-$name: the append's own result was lost: $out"
+    ! printf '%s\n' "$out" | grep -q '^queue-lock=' || fail "bounded-restore-$name: the queue lock was left held"
+    case "$want:$after" in
+      restored:announced:downtime:first) ;;
+      kept:pending:downtime:first) fail "bounded-restore-$name: not the append's own token: $out" ;;
+      kept:pending:downtime:?*) ;;
+      *) fail "bounded-restore-$name: expected the marker $want: $out" ;;
+    esac
+    printf '%s\n' "$out" | grep -qx 'refused-rc=3' || fail "bounded-restore-$name: the refused append: $out"
+    [ "$(printf '%s\n' "$out" | sed -n 's/^refused=//p')" = "$after" ] || fail "bounded-restore-$name: a refused append restored an earlier one's token: $out"
+    printf '%s\n' "$out" | grep -qx 'fresh-rc=1' || fail "bounded-restore-$name: the fresh append: $out"
+    case "$(printf '%s\n' "$out" | sed -n 's/^fresh=//p')" in
+      pending:downtime:first) fail "bounded-restore-$name: a fresh append reused an earlier token: $out" ;;
+      pending:downtime:?*) ;;
+      *) fail "bounded-restore-$name: a fresh append restored an earlier one's token: $out" ;;
+    esac
+    printf '%s\n' "$out" | grep -qx 'last=last' || fail "bounded-restore-$name: the later unbounded append: $out"
+  done <<'CASES'
+spent 600 601 held kept
+partly-spent 600 300 brief restored
+spent-free 5 60 free restored
+zero-free 0 0 free restored
+zero-held 0 0 held kept
+unbounded unbounded 601 brief restored
+CASES
+  pass "a bounded append restores its recovery token within what is left of its own deadline, keeps its result and valid recovery state otherwise, and leaks neither token nor deadline into a later append"
+}
+
 # Scratch a drain minted under the queue lock and never removed was left by a
 # drain that died mid-write; the next locked drain rotates it away.
 test_drain_rotates_orphaned_scratch() {
@@ -3958,6 +4138,8 @@ test_branch_stale_ack_that_consumes_nothing_names_its_granted_wake
 test_recovery_ack_failure_is_reported
 test_interruption_before_and_after_raw_commit
 test_wake_queue_prune_task
+test_wake_queue_prune_waits_for_a_held_publisher
+test_bounded_append_restores_recovery_within_its_own_deadline
 test_drain_rotates_orphaned_scratch
 test_secondmate_liveness_tick_relaunches_dead_endpoint_once
 test_secondmate_liveness_tick_relaunches_missing_endpoint

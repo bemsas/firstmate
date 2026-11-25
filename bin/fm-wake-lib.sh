@@ -1056,6 +1056,7 @@ _fm_wake_append_recovery_restore_locked() {
   local marker="$STATE/.watcher-down" lock previous=$FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN
   [ -n "$previous" ] || return 0
   lock="${marker}.lock"
+  _fm_wake_append_budget
   if [ -n "$FM_WAKE_APPEND_LOCK_MAX" ]; then
     fm_lock_acquire_wait_max "$lock" "$FM_WAKE_APPEND_LOCK_MAX" || return 1
   else
@@ -1070,8 +1071,6 @@ _fm_wake_append_recovery_restore_locked() {
     fm_lock_release "$lock"
     return 1
   fi
-  FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN=
-  FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN=
   fm_lock_release "$lock"
 }
 
@@ -2768,20 +2767,30 @@ fm_wake_append_guarded() {
 # rather than wait longer than <seconds> in total for the queue and recovery
 # marker locks, and 0 seconds takes only locks that are free (a lock whose
 # holder died before naming itself still earns fm_lock_acquire_wait_max's one
-# freshness window).
+# freshness window). A failed append whose previous recovery token cannot be
+# restored in what is left keeps the token it published.
+FM_WAKE_APPEND_DEADLINE=
 FM_WAKE_APPEND_LOCK_MAX=
 fm_wake_append_within() {
-  local seconds=$1 guard=$2 kind=$3 key=$4 payload=$5 status=0 began=$SECONDS
+  local seconds=$1 guard=$2 kind=$3 key=$4 payload=$5 status=0 deadline
+  deadline=$((SECONDS + seconds))
   shift 5
   [ -z "$guard" ] || declare -F "$guard" >/dev/null || return 2
   fm_lock_acquire_wait_max "$FM_WAKE_QUEUE_LOCK" "$seconds" || return 1
-  seconds=$((seconds - (SECONDS - began)))
-  [ "$seconds" -ge 0 ] || seconds=0
-  FM_WAKE_APPEND_LOCK_MAX=$seconds
+  FM_WAKE_APPEND_DEADLINE=$deadline
   fm_wake_append_locked "$kind" "$key" "$payload" "$guard" "$@" || status=$?
-  FM_WAKE_APPEND_LOCK_MAX=
+  FM_WAKE_APPEND_DEADLINE=
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
+}
+
+# What a bounded append has left for its next lock, floored at 0; empty for an
+# unbounded one.
+_fm_wake_append_budget() {
+  FM_WAKE_APPEND_LOCK_MAX=
+  [ -n "$FM_WAKE_APPEND_DEADLINE" ] || return 0
+  FM_WAKE_APPEND_LOCK_MAX=$((FM_WAKE_APPEND_DEADLINE - SECONDS))
+  [ "$FM_WAKE_APPEND_LOCK_MAX" -ge 0 ] || FM_WAKE_APPEND_LOCK_MAX=0
 }
 
 # fm_wake_append_locked <kind> <key> <payload> [predicate [predicate args...]]
@@ -2807,6 +2816,7 @@ fm_wake_append_locked() {
   recovery_marker="$STATE/.watcher-down"
   status=0
 
+  _fm_wake_append_budget
   _fm_recovery_marker_publish "$recovery_marker" downtime "$FM_WAKE_APPEND_LOCK_MAX" append "$guard" "$@" || status=$?
   if [ "$status" -eq 0 ]; then
     seq=$(cat "$seq_file" 2>/dev/null || echo 0)
@@ -2833,10 +2843,9 @@ fm_wake_append_locked() {
   fi
   if [ "$status" -ne 0 ]; then
     _fm_wake_append_recovery_restore_locked || true
-  else
-    FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN=
-    FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN=
   fi
+  FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN=
+  FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN=
   return "$status"
 }
 
@@ -3058,13 +3067,17 @@ fm_wake_restore_queue() {
 # fm_wake_queue_prune_task <state> <task-id> [target]
 # Prune pending durable wakes for <task-id> and its recorded <target> from
 # the wake queue. Removes stale wakes for <target>, signal wakes for the task's
-# status or turn-ended files, and task-specific check wakes.
+# status or turn-ended files, and task-specific check wakes. The queue is judged
+# only under its lock: a publisher already holding it finishes first, so its row
+# is pruned too.
 fm_wake_queue_prune_task() {  # <state> <task-id> [target]
   local state=$1 task=$2 target=${3:-}
   local queue="$state/.wake-queue" lock="$state/.wake-queue.lock" tmp
-  [ -f "$queue" ] || return 0
-  [ -s "$queue" ] || return 0
   fm_lock_acquire_wait "$lock" || return 1
+  if [ ! -f "$queue" ] || [ ! -s "$queue" ]; then
+    fm_lock_release "$lock"
+    return 0
+  fi
   tmp=$(mktemp "$state/.wake-queue.prune.XXXXXX") || { fm_lock_release "$lock"; return 1; }
   chmod 0600 "$tmp" 2>/dev/null || true
   awk -F '\t' -v task="$task" -v target="$target" -v state="$state" '
