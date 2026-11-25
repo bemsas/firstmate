@@ -3014,7 +3014,8 @@ EOF
 #!/usr/bin/env bash
 "$REAL_CP" "$@" || exit
 for arg in "$@"; do
-  if [ "$arg" = "$RACE_STATUS" ] && mkdir "$RACE_ONCE" 2>/dev/null; then
+  # The snapshot may copy the log through a pinned descriptor's path.
+  if [ "$arg" -ef "$RACE_STATUS" ] && mkdir "$RACE_ONCE" 2>/dev/null; then
     printf 'needs-decision[new]: appended after capture\n' >> "$RACE_STATUS"
     break
   fi

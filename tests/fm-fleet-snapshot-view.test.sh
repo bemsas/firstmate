@@ -1152,6 +1152,120 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+# The open-decision keys the snapshot reports for one task, space separated.
+snapshot_open_keys() {  # <home> <fakebin> <id>
+  PATH="$2:$PATH" FM_HOME="$1" "$SNAPSHOT" --json \
+    | jq -r --arg id "$3" '.tasks[] | select(.id == $id) | [.hints.open_decisions[].key] | sort | join(" ")'
+}
+
+write_cursor_task() {  # <home> <id>
+  mkdir -p "$1/secondmate-home"
+  fm_write_meta "$1/state/$2.meta" \
+    "window=firstmate:fm-$2" "worktree=$1/secondmate-home" \
+    "project=$1/secondmate-home" "harness=codex" "kind=secondmate" \
+    "mode=secondmate" "home=$1/secondmate-home" "projects=alpha"
+}
+
+# Fold the task's cursor as the wake drain does, then add a key that exists only
+# there. The snapshot reports it when it reused the cursor and cannot when it
+# folded the captured log in full.
+plant_cursor() {  # <home> <id>
+  local cursor="$1/state/.$2.open-decisions-cursor"
+  # shellcheck disable=SC2016 # Expanded by the fresh shell.
+  bash -c '. "$1"; status_open_decisions_incremental "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$1/state/$2.status" \
+    >/dev/null || fail "could not fold the cursor"
+  printf '%s\nplanted\tneeds-decision\tonly in the cursor' "$(cat "$cursor")" > "$cursor.next"
+  mv -f "$cursor.next" "$cursor"
+}
+
+test_status_cursor_reuse_is_exact_or_full_fold() {
+  local home fakebin status size keys
+  home=$(make_home cursor-reuse)
+  fakebin=$(make_fakebin "$home")
+  write_cursor_task "$home" reuse-task
+  status="$home/state/reuse-task.status"
+  open_keys() { snapshot_open_keys "$home" "$fakebin" reuse-task; }
+  printf 'needs-decision [key=real]: the logged decision\n' > "$status"
+
+  plant_cursor "$home" reuse-task
+  keys=real
+  # A host that cannot certify its capture always folds in full.
+  [ "$(uname -s)" != Linux ] || keys='planted real'
+  assert_equals "$keys" "$(open_keys)" "an exact cursor must replace the full fold"
+
+  printf 'working: one more complete record\n' >> "$status"
+  assert_equals real "$(open_keys)" "a log past the cursor must fold in full"
+
+  plant_cursor "$home" reuse-task
+  printf 'needs-decision [key=partial]: no newline' >> "$status"
+  assert_equals 'partial real' "$(open_keys)" "a partial append must fold in full"
+  # The drain stops before the fragment, so its cursor never covers the capture.
+  plant_cursor "$home" reuse-task
+  assert_equals 'partial real' "$(open_keys)" "a cursor that stops before a fragment must not be reused"
+
+  printf '\n' >> "$status"
+  plant_cursor "$home" reuse-task
+  size=$(wc -c < "$status")
+  sed 's/key=real/key=swap/' "$status" > "$home/replacement"
+  mv -f "$home/replacement" "$status"
+  [ "$(wc -c < "$status")" -eq "$size" ] || fail "test setup: the replacement changed size"
+  assert_equals 'partial swap' "$(open_keys)" "a same-size replacement must fold in full"
+  pass "the snapshot reuses a status cursor only for exactly the captured bytes"
+}
+
+# A log that changes while it is copied is kept as one point-in-time copy but
+# never certified, and a capture that fails part-way leaves nothing behind when
+# the log is gone by the time it is retried.
+test_raced_status_capture_is_never_certified_or_torn() {
+  local home fakebin real_cp status
+  [ "$(uname -s)" = Linux ] || { pass "SKIP: pinned status capture is Linux only"; return 0; }
+  home=$(make_home capture-race)
+  fakebin=$(make_fakebin "$home")
+  write_cursor_task "$home" race-task
+  status="$home/state/race-task.status"
+  real_cp=$(command -v cp)
+  open_keys() { snapshot_open_keys "$home" "$fakebin" race-task; }
+  cat > "$fakebin/cp" <<SH
+#!/usr/bin/env bash
+mode=\$(cat "$home/mode" 2>/dev/null)
+for dest in "\$@"; do :; done
+case "\$mode:\$*" in
+  append:*/proc/*/fd/8\ *)
+    "$real_cp" "\$@" || exit
+    printf 'needs-decision [key=late]: appended during the copy\n' >> "$status"
+    exit 0
+    ;;
+  rotate:*/proc/*/fd/8\ *) mv "$home/rotated" "$status" ;;
+  fail-partial:*/proc/*/fd/8\ *)
+    printf 'needs-decision [key=torn]: half a copy\n' > "\$dest"
+    mv "$status" "$home/gone"
+    exit 1
+    ;;
+esac
+exec "$real_cp" "\$@"
+SH
+  chmod +x "$fakebin/cp"
+
+  printf 'needs-decision [key=real]: the logged decision\n' > "$status"
+  plant_cursor "$home" race-task
+  assert_equals 'planted real' "$(open_keys)" "an unraced capture must reuse its exact cursor"
+
+  printf 'append\n' > "$home/mode"
+  assert_equals real "$(open_keys)" "a log that grew during its copy must fold the copied bytes in full"
+
+  # The held descriptor keeps naming the file it opened, so a file rotated in
+  # over the path can lend neither its bytes nor its cursor to the capture.
+  printf 'needs-decision [key=foreign]: a different file\n' > "$home/rotated"
+  printf 'rotate\n' > "$home/mode"
+  assert_equals 'late real' "$(open_keys)" "a rotated-in file must not mix into the pinned capture"
+  assert_contains "$(cat "$status")" foreign "test setup: the rotation never happened"
+
+  printf 'fail-partial\n' > "$home/mode"
+  assert_equals '' "$(open_keys)" "a failed capture of a vanished log must not leave its partial copy"
+  [ -e "$home/gone" ] || fail "test setup: the partial failure never happened"
+  pass "a raced status capture is never certified and never left torn"
+}
+
 fm_test_run \
   test_empty_fleet_json \
   test_fixture_snapshot_json \
@@ -1165,6 +1279,8 @@ fm_test_run \
   test_secondmate_open_decision_survives_live_endpoint \
   test_open_decision_transfers_to_captain_hold \
   test_open_decision_clears_on_keyed_resolution \
+  test_status_cursor_reuse_is_exact_or_full_fold \
+  test_raced_status_capture_is_never_certified_or_torn \
   test_completed_scout_report_is_pointer_not_pending \
   test_parked_scout_decision_stays_pending \
   test_scout_reports_include_teardown_reports \
