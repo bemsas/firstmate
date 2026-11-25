@@ -159,12 +159,12 @@ fi
 exec "$FM_TEST_REAL_SNAPSHOT" "$@"
 SH
 chmod +x "$TRACE_BIN/fm-home-summary-refresh.sh" "$TRACE_BIN/fm-fleet-snapshot.sh"
-# The fixture's own retry window keeps the watcher's backoff visible without
+# The fixture's own retry window keeps the watcher's cooldown visible without
 # waiting out the 60-second operational default, which is asserted further down.
 TRACE_ENV=(
   "PATH=$FAKEBIN:$PATH" "FM_ROOT_OVERRIDE=$ROOT" "FM_HOME=$HOME_DIR"
   "FM_BACKEND=tmux" "FM_TEST_SUMMARY_TRACE=$TRACE" "FM_TEST_REAL_SNAPSHOT=$SNAPSHOT"
-  "FM_HOME_SUMMARY_INTERVAL=300" "FM_HOME_SUMMARY_RETRY_BASE=6"
+  "FM_HOME_SUMMARY_INTERVAL=300" "FM_HOME_SUMMARY_COOLDOWN=6"
   "FM_SNAPSHOT_NOW=$NOW_TWO" "FM_SNAPSHOT_NOW_EPOCH=$EPOCH_TWO"
   "FM_POLL=1" "FM_SIGNAL_GRACE=0" "FM_CHECK_INTERVAL=9999999" "FM_HEARTBEAT=9999999"
   "FM_WATCH_HANDLING_SUCCESSOR=1"
@@ -198,7 +198,7 @@ pass "watcher status bursts leave a fresh ledger alone"
 
 # Age the published file without changing its contents so the very next poll
 # is due. A failed attempt must leave that same ledger due for recovery, but no
-# watcher trigger may retry before the failure's backoff window ends. Each
+# watcher trigger may retry before the failure's cooldown ends. Each
 # collector records its start time, so a slow host cannot hide an early retry.
 touch -t 200101010000 "$SUMMARY"
 : > "$TRACE/fail-next"
@@ -209,13 +209,13 @@ env "${TRACE_ENV[@]}" FM_HOME_SUMMARY_IF_IDLE=1 \
 cmp -s "$TRACE/original.json" "$SUMMARY" || fail "a failed refresh changed the last complete ledger"
 grep -F 'injected collection failure' "$HOME_DIR/state/.home-summary-refresh.log" >/dev/null \
   || fail "the due producer failure was not logged"
-retry_at=$(sed -n 's/^failures=1 next=\([0-9]*\)$/\1/p' "$HOME_DIR/state/.home-summary-refresh.backoff")
+retry_at=$(cat "$HOME_DIR/state/.home-summary-refresh.backoff" 2>/dev/null)
 [ -n "$retry_at" ] || fail "the failed watcher refresh recorded no retry time"
 env "${TRACE_ENV[@]}" FM_HOME_SUMMARY_IF_IDLE=1 \
   "$TRACE_BIN/fm-home-summary-refresh.sh" --best-effort \
   || fail "a deferred watcher refresh changed the best-effort result"
-[ "$(date +%s)" -lt "$retry_at" ] || fail "test setup: the early retry outlasted its backoff window"
-[ "$(trace_count collectors)" -eq 1 ] || fail "a watcher trigger retried inside its backoff window"
+[ "$(date +%s)" -lt "$retry_at" ] || fail "test setup: the early retry outlasted its cooldown"
+[ "$(trace_count collectors)" -eq 1 ] || fail "a watcher trigger retried inside its cooldown"
 
 # A watcher exits on any wake, such as this idle pane going stale inside the
 # window, so relaunch it as supervision does.
@@ -234,9 +234,9 @@ WATCH_PID=
 [ "$(trace_count collectors)" -eq 2 ] || fail "the due idle retry did not collect exactly once"
 retried_at=$(sed -n 2p "$TRACE/collectors")
 [ "$retried_at" -ge "$retry_at" ] \
-  || fail "an idle watcher retried at $retried_at, before its backoff window ended at $retry_at"
+  || fail "an idle watcher retried at $retried_at, before its cooldown ended at $retry_at"
 [ ! -e "$HOME_DIR/state/.home-summary-refresh.backoff" ] \
-  || fail "the successful retry kept the backoff record"
+  || fail "the successful retry kept the cooldown record"
 jq -e '[.decisions_open[].key] | sort == ["fixture-1", "fixture-2", "fixture-3"]' "$SUMMARY" >/dev/null \
   || fail "the due publication did not include every decision from the burst"
 run_producer "$NOW_TWO" "$EPOCH_TWO" > "$TRACE/expected.json" \
@@ -245,7 +245,7 @@ jq -S . "$SUMMARY" > "$TRACE/published-normalized.json"
 jq -S . "$TRACE/expected.json" > "$TRACE/expected-normalized.json"
 cmp -s "$TRACE/published-normalized.json" "$TRACE/expected-normalized.json" \
   || fail "the due ledger differed from the real fresh producer"
-pass "idle polls wait out the backoff window, then retry and publish all status changes in one collection"
+pass "idle polls wait out the cooldown, then retry and publish all status changes in one collection"
 
 env "${TRACE_ENV[@]}" FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
   "$TRACE_BIN/fm-home-summary-refresh.sh" --best-effort \
@@ -633,15 +633,17 @@ done
 exec "$FM_TEST_REAL_MKDIR" "$@"
 SH
 chmod +x "$MKBIN/mkdir"
-started=$(date +%s)
-PATH="$MKBIN:$FAKEBIN:$PATH" FM_TEST_REAL_MKDIR="$REAL_MKDIR" \
-  FM_TEST_STALLED_STATE="$HOME_DIR/state" FM_ROOT_OVERRIDE="$ROOT" \
-  FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=1 \
-  "$WRITER" --best-effort >/dev/null 2>"$TMP_ROOT/stalled-state.err" \
-  || fail "state initialization timeout changed the best-effort caller result"
-elapsed=$(( $(date +%s) - started ))
-[ "$elapsed" -lt 6 ] \
-  || fail "best-effort refresh waited $elapsed seconds before bounded state initialization"
+for if_idle in 0 1; do
+  started=$(date +%s)
+  PATH="$MKBIN:$FAKEBIN:$PATH" FM_TEST_REAL_MKDIR="$REAL_MKDIR" \
+    FM_TEST_STALLED_STATE="$HOME_DIR/state" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=1 FM_HOME_SUMMARY_IF_IDLE="$if_idle" \
+    "$WRITER" --best-effort >/dev/null 2>"$TMP_ROOT/stalled-state.err" \
+    || fail "state initialization timeout changed the best-effort caller result (if-idle $if_idle)"
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 6 ] \
+    || fail "best-effort refresh waited $elapsed seconds before bounded state initialization (if-idle $if_idle)"
+done
 pass "best-effort refresh bounds state initialization"
 
 SIGNALBIN="$TMP_ROOT/signalbin"
@@ -1352,23 +1354,17 @@ case "$report_out" in
 esac
 pass "repeated publication failure is reported at session start until it clears"
 
-# --- watcher backoff and attempt ownership -----------------------------------
+# --- watcher cooldown --------------------------------------------------------
 #
-# Only the watcher's detached trigger backs off, and a parent that outlives its
-# worker may record a failure only while its own attempt is still the newest
-# outcome. A fake producer drives each outcome; everything else is the real
-# writer. $BACKOFF_HOME/mode selects the producer, and $BACKOFF_HOME/race, when
-# present, is sourced by the parent's worker launch before that worker exits 143.
-BACKOFF_HOME="$TMP_ROOT/backoff-home"
-BACKOFF_BIN="$TMP_ROOT/backoff-bin"
-BACKOFF_RACE_BIN="$TMP_ROOT/backoff-race-bin"
-mkdir -p "$BACKOFF_HOME/state" "$BACKOFF_BIN" "$BACKOFF_RACE_BIN"
-BACKOFF_STATE="$BACKOFF_HOME/state"
-BACKOFF_RECORD="$BACKOFF_STATE/.home-summary-refresh.backoff"
-BACKOFF_LEDGER="$BACKOFF_STATE/home-summary.json"
-ln -s "$ROOT"/bin/* "$BACKOFF_BIN/"
-unlink "$BACKOFF_BIN/fm-fleet-snapshot.sh"
-cat > "$BACKOFF_BIN/fm-fleet-snapshot.sh" <<'SH'
+# A fake producer drives each outcome, selected by $COOL_HOME/mode; everything
+# else is the real writer, run as the watcher's trigger unless a case says so.
+COOL_HOME="$TMP_ROOT/cooldown-home"
+COOL_BIN="$TMP_ROOT/cooldown-bin"
+COOL_RECORD="$COOL_HOME/state/.home-summary-refresh.backoff"
+mkdir -p "$COOL_HOME/state" "$COOL_BIN"
+ln -s "$ROOT"/bin/* "$COOL_BIN/"
+unlink "$COOL_BIN/fm-fleet-snapshot.sh"
+cat > "$COOL_BIN/fm-fleet-snapshot.sh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$$" >> "$FM_HOME/collectors"
 case "$(cat "$FM_HOME/mode")" in
@@ -1381,175 +1377,76 @@ jq -n --arg home "$FM_HOME" '{schema:"fm-secondmate-home-summary.v1",
   state:"no_active_work", invalidity:{}, active_children:[], decisions_open:[],
   holds:[], queued:[], landed:[], endpoints:[], counts:{}, omitted:[]}'
 SH
-cat > "$BACKOFF_RACE_BIN/env" <<SH
-#!/usr/bin/env bash
-case "\$*" in
-  *--_worker)
-    if [ -f "\$FM_HOME/race" ]; then
-      . "\$FM_HOME/race"
-      [ "\${race_continues:-0}" -eq 1 ] || exit 143
-    fi
-    ;;
-esac
-exec "$(command -v env)" "\$@"
-SH
-chmod +x "$BACKOFF_BIN/fm-fleet-snapshot.sh" "$BACKOFF_RACE_BIN/env"
-: > "$BACKOFF_HOME/collectors"
+chmod +x "$COOL_BIN/fm-fleet-snapshot.sh"
 
-backoff_run() {  # [VAR=value...] [-- [writer args...]]; a watcher trigger by default
-  local -a assigns=()
-  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do assigns+=("$1"); shift; done
-  if [ "$#" -gt 0 ]; then shift; else set -- --best-effort; fi
-  env "PATH=$BACKOFF_RACE_BIN:$PATH" "FM_ROOT_OVERRIDE=$ROOT" "FM_HOME=$BACKOFF_HOME" \
-    FM_HOME_SUMMARY_IF_IDLE=1 ${assigns[@]+"${assigns[@]}"} \
-    "$BACKOFF_BIN/fm-home-summary-refresh.sh" "$@" 2>"$BACKOFF_HOME/stderr"
+cool_run() {  # <mode> <expected collectors> <message> [VAR=value...]
+  local mode=$1 want=$2 message=$3 begun got
+  shift 3
+  printf '%s\n' "$mode" > "$COOL_HOME/mode"
+  : > "$COOL_HOME/collectors"
+  begun=$(date +%s)
+  env "FM_ROOT_OVERRIDE=$ROOT" "FM_HOME=$COOL_HOME" FM_HOME_SUMMARY_IF_IDLE=1 "$@" \
+    "$COOL_BIN/fm-home-summary-refresh.sh" --best-effort 2>"$COOL_HOME/stderr" \
+    || fail "$message: the best-effort result changed"
+  [ "$(( $(date +%s) - begun ))" -lt 20 ] || fail "$message: the refresh was not bounded"
+  got=$(wc -l < "$COOL_HOME/collectors" | tr -d '[:space:]')
+  [ "$got" -eq "$want" ] || fail "$message: $got collections instead of $want"
 }
-backoff_collectors() { wc -l < "$BACKOFF_HOME/collectors" | tr -d '[:space:]'; }
-backoff_reset() {  # <mode>
-  printf '%s\n' "$1" > "$BACKOFF_HOME/mode"
-  : > "$BACKOFF_HOME/collectors"
-  rm -f "$BACKOFF_RECORD" "$BACKOFF_LEDGER" "$BACKOFF_HOME/race"
-}
-backoff_expire() {  # <failures>
-  printf 'failures=%s next=%s\n' "$1" "$(( $(date +%s) - 1 ))" > "$BACKOFF_RECORD"
-}
-assert_backoff() {  # <failures> <delay> <started-epoch> <message>
+assert_cooldown() {  # <started> <delay> <message>
   local next ended
   ended=$(date +%s)
-  next=$(sed -n "s/^failures=$1 next=\([0-9]*\)\$/\1/p" "$BACKOFF_RECORD" 2>/dev/null)
-  [ -n "$next" ] || fail "$4: no record of $1 failures: $(cat "$BACKOFF_RECORD" 2>/dev/null)"
-  [ "$next" -ge "$(($3 + $2))" ] && [ "$next" -le "$((ended + $2))" ] \
-    || fail "$4: next attempt $next is not $2 seconds after the attempt of $3..$ended"
-}
-assert_no_attempt_residue() {  # <message>
-  local left
-  left=$(find "$BACKOFF_STATE" -name '.home-summary-attempt.*' -o -name '.home-summary-refresh.backoff.tmp.*' \
-    -o -name '.home-summary-refresh.lock')
-  [ -z "$left" ] || fail "$1: attempt state left behind: $left"
+  next=$(cat "$COOL_RECORD" 2>/dev/null)
+  case "$next" in ''|*[!0-9]*) fail "$3: no recorded epoch: $next" ;; esac
+  [ "$next" -ge "$(($1 + $2))" ] && [ "$next" -le "$((ended + $2))" ] \
+    || fail "$3: $next is not $2 seconds after an attempt in $1..$ended"
 }
 
-backoff_reset fail
 started=$(date +%s)
-backoff_run || fail "a failed watcher refresh changed its caller's result"
-assert_backoff 1 60 "$started" "the first failure must wait the 60-second operational default"
-before=$(cat "$BACKOFF_RECORD")
-backoff_run || fail "a deferred watcher refresh changed its caller's result"
-[ "$(backoff_collectors)" -eq 1 ] || fail "a watcher retried inside its backoff"
-[ "$(cat "$BACKOFF_RECORD")" = "$before" ] || fail "a deferred watcher refresh rewrote the record"
-backoff_run FM_HOME_SUMMARY_IF_IDLE=0 -- --best-effort || fail "a lifecycle refresh changed its caller's result"
-[ "$(backoff_collectors)" -eq 2 ] || fail "a lifecycle refresh was deferred by the watcher's backoff"
-[ "$(cat "$BACKOFF_RECORD")" = "$before" ] || fail "a failed lifecycle refresh rewrote the watcher's record"
-backoff_run FM_HOME_SUMMARY_IF_IDLE=0 -- && fail "a failed direct refresh hid its result"
-for spec in '2 120' '5 960' '6 1800' '30 1800'; do
-  backoff_expire "$((${spec% *} - 1))"
-  [ "${spec% *}" -ne 30 ] || backoff_expire 30
+cool_run fail 1 "first failure"
+assert_cooldown "$started" 60 "a failure must wait the 60-second operational default"
+before=$(cat "$COOL_RECORD")
+cool_run ok 0 "a trigger inside the cooldown"
+cool_run fail 1 "a lifecycle refresh inside the cooldown" FM_HOME_SUMMARY_IF_IDLE=0
+[ "$(cat "$COOL_RECORD")" = "$before" ] || fail "a deferred or lifecycle refresh rewrote the record"
+cool_run ok 1 "a successful lifecycle refresh" FM_HOME_SUMMARY_IF_IDLE=0
+[ ! -e "$COOL_RECORD" ] || fail "a successful refresh kept the cooldown"
+rm -f "$COOL_HOME/state/home-summary.json"
+for ignored in '' garbage 0 "0$before" "$(( $(date +%s) - 1 ))" "$(( $(date +%s) + 999999 ))"; do
+  printf '%s\n' "$ignored" > "$COOL_RECORD"
   started=$(date +%s)
-  backoff_run || fail "a repeated watcher failure changed its caller's result"
-  assert_backoff "${spec% *}" "${spec#* }" "$started" "failure ${spec% *} must double up to the cap"
+  cool_run fail 1 "record '$ignored'"
+  assert_cooldown "$started" 60 "a failure after record '$ignored'"
 done
-for malformed in 'failures=1' 'failures=0 next=1' 'failures=x next=9' 'garbage' \
-  "failures=1 next=$(( $(date +%s) + 999999 ))"; do
-  printf '%s\n' "$malformed" > "$BACKOFF_RECORD"
-  : > "$BACKOFF_HOME/collectors"
-  started=$(date +%s)
-  backoff_run || fail "a malformed record changed the watcher's result"
-  [ "$(backoff_collectors)" -eq 1 ] || fail "a malformed record deferred the watcher: $malformed"
-  assert_backoff 1 60 "$started" "a malformed record must restart the count"
-done
-printf 'ok\n' > "$BACKOFF_HOME/mode"
-backoff_run FM_HOME_SUMMARY_IF_IDLE=0 -- || fail "a direct refresh did not publish: $(cat "$BACKOFF_HOME/stderr")"
-[ ! -e "$BACKOFF_RECORD" ] || fail "a successful publication kept the backoff record"
-assert_no_attempt_residue "after backoff"
-pass "watcher refresh failures back off from 60 to 1800 seconds and only a publication clears them"
+pass "a failed watcher refresh waits out one cooldown that any success clears"
 
-# A worker that passed its parent's check must still honor a cooldown that
-# another attempt set before it took the lock.
-backoff_reset ok
-cat > "$BACKOFF_HOME/race" <<'SH'
-printf 'failures=4 next=%s\n' "$(( $(date +%s) + 60 ))" > "$FM_HOME/state/.home-summary-refresh.backoff"
-race_continues=1
-SH
-backoff_run || fail "a worker deferred under its lock changed the watcher's result"
-[ "$(backoff_collectors)" -eq 0 ] || fail "a worker ignored a cooldown set before it took the lock"
-grep -q '^failures=4 ' "$BACKOFF_RECORD" || fail "a deferred worker changed the newer record"
-pass "retry eligibility is rechecked under the refresh lock"
-
-# A timed-out or killed worker with nothing newer is this parent's to record.
-backoff_reset hang
+rm -f "$COOL_RECORD"
 started=$(date +%s)
-backoff_run FM_HOME_SUMMARY_TIMEOUT=1 || fail "a timed-out watcher refresh changed its caller's result"
-[ "$(backoff_collectors)" -eq 1 ] || fail "the timed-out producer never ran"
-assert_backoff 1 60 "$started" "a timed-out attempt must back off"
-assert_no_attempt_residue "after a timeout"
-backoff_reset ok
-backoff_run || fail "could not publish the ledger a later attempt pins"
-[ -e "$BACKOFF_LEDGER" ] || fail "the watcher did not publish: $(cat "$BACKOFF_HOME/stderr")"
-: > "$BACKOFF_HOME/race"
-started=$(date +%s)
-backoff_run FM_HOME_SUMMARY_INTERVAL=1 || fail "a killed worker changed its watcher's result"
-assert_backoff 1 60 "$started" "a killed attempt over an unchanged ledger must back off"
-pass "a timed-out or killed attempt records its own failure"
+cool_run hang 1 "a timed-out refresh" FM_HOME_SUMMARY_TIMEOUT=1 FM_HOME_SUMMARY_COOLDOWN=30
+assert_cooldown "$started" 31 "a timed-out attempt must cool down from its deadline"
+cool_run ok 0 "a trigger after the timeout" FM_HOME_SUMMARY_TIMEOUT=1 FM_HOME_SUMMARY_COOLDOWN=30
+cool_run ok 1 "a success after the timeout" FM_HOME_SUMMARY_IF_IDLE=0
+[ ! -e "$COOL_RECORD" ] || fail "a success after a timed-out attempt kept its cooldown"
+pass "a timed-out watcher refresh cools down until a success"
 
-# Any newer outcome outranks the stale parent: a replaced or first ledger, a
-# newer failure record, a cleared record, or another holder of the lock.
-stale_parent() {  # <message>; runs $BACKOFF_HOME/race inside the attempt
-  backoff_run || fail "$1: a stale parent changed its caller's result"
-  assert_no_attempt_residue "$1"
-}
-backoff_reset ok
-backoff_run || fail "could not publish the ledger a newer one replaces"
-cat > "$BACKOFF_HOME/race" <<'SH'
-cp "$FM_HOME/state/home-summary.json" "$FM_HOME/state/newer"
-mv -f "$FM_HOME/state/newer" "$FM_HOME/state/home-summary.json"
-SH
-stale_parent "newer replacement ledger"
-[ ! -e "$BACKOFF_RECORD" ] || fail "a stale parent recorded a failure over a newer ledger"
-
-backoff_reset ok
-cat > "$BACKOFF_HOME/race" <<'SH'
-printf '{}' > "$FM_HOME/state/home-summary.json"
-SH
-stale_parent "newer first ledger"
-[ ! -e "$BACKOFF_RECORD" ] || fail "a stale parent recorded a failure over a first ledger"
-
-backoff_reset ok
-backoff_expire 2
-cat > "$BACKOFF_HOME/race" <<'SH'
-printf 'failures=7 next=1\n' > "$FM_HOME/state/.home-summary-refresh.backoff"
-SH
-stale_parent "newer failure record"
-[ "$(cat "$BACKOFF_RECORD")" = 'failures=7 next=1' ] || fail "a stale parent overwrote a newer failure record"
-
-backoff_reset ok
-backoff_expire 2
-cat > "$BACKOFF_HOME/race" <<'SH'
-mv "$FM_HOME/state/.home-summary-refresh.backoff" "$FM_HOME/cleared"
-SH
-stale_parent "newer cleared record"
-[ ! -e "$BACKOFF_RECORD" ] || fail "a stale parent restored a cleared record"
-
-backoff_reset ok
-LOCK_MARKER="$TMP_ROOT/backoff-lock-held"
-# shellcheck disable=SC2016 # Expanded by the fresh shell.
-FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$BACKOFF_HOME" bash -c '
-  . "$1/bin/fm-wake-lib.sh"
-  fm_lock_acquire_wait "$2/.home-summary-refresh.lock"
-  : > "$3"
-  exec sleep 30
-' _ "$ROOT" "$BACKOFF_STATE" "$LOCK_MARKER" &
-LOCK_HOLDER_PID=$!
-i=0
-while [ ! -e "$LOCK_MARKER" ] && [ "$i" -lt 100 ]; do
-  kill -0 "$LOCK_HOLDER_PID" 2>/dev/null || break
-  sleep 0.05
-  i=$((i + 1))
+for kind in fifo directory symlink; do
+  case "$kind" in
+    fifo) mkfifo "$COOL_RECORD" ;;
+    directory) mkdir "$COOL_RECORD" ;;
+    symlink)
+      printf '%s\n' "$(( $(date +%s) + 60 ))" > "$COOL_HOME/target"
+      ln -s "$COOL_HOME/target" "$COOL_RECORD"
+      before=$(cat "$COOL_HOME/target")
+      ;;
+  esac
+  for mode in fail fail ok; do
+    rm -f "$COOL_HOME/state/home-summary.json"
+    cool_run "$mode" 1 "$mode with a $kind record" FM_HOME_SUMMARY_TIMEOUT=10
+  done
+  [ -f "$COOL_HOME/state/home-summary.json" ] || fail "a $kind record blocked publication"
+  case "$kind" in
+    fifo) [ -p "$COOL_RECORD" ] && rm "$COOL_RECORD" ;;
+    directory) rmdir "$COOL_RECORD" ;;
+    symlink) [ "$(cat "$COOL_HOME/target")" = "$before" ] && [ -L "$COOL_RECORD" ] && rm "$COOL_RECORD" ;;
+  esac || fail "a refresh changed the $kind at the cooldown path"
 done
-[ -e "$LOCK_MARKER" ] || fail "could not hold the refresh lock for attempt ownership"
-: > "$BACKOFF_HOME/race"
-backoff_run || fail "a parent that lost the refresh lock changed its caller's result"
-[ ! -e "$BACKOFF_RECORD" ] || fail "a stale parent recorded a failure while another attempt held the lock"
-kill -0 "$LOCK_HOLDER_PID" 2>/dev/null || fail "the lock holder exited before the stale parent finished"
-kill -KILL "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
-wait "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
-LOCK_HOLDER_PID=
-pass "a stale parent failure never replaces a newer outcome"
+pass "a non-regular cooldown path means no cooldown and is left alone"
