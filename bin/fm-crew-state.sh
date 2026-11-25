@@ -12,6 +12,9 @@
 # the pane busy-signature) and reconciles the possibly-stale log against it.
 # A ship `done:` is current-state done only when bin/fm-dod-lib.sh accepts the
 # named head as reachable outside the worker's disposable copy; otherwise blocked.
+# Where that library requires supervisor acceptance, a ship that is not
+# local-only also needs its current candidate accepted, and an attributed run
+# must be at that candidate's full head; otherwise blocked.
 #
 # The determinism lives entirely here - run-step / pane / log reads, fixed
 # mapping logic, and terminal passed-run PR detail from bounded evidence only,
@@ -118,6 +121,9 @@
 #      also a passing outcome (publication or CI verification was
 #      automatically skipped, no-mistakes' own vocabulary), read as done but
 #      with that skip kept visible in the detail, unlike a clean passed.
+#      Where that acceptance is required, a done reading with no PR identity
+#      in the run or the log has nothing to accept: it reads paused when the
+#      run states that publication was skipped, and blocked otherwise.
 #      EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -

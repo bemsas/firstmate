@@ -11,9 +11,13 @@
 # optional reviewer identifies the independent reviewer in the audit record.
 # Appends a private JSON object {pr,head,verdict,reviewer} to state/review-verdicts.jsonl
 # under a lock shared by writers. The latest valid record for that PR and head
-# wins; another head's record never authorizes a merge. FM_HOME (or
+# wins; another head's record never authorizes a merge. Recording the same
+# refute review again appends nothing and keeps its original row, so a retry
+# cannot displace a later record. A refute merge is new only with a new scout or
+# report; a refute fix is also new when the scout reports it again. Ordinary
+# verdicts carry no event identity, so each one is appended. FM_HOME (or
 # FM_ROOT_OVERRIDE) and FM_STATE_OVERRIDE select the home/state as usual.
-# Exit: 0 recorded, 1 write/lock failure, 2 invalid arguments.
+# Exit: 0 recorded or already recorded, 1 write/lock failure, 2 invalid arguments.
 set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
@@ -65,6 +69,7 @@ fm_pr_regular_destination_on_device_or_absent "$FILE" "$DEVICE" || exit 1
 if [ "$1" = refute ]; then
   ROW=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     python3 "$SCRIPT_DIR/fm-done-acceptance.py" review-result "$2" "$3" "$4")
+  [ -n "$ROW" ] || exit 0
 else
   ROW=$(jq -nc --arg pr "$FM_PR_URL" --arg head "$2" --arg verdict "$3" --arg reviewer "${4:-}" \
     '{pr:$pr,head:$head,verdict:$verdict,reviewer:$reviewer}')

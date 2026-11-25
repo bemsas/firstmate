@@ -511,7 +511,7 @@ test_top_level_heading_ends_checklist_section() {
   assert_equals pass "$(result_of tests)" 'top-level setup and rules must not become test commands'
   pass 'checklist sections stop at the next top-level heading'
 }
-if [ "${1:-}" != --framework-paths ]; then
+if [ -z "${1:-}" ]; then
   test_top_level_heading_ends_checklist_section
   test_base_metadata_keys
   test_off_by_default_does_nothing
@@ -590,6 +590,7 @@ git -C "$A_REPO" add . || fail "cannot stage acceptance base"
 git -C "$A_REPO" commit -qm base || fail "cannot commit acceptance base"
 fm_git_add_origin "$A_REPO" "$A/origin.git"
 A_BASE=$(git -C "$A_REPO" rev-parse HEAD)
+ln -s "$A_REPO" "$A/repo-link"
 git clone --quiet --branch dev "$A/origin.git" "$A/pool" || fail "cannot initialize reviewer scratch"
 printf -- '- repo [direct-PR] - fixture (added 2026-01-01)\n' > "$A_HOME/data/projects.md"
 {
@@ -684,6 +685,11 @@ test_acceptance_private_fetch() {
   GH_CONFIG_DIR="$credentials" accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" private-source >/dev/null ||
     fail "trusted GitHub credential helper did not enable scoped fetch"
   assert_equals 'github.com only' "$(cat "$credentials/proof")" "fetch requires a credential only for GitHub.com"
+  (umask 077; jq '.repo="Acme/Widget"' "$A_POLICY" > "$A/policy")
+  mv "$A/policy" "$A_POLICY"
+  accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" repository-case >/dev/null ||
+    fail "a policy repository that differs from the forge only in letter case should match"
+  A_LIVE_REPO=acme/gadget accept_refused "GitHub repository" "$SCRIPT" review-brief "$A_ID" "$A_URL" repository-name
   pass "exact source fetch requires scoped supervisor authentication when forge objects demand it"
 }
 
@@ -765,6 +771,8 @@ assert_true 1 "==" "$count"
 assert true != "$actual"
 assert_true "$(ready)" "true when ready"
 assert_equals ready "$state" "ready state"
+printf '%s\n' "usage: run.sh; exit 77 when tools are missing" 'or run.sh | skip-list; assert true' > "$usage"
+find "$fixtures" -type f -exec test -s {} \; || exit 1
 exit 0
 SH
   cat > "$A_REPO/src/guide.test.js" <<'JS'
@@ -833,6 +841,11 @@ message-variable-shell|tests/iterator.test.sh|added trivial assertion|assert tru
 same-operands-shell|tests/iterator.test.sh|added trivial assertion|assert 1 -eq 1 "one record"
 literal-list-python|tests/test_iterator.py|added trivial assertion|assert [*read_rows(), 1]
 literal-dict-python|tests/test_iterator.py|added trivial assertion|assert {**read_counts(), "key": 1}
+after-quoted-shell|tests/iterator.test.sh|added skip|printf "usage; see docs"; exit 77; printf 'done'
+between-quoted-shell|tests/iterator.test.sh|added skip|run 'a;b' && skip "later"
+substitution-shell|tests/iterator.test.sh|added skip|value="$(load "a"; exit 77)"
+evaluated-shell|tests/iterator.test.sh|added skip|eval "load; exit 77"
+multiline-shell|tests/iterator.test.sh|added skip|value='first\nlast'; exit 77; run 'b'
 literal-command-shell|tests/iterator.test.sh|added trivial assertion|test true # standalone check
 go-skip|src/iterator_test.go|added skip|package iterator\nfunc TestExample(t *testing.T) { t.Skip("fixture") }
 after-prose-go|src/iterator_test.go|added skip|package iterator\n// t.Skip is not needed\nfunc TestExample(t *testing.T) {\n\tt.SkipNow()\n}
@@ -1074,6 +1087,21 @@ PY
 
   accept_reset
   accept_add_regression 2
+  # The static patterns do not resolve this spelling, so only the observer can
+  # see that the framework skipped the test.
+  cat >> "$A_REPO/tests/test_regression.py" <<'PY'
+
+    def setUp(self):
+        import unittest.case as framework
+        if b"2" in subprocess.check_output([sys.executable, "-c", "from app import value; print(value)"]):
+            raise framework.SkipTest("fixture")
+PY
+  accept_regression_policy
+  accept_candidate
+  accept_refused "head regression did not pass (exit 12)" "$SCRIPT" review-brief "$A_ID" "$A_URL" observed-skip
+
+  accept_reset
+  accept_add_regression 2
   printf 'value = 3\n' > "$A_REPO/app.py"
   accept_candidate
   accept_refused "head regression did not pass (exit 12)" "$SCRIPT" review-brief "$A_ID" "$A_URL" still-failing
@@ -1125,6 +1153,9 @@ test_acceptance_entry_points() {
     "review must use the supervisor's tree even when the worker reports both pins locally"
   accept_refused "provider absent from the builder lineage" "$SCRIPT" spawn-review "$scout" scout 0 claude claude-sonnet-4-6 "$A_REPO" "$result"
   accept_refused "fresh native scout" "$SCRIPT" spawn-review "$scout" scout 1 codex gpt-5.6-sol "$A_REPO" "$result"
+  accept_refused "project or brief does not match" "$SCRIPT" spawn-review "$scout" scout 0 codex gpt-5.6-sol "$A/pool" "$result"
+  accept_cmd "$SCRIPT" spawn-review "$scout" scout 0 codex gpt-5.6-sol "$A/repo-link" "$result" >/dev/null ||
+    fail "a symlink to the candidate's own project should name the same project"
   accept_refused "$scout.meta" "$A_VERDICT" refute "$A_ID" "$scout" "$A_HEAD"
 
   result=$(A_HEAD="$A_HEAD" A_BASE="$A_BASE" A_URL="$A_URL" \
@@ -1206,6 +1237,104 @@ test_acceptance_entry_points() {
   pass "ordinary PR registration requires a current exact candidate, native independent review and explicit supervisor acceptance"
 }
 
+# Synthetic review records only: the scout metadata, report and status are
+# ordinary files, and nothing is accepted, registered or launched.
+prepare_review_record() {  # <scout> <report> <merge|fix> [project]
+  local scout=$1
+  mkdir -p "$A_HOME/data/$scout"
+  accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" "$scout" >/dev/null || fail "could not prepare review $scout"
+  fm_write_meta "$A_STATE/$scout.meta" "kind=scout" "spawn_gen=s200.300.$RANDOM" "project=${4:-$A_REPO}" \
+    "harness=codex" "model=gpt-5.6-sol" "refute_context=$(fixture_sha256 "$A_STATE/$scout.refute.json")"
+  printf '%s\n' "$2" > "$A_HOME/data/$scout/report.md"
+  report_review "$scout" "$3"
+}
+
+report_review() {  # <scout> <merge|fix>
+  printf 'done [at=%s]: Refute %s %s %s\n' "$RANDOM" "$A_BASE" "$A_HEAD" "$2" >> "$A_STATE/$1.status"
+}
+
+record_review() {  # <scout>
+  accept_cmd "$A_VERDICT" refute "$A_ID" "$1" "$A_HEAD" 2> "$A/record.err" ||
+    fail "supervisor could not record review $1: $(cat "$A/record.err")"
+}
+
+# The journal's last row for this candidate, as <reviewer>:<verdict>.
+effective_review() { tail -n 1 "$A_STATE/review-verdicts.jsonl" | jq -r '"\(.reviewer):\(.verdict)"'; }
+
+# Retrying <scout> must leave every journal byte, so also each ordering time.
+assert_review_retry() {  # <scout> <label>
+  cp "$A_STATE/review-verdicts.jsonl" "$A/journal"
+  record_review "$1"
+  cmp -s "$A/journal" "$A_STATE/review-verdicts.jsonl" ||
+    fail "$2: a retry changed the journal"$'\n'"$(diff "$A/journal" "$A_STATE/review-verdicts.jsonl")"
+  assert_grep "already recorded" "$A/record.err" "$2: a retry should say the review was already recorded"
+}
+
+test_review_event_retry() {
+  local journal="$A_STATE/review-verdicts.jsonl" pid pids='' n
+  accept_reset
+  printf 'value = 31\n' > "$A_REPO/app.py"
+  accept_candidate
+  rm -f "$journal"
+
+  prepare_review_record first 'Checked app.py. No blocker.' merge
+  record_review first
+  assert_review_retry first "latest review"
+
+  # A later ordinary fix stays the effective decision.
+  accept_cmd "$A_VERDICT" "$A_URL" "$A_HEAD" fix "second reviewer" || fail "could not record the later fix"
+  assert_review_retry first "before a later fix"
+  assert_equals "second reviewer:fix" "$(effective_review)" "a retry displaced a later fix"
+  report_review first merge
+  assert_review_retry first "a repeated merge report with no new evidence"
+  accept_refused "missing passing fresh-context review" "$SCRIPT" accept "$A_ID" "$A_URL"
+  assert_absent "$A_STATE/$A_ID.accepted.json" "a retried review must not accept the candidate"
+
+  # A fresh report from the same scout and a fresh scout are both new evidence.
+  printf 'Rechecked app.py after the fix verdict. No blocker.\n' > "$A_HOME/data/first/report.md"
+  report_review first merge
+  record_review first
+  assert_equals first:merge "$(effective_review)" "a revised report is new evidence"
+  prepare_review_record second 'Found a blocker in app.py.' fix "$A/pool"
+  accept_refused "matching fresh native scout dispatch" "$A_VERDICT" refute "$A_ID" second "$A_HEAD"
+  sed "s|^project=.*|project=$A/repo-link|" "$A_STATE/second.meta" > "$A/second.meta"
+  mv "$A/second.meta" "$A_STATE/second.meta"
+  record_review second
+  assert_equals second:fix "$(effective_review)" "a fresh scout is new evidence"
+  assert_review_retry first "before a later refute fix"
+  assert_equals second:fix "$(effective_review)" "a retry displaced a later refute fix"
+
+  # A retried fix cannot displace a later merge, but a newly reported one can.
+  # Concurrent recordings of one review share the writer lock and append one row.
+  prepare_review_record third 'Blocker does not reproduce.' merge
+  for n in 1 2 3 4; do
+    accept_cmd "$A_VERDICT" refute "$A_ID" third "$A_HEAD" 2> "$A/concurrent.$n" &
+    pids="$pids $!"
+  done
+  for pid in $pids; do wait "$pid" || fail "a concurrent recording failed"; done
+  assert_equals 1 "$(grep -c '"reviewer":"third"' "$journal")" "concurrent recordings of one review must append one row"
+  assert_review_retry second "before a later merge"
+  assert_equals third:merge "$(effective_review)" "a retried fix displaced a later merge"
+  report_review second fix
+  record_review second
+  assert_equals second:fix "$(effective_review)" "a newly reported fix must block again"
+  assert_review_retry second "newly reported fix"
+
+  # Ordinary verdicts carry no event identity, so each one is still appended.
+  accept_cmd "$A_VERDICT" "$A_URL" "$A_HEAD" fix "second reviewer" || fail "could not record an ordinary fix again"
+  assert_equals "second reviewer:fix" "$(effective_review)" "an ordinary fix must still append"
+
+  # A row recorded before events were kept reads the same and still identifies its review.
+  jq -c 'if .refute then del(.refute.event) else . end' "$journal" > "$A/journal"
+  cat "$A/journal" > "$journal"
+  assert_review_retry third "row without an event"
+  cp "$journal" "$A/journal"
+  printf 'not a verdict\n' >> "$journal"
+  accept_refused "done acceptance" "$A_VERDICT" refute "$A_ID" first "$A_HEAD"
+  cat "$A/journal" > "$journal"
+  pass "retrying a recorded review appends nothing and a later decision on the same head stays effective"
+}
+
 test_acceptance_inspects_pipeline_objects() {
   local result cache="$A_STATE/$A_ID.acceptance-git"
   accept_reset
@@ -1256,6 +1385,11 @@ if [ "${1:-}" = --framework-paths ]; then
   exit
 fi
 
+if [ "${1:-}" = --review-events ]; then
+  test_review_event_retry
+  exit
+fi
+
 test_acceptance_private_fetch
 test_acceptance_tamper
 test_acceptance_test_locations
@@ -1263,5 +1397,6 @@ test_acceptance_framework_config
 test_acceptance_pinned_test_signals
 test_acceptance_regression
 test_acceptance_entry_points
+test_review_event_retry
 test_acceptance_inspects_pipeline_objects
 test_acceptance_requires_complete_builder_lineage

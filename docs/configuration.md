@@ -1199,10 +1199,13 @@ Use a configuration directory outside worker-controlled paths.
 The fetch disables redirects and never loads configuration from the worker's repository.
 Missing credentials, repository access or objects keep the candidate on hold.
 Use the native `bin/fm-spawn.sh` scout path with a new ID and an explicit Codex GPT or Claude model from a provider absent from the builder's complete dispatch lineage.
+Where `config/crew-dispatch.json` exists, that launch also needs [the task's dispatch record](#per-launch-overrides-and-inherited-defaults), so run `bin/fm-dispatch-resolve.sh` on the prepared brief first, and pass `--dispatch-override <reason>` when the recorded selection is not an eligible reviewer.
+A refute scout runs in one dispatch, so relaunching it is refused; prepare a new scout ID instead.
 Each native dispatch appends its identity to the lineage, including on a harness switch or relaunch.
 Missing, implicit, ambiguous or unavailable model history leaves the candidate on hold, as does a lineage that has used both supported providers.
 The reviewer receives the approved criteria and pinned commits and tries to refute completion.
 After reading the scout's report, the supervisor records its exact verdict with `bin/fm-review-verdict.sh refute <task> <scout> <reviewed-head>` and verifies with `bin/fm-done-check.sh accept <task> <pr-url>`.
+Recording the same review again leaves the journal unchanged, so a retry cannot displace a later decision; [`bin/fm-review-verdict.sh`](../bin/fm-review-verdict.sh) owns what counts as a new review.
 The acceptance record binds the task incarnation, policy, base, exact candidate event, executed evidence and latest qualifying review.
 Supervisor-recorded operational pauses, review parks and overdue annotations preserve that event when their append provenance is present.
 A newer worker event, a new head, a change to the live base commit, a policy change or a new task incarnation requires fresh review and acceptance.

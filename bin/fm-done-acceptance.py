@@ -214,6 +214,10 @@ def builder_lineage(meta):
     return builders
 
 
+def same_project(first, second):
+    return bool(first and second) and Path(first).resolve() == Path(second).resolve()
+
+
 def independent_model(identity, harness, model):
     return (harness in MODEL and matches(MODEL[harness], model)
             and all(harness != builder["harness"] for builder in identity["builders"]))
@@ -269,9 +273,11 @@ def forge_check(identity, policy):
     )
     require(isinstance(facts, list) and len(facts) == 8, "GitHub PR facts are incomplete")
     url, repo, branch, fork, source, head, state, draft = facts
-    require(url == identity["pr"] and repo == policy["repo"] and fork == policy["repo"]
-            and branch == identity["base_branch"] and source == identity["branch"],
-            "GitHub repository, task branch or target branch does not match the pinned candidate")
+    # GitHub repository names ignore letter case, as the candidate URL check does.
+    require(all(matches(REPO, name) and name.lower() == policy["repo"].lower() for name in (repo, fork)),
+            "GitHub repository does not match the pinned candidate")
+    require(url == identity["pr"] and branch == identity["base_branch"] and source == identity["branch"],
+            "GitHub PR, task branch or target branch does not match the pinned candidate")
     require(head == identity["head"], "live GitHub head differs from the pinned candidate")
     require(state == "open" and draft is False, "candidate PR must be open and ready for review")
     target = github_facts(f"/repos/{repo}/branches/{quote(branch, safe='')}", "[.name,.commit.sha]")
@@ -487,6 +493,21 @@ def python_signals(data, path):
     return None
 
 
+SHELL_QUOTED = re.compile(r"""\\.|'[^']*'|"(?:\\.|[^"\\])*\"""")
+
+
+def shell_commands(lines):
+    # Separators inside a complete quoted argument are data. A line whose quotes
+    # do not pair starts text this line reader cannot follow, so from there every
+    # separator counts, as it does where quoted text holds or becomes code.
+    paired = True
+    for line in lines:
+        paired = paired and not re.search(r"['\"]", SHELL_QUOTED.sub("", line))
+        if paired and not re.search(r"\$'|[$<>]\(|`|\b(?:eval|trap)\b|\s-\w*c\s", line):
+            line = SHELL_QUOTED.sub(lambda quoted: re.sub(r"[;&|]", " ", quoted[0]), line)
+        yield re.split(r"[;&|]+\s*", line)
+
+
 def shell_signals(data, _path):
     lines = []
     heredoc = None
@@ -504,10 +525,9 @@ def shell_signals(data, _path):
         if line and not line.startswith("#"):
             lines.append(line)
     in_function = False
-    for index, line in enumerate(lines):
+    for index, (line, parts) in enumerate(zip(lines, shell_commands(lines))):
         if re.match(r"(?:function\s+[\w-]+(?:\s*\(\s*\))?|[\w-]+\s*\(\s*\))\s*\{", line):
             in_function = not line.endswith("}")
-        parts = re.split(r"[;&|]+\s*", line)
         for part_index, part in enumerate(parts):
             if re.match(r"(?:skip[\w-]*\b|exit\s+77\b)", part):
                 return "added skip"
@@ -822,12 +842,31 @@ def spawn_review(reviewer, kind, relaunch, harness, model, project, brief):
             "refute dispatch requires a fresh native scout ID")
     require(independent_model(ship, harness, model),
             "reviewer must dispatch with an explicit provider absent from the builder lineage")
-    require(project == ship["project"] and digest(private_bytes(Path(brief))) == ticket["brief"],
+    require(same_project(project, ship["project"]) and digest(private_bytes(Path(brief))) == ticket["brief"],
             "refute dispatch project or brief does not match its prepared context")
     current, policy = context(ship["task"], ship["pr"])
     require(current == ship, "refute dispatch candidate has changed")
     forge_check(current, policy)
     print(digest(record))
+
+
+def journal_rows():
+    for line in private_bytes(JOURNAL).splitlines():
+        if not line:
+            continue
+        row = decode(line)
+        require(isinstance(row, dict) and isinstance(row.get("pr"), str)
+                and matches(SHA, row.get("head")) and row.get("verdict") in ("merge", "fix"),
+                "review verdict journal contains an invalid row")
+        yield row
+
+
+def review_event(row):
+    # What a recorded review stands for, without when it was recorded. A merge
+    # counts again only on new evidence. A fix also counts again when the scout
+    # reports it again, so a repeated blocker is never dropped.
+    ignored = ("recorded_ns", "event") if row["verdict"] == "merge" else ("recorded_ns",)
+    return {**row, "refute": {key: value for key, value in row["refute"].items() if key not in ignored}}
 
 
 def review_result(task, reviewer, head):
@@ -838,34 +877,36 @@ def review_result(task, reviewer, head):
             and ticket["reviewer"] == reviewer and reviewer != task,
             "review did not sign off on this exact task, base and head")
     meta = metadata(reviewer)
-    require(meta.get("kind") == "scout" and meta.get("spawn_gen") and meta.get("project") == identity["project"]
+    require(meta.get("kind") == "scout" and meta.get("spawn_gen")
+            and same_project(meta.get("project"), identity["project"])
             and meta.get("refute_context") == digest(ticket_bytes),
             "review lacks a matching fresh native scout dispatch")
     model, harness = meta.get("model"), meta.get("harness")
     require(independent_model(identity, harness, model),
             "reviewer model is not independent of the builder")
-    note, _ = done_event(reviewer)
+    note, event = done_event(reviewer)
     verdict = re.fullmatch(rf"Refute {identity['base']} {identity['head']} (merge|fix)", note)
     require(verdict, "scout did not report a verdict for the exact pinned base and head")
     report = private_bytes(DATA / reviewer / "report.md", private=False)
     require(report.strip(), "independent review report is empty")
-    print(json_bytes({
+    row = {
         "pr": identity["pr"], "head": head, "reviewer": reviewer, "verdict": verdict[1],
         "refute": {"candidate": identity, "model": model, "harness": harness,
                    "generation": meta["spawn_gen"], "ticket": digest(ticket_bytes), "report": digest(report),
-                   "recorded_ns": time.time_ns()},
-    }).decode().strip())
+                   "event": event, "recorded_ns": time.time_ns()},
+    }
+    # fm-review-verdict.sh holds the writer lock from this read through its
+    # append, so a retry keeps the first row's identity, time and position.
+    recorded = list(journal_rows()) if os.path.lexists(JOURNAL) else []
+    if any(isinstance(old.get("refute"), dict) and review_event(old) == review_event(row) for old in recorded):
+        print("review already recorded; the journal is unchanged", file=sys.stderr)
+        return
+    print(json_bytes(row).decode().strip())
 
 
 def passing_review(identity):
     latest = None
-    for line in private_bytes(JOURNAL).splitlines():
-        if not line:
-            continue
-        row = decode(line)
-        require(isinstance(row, dict) and isinstance(row.get("pr"), str)
-                and matches(SHA, row.get("head")) and row.get("verdict") in ("merge", "fix"),
-                "review verdict journal contains an invalid row")
+    for row in journal_rows():
         if row.get("pr") != identity["pr"] or row.get("head") != identity["head"]:
             continue
         if "refute" not in row:

@@ -2098,6 +2098,23 @@ test_sandbox_relaunch_retains_policy_and_refuses_switch_before_stop() {
   pass 'fm-control relaunch: sandbox policy survives replacement and refuses a harness switch before stop'
 }
 
+test_refute_review_relaunch_refuses_before_stop() {
+  local dir out rc
+  dir=$(new_case refute rl45)
+  add_ship_task "$dir" rl45 claude
+  sed -i.bak '/^mode=/d; s/^kind=.*/kind=scout/' "$dir/home/state/rl45.meta"
+  printf '{}\n' > "$dir/home/state/rl45.refute.json"
+  out=$(run_control "$dir" rl45 relaunch --note 'resume review'); rc=$?
+  expect_code 1 "$rc" "a refute review must not be relaunched"
+  assert_equals claude "$(cat "$dir/fake/command")" "a refused review relaunch must not stop the reviewer"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused review relaunch must send nothing"
+  assert_contains "$out" "one fresh dispatch" "the refusal should say a review is never relaunched"
+  rm "$dir/home/state/rl45.refute.json"
+  out=$(run_control "$dir" rl45 relaunch --note 'ordinary scout'); rc=$?
+  expect_code 0 "$rc" "an ordinary scout still relaunches"$'\n'"$out"
+  pass "fm-control relaunch: a refute review refuses before its reviewer is stopped"
+}
+
 test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
   local dir home id brief launch out mode rule
   for mode in no-mistakes direct-PR local-only; do
@@ -3567,6 +3584,7 @@ test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_spawn_relaunch_of_promoted_scout_uses_the_recorded_branch
 test_sandbox_relaunch_retains_policy_and_refuses_switch_before_stop
+test_refute_review_relaunch_refuses_before_stop
 test_promoted_scout_relaunch_receives_the_current_delivery_contract
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
