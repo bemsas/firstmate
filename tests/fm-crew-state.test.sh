@@ -2721,6 +2721,96 @@ SH
   pass "protected completed runs require the same full head as the accepted candidate"
 }
 
+# Every supported way an attributed run reads done, with the run at the accepted
+# head and then at a descendant of it (a pipeline fix commit past the candidate).
+test_protected_run_paths_match_accepted_head() {
+  reset_fakes
+  local d wt base next path head run short out expected_source url=https://github.com/o/r/pull/1
+  d=$(new_case accepted-run-paths)
+  wt=$d/wt
+  make_repo_on_branch "$wt" fm/candidate
+  base=$FM_FAKE_RUN_HEAD
+  next=$(git -C "$wt" commit-tree -p "$base" -m 'pipeline fix past the candidate' "$base^{tree}")
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/config/done-acceptance"
+  cat > "$d/fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */fm-done-acceptance.py ]]; then
+  [ "$#" = 5 ] && [ "$2" = passing ] && [ "$5" = "$FM_FIXTURE_ACCEPTED_HEAD" ]
+  exit
+fi
+exec "$FM_FIXTURE_REAL_PYTHON" "$@"
+SH
+  chmod +x "$d/fakebin/python3"
+  local FM_FIXTURE_REAL_PYTHON
+  FM_FIXTURE_REAL_PYTHON=$(command -v python3)
+  export FM_FIXTURE_REAL_PYTHON
+  arm_idle_record "$d/state" candidate
+  printf 'done: PR %s checks green head %s\n' "$url" "$base" > "$d/state/candidate.status"
+
+  for path in captured legacy-mode direct-pr checks-green monitoring coarse coarse-monitoring superseded; do
+    for head in "$base" "$next"; do
+      short=$(git -C "$wt" rev-parse --short=8 "$head")
+      fm_write_meta "$d/state/candidate.meta" "window=fm:fm-candidate" "kind=ship" \
+        "mode=no-mistakes" "worktree=$wt" "project=$wt" "harness=claude"
+      FM_FAKE_RUNS_LIST="" FM_FAKE_CI_LOGS="" expected_source=run-step
+      run=$(FM_FAKE_RUN_HEAD=$head captured_axi_status completed fm/candidate 01RUN |
+        sed "s|^  head: .*|  head: $short|; s|https://github.com/[^ \"]*/pull/[0-9]*|$url|")
+      case "$path" in
+        captured) FM_FAKE_AXI_STATUS=$run ;;
+        legacy-mode|direct-pr)
+          sed "s/^mode=.*/mode=direct-PR/" "$d/state/candidate.meta" > "$d/meta"
+          [ "$path" = direct-pr ] || sed '/^mode=/d' "$d/state/candidate.meta" > "$d/meta"
+          mv "$d/meta" "$d/state/candidate.meta"
+          FM_FAKE_AXI_STATUS=$run ;;
+        checks-green|monitoring)
+          FM_FAKE_AXI_STATUS=$(FM_FAKE_RUN_HEAD=$head run_ci_monitoring fm/candidate |
+            sed "s|/pull/2|/pull/1|")
+          if [ "$path" = checks-green ]; then
+            FM_FAKE_CI_LOGS='all CI checks passed'
+          else
+            expected_source=status-log
+          fi ;;
+        coarse|coarse-monitoring)
+          FM_FAKE_AXI_STATUS=$(run_running fm/other-crew)
+          FM_FAKE_RUNS_LIST="  completed  fm/candidate $short  2026-08-27 15:20  $url"
+          if [ "$path" = coarse-monitoring ]; then
+            FM_FAKE_RUNS_LIST="  running    fm/candidate $short  2026-08-27 15:20"
+            expected_source=status-log
+          fi ;;
+        superseded)
+          # The earlier failed run sat on the candidate in both readings; only
+          # the run that replaced it says which commit completed.
+          FM_FAKE_AXI_STATUS=$(FM_FAKE_RUN_HEAD=$base run_failed fm/candidate)
+          FM_FAKE_RUNS_LIST="  completed  fm/candidate $short  2026-08-27 15:20  $url
+  failed     fm/candidate ${base:0:8}  2026-08-27 14:20" ;;
+      esac
+      out=$(FM_HOME="$d" FM_CREW_STATE_NO_FORGE=1 FM_FIXTURE_ACCEPTED_HEAD="$base" run_crew_state "$d" candidate)
+      if [ "$head" = "$base" ]; then
+        assert_contains "$out" "state: done" "$path: the accepted head stays done"
+        assert_contains "$out" "source: $expected_source" "$path: the accepted head keeps its source"
+      else
+        assert_contains "$out" "state: blocked" "$path: a different run head holds"
+        assert_contains "$out" "source: run-step" "$path: the hold names the run"
+        assert_contains "$out" "run head $next does not match the accepted candidate $base" \
+          "$path: the hold names both heads"
+      fi
+    done
+  done
+
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_AXI_STATUS=$(FM_FAKE_RUN_HEAD=$base captured_axi_status completed fm/candidate 01RUN |
+    sed "s|^  head: .*|  head: ${next:0:8}|; s|https://github.com/[^ \"]*/pull/[0-9]*|$url|")
+  out=$(FM_HOME="$d" FM_CREW_STATE_NO_FORGE=1 FM_FIXTURE_ACCEPTED_HEAD="$base" run_crew_state "$d" candidate)
+  assert_contains "$out" "run head (unavailable) does not match" "a record that contradicts itself names no head"
+
+  printf 'done: PR %s checks green head %s\n' "$url" "$next" > "$d/state/candidate.status"
+  FM_FAKE_AXI_STATUS=$(FM_FAKE_RUN_HEAD=$next run_ci_monitoring fm/candidate | sed "s|/pull/2|/pull/1|")
+  out=$(FM_HOME="$d" FM_CREW_STATE_NO_FORGE=1 FM_FIXTURE_ACCEPTED_HEAD="$base" run_crew_state "$d" candidate)
+  assert_contains "$out" "awaiting supervisor acceptance" "an unaccepted candidate still waits for acceptance"
+  pass "every supported completed-run path keeps an accepted head done and holds a different one"
+}
+
 test_moved_remote_branch_without_named_head_is_blocked() {
   reset_fakes
   local d main_sha fix_sha out
@@ -6857,6 +6947,7 @@ test_captured_completed_history() {
 
 if [ "${1:-}" = --accepted-run-head ]; then
   test_protected_run_matches_accepted_head
+  test_protected_run_paths_match_accepted_head
   exit
 fi
 
@@ -6947,6 +7038,7 @@ test_merged_pr_reads_done_under_captured_meta
 test_no_mistakes_prevalidation_done_stays_done
 test_ship_candidate_does_not_read_done
 test_protected_run_matches_accepted_head
+test_protected_run_paths_match_accepted_head
 test_moved_remote_branch_without_named_head_is_blocked
 test_external_review_done_reads_ready
 test_no_run_busy_pane

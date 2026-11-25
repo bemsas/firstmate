@@ -515,9 +515,16 @@ def shell_signals(data, _path):
                 index == 0 or index < len(lines) - 1 or any(parts[part_index + 1:])
             ):
                 return "added early-exit marker"
-            if re.fullmatch(r"(?:assert(?:_true)?\s+(?:true|1)|test\s+true)(?:\s+#.*)?\s*", part):
+            # A literal stays trivial with a message after it. A comparison
+            # operator makes it an operand instead.
+            if re.match(
+                r"(?:assert(?:_true)?\s+(?:true|1)|test\s+true)(?:\s|$)"
+                r"(?!\s*(['\"]?)(?:[=!]?=|=~|\\?[<>]|-(?:eq|ne|lt|le|gt|ge|nt|ot|ef|a))\1\s)", part,
+            ):
                 return "added trivial assertion"
-            if re.match(r"(?:test\s+|\[\[?\s+)([\w.-]+)\s+(?:=|==|-eq)\s+\1(?:\s|$)", part):
+            if re.match(
+                r"(?:(?:test|assert(?:_true)?)\s+|\[\[?\s+)([\w.-]+)\s+(?:=|==|-eq)\s+\1(?:\s|$)", part,
+            ):
                 return "added trivial assertion"
             if re.match(r"assert_(?:equals|eq)\s+([\w.-]+)\s+\1(?:\s|$)", part):
                 return "added trivial assertion"
@@ -527,16 +534,21 @@ def shell_signals(data, _path):
 
 
 def js_signals(data, _path):
-    # Consume comments and string tokens before reaching code spelled inside
-    # them. Keep the literal tokens available to the assertion pattern.
+    # Consume comments, strings, regular expressions and template text before
+    # reaching code spelled inside them. Template interpolations hold real code,
+    # so they are scanned like the rest. Keep the string tokens available to the
+    # assertion pattern.
     comment = r"//[^\r\n]*|/\*[\s\S]*?\*/"
     quoted = r"'(?:\\[\s\S]|[^'\\\r\n])*'" r'|"(?:\\[\s\S]|[^"\\\r\n])*"'
-    template = r"`(?:\\[\s\S]|[^\\`$]|\$(?!\{))*`"
+    regex = (
+        r"(?:[(,=:\[&|?;]|=>|\breturn\b)\s*"
+        r"/(?![*/])(?:\\.|\[(?:\\.|[^\]\\\r\n])*\]|[^/\\\[\r\n])+/"
+    )
     gap = rf"(?:\s|{comment})*"
     dot = rf"{gap}\.{gap}"
     modifier = rf"(?:(?:concurrent|sequential){dot})?(?:skip|skipIf|runIf|todo|only)"
     skip = (
-        rf"\b(?:describe|it|test){dot}{modifier}(?:{dot}each)?{gap}\("
+        rf"\b(?:describe|it|test){dot}{modifier}(?:{gap}\(|{dot}each{gap}[(`])"
         rf"|\b(?:xdescribe|xit|xtest|fdescribe|fit){gap}\("
     )
     literal = rf"true|false|null|-?\d+(?:\.\d+)?|{quoted}"
@@ -544,11 +556,44 @@ def js_signals(data, _path):
         rf"\bexpect{gap}\({gap}(?P<expected>{literal}){gap}\){dot}"
         rf"to(?:Be|Equal|StrictEqual){gap}\({gap}(?P=expected){gap}\)"
     )
-    signals = rf"{comment}|{quoted}|{template}|(?P<skip>{skip})|(?P<trivial>{expect})"
-    for match in re.finditer(signals, data.decode()):
-        if match.group("skip"):
+    signals = re.compile(
+        rf"{comment}|{quoted}|{regex}|(?P<skip>{skip})|(?P<trivial>{expect})|(?P<template>[`{{}}])"
+    )
+    template_text = re.compile(r"(?:\\[\s\S]|[^\\`$]|\$(?!\{))*(?P<end>`|\$\{|)")
+    text = data.decode()
+    position = 0
+    interpolations = []  # Open braces inside each enclosing interpolation.
+    while True:
+        match = signals.search(text, position)
+        if match is None:
+            if not interpolations:
+                return None
+            break
+        position = match.end()
+        if match["skip"]:
             return "added skip"
-        if match.group("trivial"):
+        if match["trivial"]:
+            return "added trivial assertion"
+        token = match["template"]
+        if token == "{" and interpolations:
+            interpolations[-1] += 1
+        if token == "}" and interpolations:
+            interpolations[-1] -= 1
+        if token == "`" or (token == "}" and interpolations and interpolations[-1] < 0):
+            if token == "}":
+                interpolations.pop()
+            part = template_text.match(text, position)
+            position = part.end()
+            if not part["end"]:
+                break
+            if part["end"] == "${":
+                interpolations.append(0)
+    # An unpaired backtick or brace means this scan misread a template. Check the
+    # whole file as code rather than excluding part of it.
+    for match in re.finditer(rf"{comment}|{quoted}|(?P<skip>{skip})|(?P<trivial>{expect})", text):
+        if match["skip"]:
+            return "added skip"
+        if match["trivial"]:
             return "added trivial assertion"
     return None
 

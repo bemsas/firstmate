@@ -1155,7 +1155,9 @@ The worker's ready report submits a candidate with `head <full SHA>` after the U
 Worker completion and legacy checklist results can still be inspected.
 Current-state reads, PR registration and the merge path require acceptance for the candidate.
 The no-mistakes pre-validation handoff can start its ordinary pipeline while current state still shows a candidate awaiting acceptance.
-A protected no-mistakes run reports completed delivery only when its full run head matches the accepted candidate.
+A protected task with an attributed no-mistakes run reports completed delivery only when that run's full head matches the accepted candidate, including a run still monitoring the PR and a ledger run that replaced an earlier failure.
+The run record supplies the full head; where only the abbreviated ledger row answers, it must name exactly one commit in the task copy.
+A different or unavailable run head is reported as blocked with both heads.
 A terminal publishing run without a PR identity remains blocked.
 When the pipeline explicitly skips publication and there is no current PR candidate, it reports a pause and explains what was skipped.
 Registration and merge also check the live PR identity and read the target branch tip directly.
@@ -1171,8 +1173,8 @@ Any change to an existing recognized or declared test entry is held, including m
 Declare additional test and runner paths in the policy where repository conventions differ or make classification ambiguous.
 To add a new test, pin the supervisor-approved bytes in optional `new_tests` (a map from relative path to SHA-256), or use the bug regression pin below.
 New Python tests check common collection overrides, returns in the test body, qualified pytest and unittest skip markers, and simple literal assertions.
-New shell tests check common skip markers, early top-level exits, and literal comparisons.
-New JavaScript and TypeScript tests check common skip, focus and todo calls and matching literal expectations outside comments, quoted strings and plain template strings.
+New shell tests check common skip markers, early top-level exits, literal assertions with or without a message, and literal comparisons.
+New JavaScript and TypeScript tests check common skip, focus and todo calls and matching literal expectations outside comments, quoted strings, regular expressions and template text, including inside template interpolations.
 New Go tests check common skip calls.
 These static checks recognize specific patterns.
 The supervisor and independent reviewer assess the pinned test's behavior.

@@ -309,6 +309,19 @@ emit() {  # <state> <source> [detail]
   exit 0
 }
 
+# Hold a protected delivery unless its attributed run ended at the same full head
+# the supervisor accepted. Callers have already established that acceptance.
+require_candidate_run_head() {  # <full run head>
+  local note pr
+  note=$(status_line_note "$LOG_LINE")
+  pr=$(fm_dod_pr_url_from_done_note "$note") || pr=
+  if [ "$(meta_value mode)" != local-only ] &&
+    fm_dod_acceptance_required "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$ID" "$pr" &&
+    fm_dod_candidate_fields "$note" && [ "$1" != "$FM_DOD_CANDIDATE_HEAD" ]; then
+    emit blocked run-step "run head ${1:-(unavailable)} does not match the accepted candidate $FM_DOD_CANDIDATE_HEAD"
+  fi
+}
+
 emit_run() {  # <state> <detail> [pr] [full run head]
   local detail=$2 pr=${3:-${RUN_PR:-}} mode candidate=''
   if [ "$1" = "done" ] && [ "$KIND" = ship ]; then
@@ -332,9 +345,7 @@ emit_run() {  # <state> <detail> [pr] [full run head]
           "$LOG_LINE" "$STATE" "$ID" "$META" >/dev/null; }; then
         emit blocked run-step "ship delivery awaits supervisor acceptance for its exact head"
       fi
-      if [ "$mode" = no-mistakes ] && [ "${4:-}" != "$FM_DOD_CANDIDATE_HEAD" ]; then
-        emit blocked run-step "completed run head is unavailable or does not match the accepted candidate"
-      fi
+      require_candidate_run_head "${4:-}"
     fi
   fi
   case "$1" in
@@ -400,9 +411,10 @@ fi
 # which runs when a ready report is registered, and on each watcher sweep when
 # config/pr-register-scan is on, refreshes the same copy before it refuses, so
 # a read after it sees the fetched head.
-emit_ship_status_done() {  # [extra-detail]
+emit_ship_status_done() {  # [extra-detail] [full run head]
   local extra=${1:-} reason
   if reason=$(fm_dod_accept_ship_done "$KIND" "$(meta_value mode)" "$WT" "$(meta_value project)" "$LOG_LINE" "$STATE" "$ID" "$META"); then
+    [ "$#" -lt 2 ] || require_candidate_run_head "$2"
     emit "done" status-log "$(status_line_note "$LOG_LINE")${extra:+${SEP}$extra}"
   fi
   emit blocked status-log "$reason"
@@ -1174,6 +1186,28 @@ nm_run_head_matches_worktree() {
   fm_nm_head_matches_worktree "$WT" "$run_head"
 }
 
+# Full head of the run in $RUN_OUT. The CLI abbreviates `head` and states the
+# whole commit in `head_sha`; a record without `head_sha` counts only when its
+# `head` is already full. Empty when the two disagree or neither is full.
+nm_run_full_head() {
+  local head full
+  head=$(strip_quotes "$(nm_field head)")
+  full=$(strip_quotes "$(nm_field head_sha)")
+  [ -n "$full" ] || full=$head
+  fm_pr_head_valid "$full" || return 0
+  case "$full" in "$head"*) printf '%s' "$full" ;; esac
+}
+
+# Full head of the newest row for this branch in the fetched ledger. The ledger
+# may abbreviate, so the row must name exactly one commit in this copy.
+nm_ledger_full_head() {
+  local row sha
+  row=$(fm_nm_runs_newest_for_branch "$CREW_BRANCH" "$RUNS_LIST")
+  row=${row#*|}
+  sha=${row%%|*}
+  [ -z "$sha" ] || fm_nm_resolve_commit "$WT" "$sha"
+}
+
 HAVE_RUN=0
 # RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
 # $RUN_OUT is real `axi status` TOON with step/gate detail (including a
@@ -1372,7 +1406,11 @@ if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATE=working
   RUN_DETAIL=""
   RUN_PR=""
-  RUN_HEAD=""
+  if [ "$RUN_SOURCE" = coarse ]; then
+    RUN_FULL_HEAD=$(nm_ledger_full_head)
+  else
+    RUN_FULL_HEAD=$(nm_run_full_head)
+  fi
   RUN_PUBLICATION_SKIPPED=0
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
@@ -1504,7 +1542,7 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
-      emit_ship_status_done "run still monitoring PR"
+      emit_ship_status_done "run still monitoring PR" "$RUN_FULL_HEAD"
     fi
     [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
     if [ "$RUN_STATUS" = fixing ]; then
@@ -1515,7 +1553,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       CI_LOG_STATE=not-ready
     fi
     if [ "$CI_LOG_STATE" != not-ready ] && [ "$CI_LOG_STATE" != no-checks ]; then
-      emit_ship_status_done "run still monitoring PR"
+      emit_ship_status_done "run still monitoring PR" "$RUN_FULL_HEAD"
     fi
   fi
 
@@ -1614,7 +1652,7 @@ if [ "$HAVE_RUN" = 1 ]; then
           [ -z "$SELECTED_RUN_ID" ] \
             || SUPERSEDED_DETAIL="$SUPERSEDED_DETAIL${SEP}earlier run: $SELECTED_RUN_ID"
           TERMINAL_PR=$NEWEST_PR
-          emit_run "done" "$SUPERSEDED_DETAIL" "$TERMINAL_PR"
+          emit_run "done" "$SUPERSEDED_DETAIL" "$TERMINAL_PR" "$(nm_ledger_full_head)"
           ;;
         failed)
           if [ "$NEWEST_ROW_AGREES" != 1 ]; then
@@ -1634,7 +1672,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     esac
   fi
 
-  emit_run "$RUN_STATE" "$RUN_DETAIL" "$TERMINAL_PR" "$RUN_HEAD"
+  emit_run "$RUN_STATE" "$RUN_DETAIL" "$TERMINAL_PR" "$RUN_FULL_HEAD"
 fi
 
 # --- fallback: no run attributed to this crew ------------------------------

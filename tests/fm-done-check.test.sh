@@ -759,6 +759,12 @@ exit 0
 FIXTURE
 [ "$(selected_value)" = "$expected_value" ] || exit 1
 test true = "$actual" || exit 1
+assert true = "$actual" "reports true"
+assert 1 -eq "$count" 'one record'
+assert_true 1 "==" "$count"
+assert true != "$actual"
+assert_true "$(ready)" "true when ready"
+assert_equals ready "$state" "ready state"
 exit 0
 SH
   cat > "$A_REPO/src/guide.test.js" <<'JS'
@@ -766,6 +772,14 @@ SH
 /* Documentation example: test.only("focused", check); */
 test("render test.skip() in the guide", () => expect(guide()).toContain("skip"));
 test(`render test.only() in the guide`, () => expect(guide()).toContain("only"));
+test(`render test.skip() for ${locale}`, () => expect(guide(locale)).toContain("skip"));
+it(`${name} documents it.only("x")`, () => expect(guide()).toMatch(/don't `it.only(x)`/));
+it(`lists ${rows.map((row) => `${row.id} test.todo(`)} // xit(`, () => expect(rows).toEqual(load({ a: { b: 1 } })));
+it(`costs \${amount} \` test.skip(a)`, () => expect(price(`${amount}`)).toBe(`$5`));
+test.each`
+  input | output
+  ${1}  | ${2}
+`("doubles $input with test.skip() prose", ({ input, output }) => expect(double(input)).toBe(output));
 JS
   pin_new_fixture_test tests/test_iterator.py
   pin_new_fixture_test tests/iterator.test.sh
@@ -787,6 +801,18 @@ focused-js|src/iterator.test.js|added skip|test.only("sample", check);
 focused-concurrent-js|src/iterator.test.js|added skip|test.concurrent.only("sample", check);
 commented-call-js|src/iterator.test.js|added skip|test /* note */ .skip("sample", check);
 literal-js|src/iterator.test.js|added trivial assertion|it("sample", () => expect("ready").toEqual("ready"));
+after-title-js|src/iterator.test.js|added skip|it(`a ${x} b`, check);\ntest.skip("later", check);\nit(`c`, check);
+nested-title-js|src/iterator.test.js|added skip|it(`a ${ids.map((id) => `${id}!`)} ${fmt({ a: { b: 1 } })}`, check);\nit.only("later", check);\nit(`c ${y}`, check);
+title-own-call-js|src/iterator.test.js|added skip|test.skip(`a ${x} b`, check);
+each-table-js|src/iterator.test.js|added skip|test.skip.each`\na\n${1}\n`("case $a", check);
+between-titles-js|src/iterator.test.js|added trivial assertion|it(`a ${x}`, () => expect(1).toBe(1));\nit(`b`, check);
+in-interpolation-js|src/iterator.test.js|added skip|it("a", () => use(`${it.only("b", check)}`));
+pattern-backtick-js|src/iterator.test.js|added skip|expect(text()).toMatch(/`/);\ntest.skip(`later ${x}`, check);
+unpaired-backtick-js|src/iterator.test.js|added skip|const node = <p>`</p>;\ntest.skip("later", check);\nit(`a ${x}`, check);
+message-shell|tests/iterator.test.sh|added trivial assertion|assert_true true "saves the record"
+message-separator-shell|tests/iterator.test.sh|added trivial assertion|assert 1 'saves; then reloads'
+message-variable-shell|tests/iterator.test.sh|added trivial assertion|assert true "$message" # note
+same-operands-shell|tests/iterator.test.sh|added trivial assertion|assert 1 -eq 1 "one record"
 literal-list-python|tests/test_iterator.py|added trivial assertion|assert [*read_rows(), 1]
 literal-dict-python|tests/test_iterator.py|added trivial assertion|assert {**read_counts(), "key": 1}
 literal-command-shell|tests/iterator.test.sh|added trivial assertion|test true # standalone check
@@ -1203,6 +1229,7 @@ test_acceptance_requires_complete_builder_lineage() {
 if [ "${1:-}" = --framework-paths ]; then
   test_acceptance_test_locations
   test_acceptance_framework_config
+  test_acceptance_pinned_test_signals
   exit
 fi
 
