@@ -89,7 +89,7 @@
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
 # An attached refute scout (docs/configuration.md "Done acceptance") also waits
-# until the review journal carries its current blocker.
+# while its status holds unresolved review evidence.
 # A scratch copy (kind=scout) and a --force run discard untracked content.
 # Treehouse's return resets with `git clean -fd`, which never deletes a nested
 # git repository, so the pool slot stays dirty and later checkouts skip it.
@@ -3783,7 +3783,8 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
-# A refute scout's status can be the only evidence of a blocker nobody recorded.
+# A refute scout's status can be the only evidence of an unrecorded blocker or a
+# withdrawn pass.
 # bin/fm-done-acceptance.py owns the rule. It is asked again once the endpoint is
 # gone and before the status is retired, so a late report cannot slip between.
 teardown_refute_review_settled() {

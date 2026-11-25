@@ -1209,9 +1209,13 @@ The first line of its report is the verdict with the exact base and head, and it
 After reading the scout's report, the supervisor records that verdict with `bin/fm-review-verdict.sh refute <task> <scout> <reviewed-head>` and verifies with `bin/fm-done-check.sh accept <task> <pr-url>`.
 The saved review counts only while the report and status of every scout dispatched for that candidate match the last row saved for that scout.
 A newer report or verdict displaces it as soon as the scout writes it, and current-state reads, registration and merge refuse until the supervisor records the current review and accepts again.
-Teardown without `--force` refuses to retire a scout whose current blocker is not its saved verdict while that candidate is current, so retirement cannot remove the only evidence of it.
+An announced `fix` stands until the scout reports another verdict, so a later progress line does not withdraw it.
+While that candidate is current, teardown without `--force` refuses to retire a scout whose blocker is not its saved verdict, or whose status no longer stands for its latest saved merge.
+Retirement therefore cannot remove the only evidence of a blocker or restore a withdrawn pass.
 That refusal keeps the scout's record and status, records no cleanup in the fleet ledger and leaves no pending backlog close.
-Record the blocker while the reviewed candidate, base and policy still match, or publish and report a fresh exact candidate against the current approved base and policy.
+Record the blocker while the reviewed candidate, base and policy still match; for a withdrawn merge, have the scout report that verdict again or record a replacement review.
+Publishing and reporting a fresh exact candidate against the current approved base and policy releases either hold.
+When the ship's record remains without its status, only its pending backlog close for the reviewed incarnation releases the scout.
 A scout missing its task record or status cannot be recorded.
 The latest review's report must still match, as must any status it keeps; another unsaved merge from such a scout is ignored.
 An unsaved blocker in its report or remaining status holds the candidate until a newer candidate event is reviewed.

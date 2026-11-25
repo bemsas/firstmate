@@ -1556,6 +1556,13 @@ assert_retired() {  # <label> <scout>
   assert_absent "$A_STATE/$2.meta" "$1: retired scout kept its record"
 }
 
+# The ship's pending-close record, written by its owning library.
+write_ship_close() {  # <spawn-gen>
+  accept_cmd bash -c '. "$1"; fm_backlog_close_marker_write "$2" "$3" "$4" "$5"' fixture \
+    "$ROOT/bin/fm-backlog-transition-lib.sh" "$A_STATE" "$A_ID" "$A_HOME/data" "$1" ||
+    fail "could not write the ship's pending close"
+}
+
 test_scout_retirement_keeps_unrecorded_blocker() {
   accept_reset
   printf 'value = 41\n' > "$A_REPO/app.py"
@@ -1584,9 +1591,27 @@ test_scout_retirement_keeps_unrecorded_blocker() {
   report_review judge merge
   assert_accepted "withdrawn announcement"
 
-  # Scouts with only recorded evidence retire and the acceptance stands.
+  # A progress line neither withdraws an announced blocker nor lets retirement
+  # restore a withdrawn pass.
+  report_review judge fix
+  printf 'working: rechecking the fixture\n' >> "$A_STATE/judge.status"
+  assert_retirement_held "blocker followed by progress" judge
+  report_review judge merge
+  assert_accepted "replaced announcement"
+  printf 'working: rechecking the fixture\n' >> "$A_STATE/umpire.status"
+  assert_retirement_held "withdrawn merge" umpire
+  report_review umpire merge
+  assert_accepted "merge reported again"
+  printf 'working: the evidence is unavailable\n' >> "$A_STATE/umpire.status"
+  assert_retirement_held "latest reviewer withdraws again" umpire
+  prepare_review_record relief 'Rechecked app.py. No blocker.' merge
+  record_review relief
+  accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL" >/dev/null || fail "could not accept the replacement review"
+
+  # Scouts with only recorded or replaced evidence retire and the acceptance stands.
   assert_retired "recorded merge" judge
-  assert_retired "latest recorded merge" umpire
+  assert_retired "replaced withdrawn merge" umpire
+  assert_retired "latest recorded merge" relief
   assert_accepted "retired scouts"
 
   # An unrecorded blocker for a superseded candidate holds nothing.
@@ -1600,6 +1625,19 @@ test_scout_retirement_keeps_unrecorded_blocker() {
   assert_grep "publish and report a fresh exact candidate against the current approved base and policy" \
     "$A/retire.out" "the hold should name a remedy that works after a policy re-pin"
   cat "$A/reviewed.policy" > "$A_POLICY"
+
+  # A ship record left without its status releases a scout only through the
+  # pending close that owns that incarnation's retirement.
+  prepare_review_record orphan 'Found a blocker in app.py.' fix
+  mv "$A_STATUS" "$A/ship.status"
+  retire_scout orphan && fail "a missing ship status alone released an unrecorded blocker"
+  assert_grep "no pending close proves" "$A/retire.out" "the hold should name the missing proof"
+  write_ship_close s999.200.300
+  retire_scout orphan && fail "another incarnation's pending close released an unrecorded blocker"
+  write_ship_close s100.200.300
+  assert_retired "retiring ship" orphan
+  rm "$A_STATE/$A_ID.backlog-close"
+  mv "$A/ship.status" "$A_STATUS"
   printf 'value = 42\n' > "$A_REPO/app.py"
   accept_candidate
   assert_retired "superseded candidate" late

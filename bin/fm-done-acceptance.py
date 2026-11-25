@@ -98,7 +98,7 @@ def metadata(task):
     return unique_fields(line.split("=", 1) for line in records if "=" in line)
 
 
-def done_event(task):
+def done_event(task, announcing=()):
     path = STATE / f"{task}.status"
     snapshot, info = private_bytes(path, private=False, with_stat=True)
     # Only home-recorded byte ranges can identify supervisor operational
@@ -126,6 +126,9 @@ def done_event(task):
         if not (operational.match(line) and any(start <= offset and end <= stop for start, stop in ranges)):
             retained.append((line, end))
         offset = end
+    if announcing:
+        retained = [(line, end) for line, end in retained
+                    if line.lstrip().startswith(b"done") and line.rstrip().endswith(announcing)]
     result = subprocess.check_output(
         ["bash", "-c",
          '. "$1"; scan=$(_fm_crew_status_event_scan); line=${scan##*$\'\\n\'}; '
@@ -923,13 +926,19 @@ def reviewer_record(identity, reviewer, ticket, row):
     # its last saved row stands for under the retry rule in review_event.
     status, meta = (STATE / f"{reviewer}.{record}" for record in ("status", "meta"))
     note, event = done_event(reviewer) if os.path.lexists(status) else ("", "")
+    pins = f"Refute {identity['base']} {identity['head']} "
+    if note not in (pins + "merge", pins + "fix") and os.path.lexists(status):
+        # Only another verdict replaces an announced blocker.
+        announced = done_event(reviewer, ((pins + "merge").encode(), (pins + "fix").encode()))
+        if announced[0] == pins + "fix":
+            note, event = announced
     path = DATA / reviewer / "report.md"
     report = private_bytes(path, private=False) if os.path.lexists(path) else b""
     title = report.partition(b"\n")[0].decode(errors="replace")
     if row is None:
         return note, title, False, False
     refute = row["refute"]
-    verdict = f"Refute {identity['base']} {identity['head']} {row['verdict']}"
+    verdict = pins + row["verdict"]
     same_report = title == verdict and refute["report"] == digest(report) and refute["ticket"] == ticket
     same_event = (note == verdict and (row["verdict"] == "merge" or refute["event"] == event)
                   and (not os.path.lexists(meta)
@@ -940,8 +949,8 @@ def reviewer_record(identity, reviewer, ticket, row):
 def require_saved_reports(identity, saved, latest):
     # A native report displaces the saved verdict when it is written, not when a
     # supervisor records it. Compare each reviewer of this candidate with its own
-    # last saved row. A retired scout keeps its ticket and report;
-    # retire_review keeps a status that is the only evidence of a blocker.
+    # last saved row. A retired scout keeps its ticket and report; retire_review
+    # keeps a status that withdraws the saved pass or announces an unsaved blocker.
     tickets = {}
     for path in STATE.glob("*.refute.json"):
         data = private_bytes(path)
@@ -999,8 +1008,8 @@ def passing_review(identity):
 
 def retire_review(reviewer):
     # Teardown removes the scout's status, which can be the only evidence of a
-    # blocker nobody recorded. Hold retirement until the journal carries it. A
-    # candidate whose ship retired or reported again can no longer be accepted.
+    # blocker nobody recorded or of a withdrawn pass. Hold retirement while it is.
+    # A candidate whose ship retired or reported again can no longer be accepted.
     data = private_bytes(ticket_for(reviewer))
     ticket = decode(data)
     identity = ticket["candidate"]
@@ -1008,10 +1017,18 @@ def retire_review(reviewer):
     require(ticket["reviewer"] == reviewer, "review dispatch record names another scout")
     if not os.path.lexists(POLICY_DIR) or not os.path.lexists(STATE / f"{task}.meta"):
         return
-    if (done_event(task)[1] != identity["candidate_event"]
-            or metadata(task).get("spawn_gen") != identity["generation"]):
+    if metadata(task).get("spawn_gen") != identity["generation"]:
         return
-    saved = saved_reviews(identity)[1] if os.path.lexists(JOURNAL) else {}
+    if not os.path.lexists(STATE / f"{task}.status"):
+        marker = STATE / f"{task}.backlog-close"
+        require(os.path.lexists(marker) and f"spawn_gen={identity['generation']}"
+                in private_bytes(marker, private=False).decode().splitlines(),
+                f"{task}.status is missing and no pending close proves that the reviewed task is retiring; "
+                f"finish retiring {task} or publish and report a fresh exact candidate, then retire the scout")
+        return
+    if done_event(task)[1] != identity["candidate_event"]:
+        return
+    latest, saved = saved_reviews(identity) if os.path.lexists(JOURNAL) else (None, {})
     note, title, same_report, same_event = reviewer_record(identity, reviewer, digest(data), saved.get(reviewer))
     fix = f"Refute {identity['base']} {identity['head']} fix"
     require((same_report or title != fix) and (same_event or note != fix),
@@ -1019,6 +1036,11 @@ def retire_review(reviewer):
             f"fm-review-verdict.sh refute {task} {reviewer} {identity['head']} while the reviewed candidate, "
             "base and policy still match, or publish and report a fresh exact candidate against the current "
             "approved base and policy, then retire the scout")
+    passed = latest and latest["verdict"] == "merge" and latest["reviewer"] == reviewer
+    require(same_event or not (passed and os.path.lexists(STATE / f"{reviewer}.status")),
+            f"{reviewer}'s status no longer stands for its saved merge for {task}; have it report that verdict "
+            "again, record a replacement review, or publish and report a fresh exact candidate against the "
+            "current approved base and policy, then retire the scout")
 
 
 def main():
