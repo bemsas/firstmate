@@ -89,7 +89,7 @@
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
 # An attached refute scout (docs/configuration.md "Done acceptance") also waits
-# while its status holds unresolved review evidence.
+# while its report or status holds unresolved review evidence.
 # A scratch copy (kind=scout) and a --force run discard untracked content.
 # Treehouse's return resets with `git clean -fd`, which never deletes a nested
 # git repository, so the pool slot stays dirty and later checkouts skip it.
