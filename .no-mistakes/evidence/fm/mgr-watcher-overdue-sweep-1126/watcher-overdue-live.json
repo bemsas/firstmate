@@ -1,0 +1,28 @@
+{
+  "scenarios": [
+    {
+      "name": "repeated recovery",
+      "returncode": 0,
+      "stdout": "check: rearm-resurface",
+      "stderr": "",
+      "outputs": {
+        "bosun": "bosun scheduled output",
+        "coo": "coo scheduled output",
+        "cfo": "cfo scheduled output"
+      },
+      "yield_marker": true
+    },
+    {
+      "name": "repeated process-event",
+      "returncode": 0,
+      "stdout": "check: process-event result captured: procevent:bosun:1 procevent:coo:1 procevent:cfo:1",
+      "stderr": "",
+      "outputs": {
+        "bosun": "bosun scheduled output",
+        "coo": "coo scheduled output",
+        "cfo": "cfo scheduled output"
+      },
+      "yield_marker": true
+    }
+  ]
+}
