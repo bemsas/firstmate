@@ -1017,6 +1017,7 @@ tests/fm-watch-wedge-cap.test.sh 374225
 tests/fm-watcher-lock.test.sh 72022
 tests/fm-worker-account-live-e2e.test.sh 3179
 tests/fm-worker-account.test.sh 37445
+tests/warp-review-eligibility-preview.test.sh 35520
 EOF
 }
 
@@ -1549,6 +1550,9 @@ families_for_changed_path() {
     tests/fm-backend-herdr-eventwait.test.py)
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
+      ;;
+    tests/warp-review-eligibility-preview.test.py)
+      printf '%s\n' "__script__:warp-review-eligibility-preview.test.sh"
       ;;
     tests/*.test.sh)
       # A single test file change selects only that script via basename family

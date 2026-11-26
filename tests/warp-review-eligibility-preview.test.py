@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """Synthetic fixture for bin/fm-review-eligibility-preview.sh.
 
-Every run builds throwaway homes, a twenty-pull-request forge answer served by a
-fake gh-axi that applies the preview's own jq program, and real markdown
-backlogs read through the installed tasks-axi. No network is used.
+Every run builds throwaway homes and a twenty-pull-request forge answer served by
+a fake gh-axi that applies the preview's own jq program. No network is used.
+
+Held tasks are read through the real bin/fm-tasks-axi.sh. Behind it, a direct run
+uses the synthetic tasks-axi below, so the file runs without any package install;
+FM_PREVIEW_TASKS_AXI=real runs the same assertions against the installed
+tasks-axi and bin/fm-captain-hold.sh instead, which keeps the synthetic one
+honest. A missing prerequisite is an error, never a skip.
 """
 
+import base64
 import hashlib
 import json
 import os
@@ -21,6 +27,7 @@ VERDICT = ROOT / "bin" / "fm-review-verdict.sh"
 TASKS = ROOT / "bin" / "fm-tasks-axi.sh"
 HOLD = ROOT / "bin" / "fm-captain-hold.sh"
 REPO = "acme/widget"
+REAL_TASKS = os.environ.get("FM_PREVIEW_TASKS_AXI") == "real"
 
 FAKE_GH = """#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$FM_FAKE_GH_LOG"
@@ -32,6 +39,34 @@ while [ "$#" -gt 0 ]; do
 done
 body=$(jq -r "$expr" "$FM_FAKE_GH_JSON") || exit 1
 printf 'api_response:\\n  body: "%s"\\n  truncated: false\\n' "$body"
+"""
+
+# The two reads the preview makes, answered in tasks-axi's shapes from a JSON
+# list stored as the home's backlog file.
+FAKE_TASKS = """#!/usr/bin/env python3
+import json
+import os
+import sys
+
+path = os.environ["TASKS_AXI_FILE"]
+tasks = []
+if os.path.exists(path):
+    with open(path) as stream:
+        tasks = json.load(stream)
+args = sys.argv[1:]
+if args[:3] == ["list", "--state", "held"]:
+    print(f"count: {len(tasks)}")
+    if tasks:
+        print(f"tasks[{len(tasks)}]{{id,state,kind,repo,title}}:")
+        for task in tasks:
+            print(f'  {task["id"]},queued,captain,"-",{json.dumps(task["title"])}')
+elif args[:1] == ["show"] and args[2:] == ["--full"]:
+    task = next(task for task in tasks if task["id"] == args[1])
+    print("task:")
+    for field in ("id", "title", "hold_reason", "hold_kind", "links", "body"):
+        print(f"  {field}: {json.dumps(task[field])}")
+else:
+    sys.exit(f"synthetic tasks-axi does not answer {args}")
 """
 
 EXPECTED = {
@@ -66,8 +101,14 @@ def url(number):
     return f"https://github.com/{REPO}/pull/{number}"
 
 
-@unittest.skipUnless(shutil.which("tasks-axi"), "tasks-axi not found")
 class PreviewTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        needed = ["bash", "git", "jq", "perl", "python3"] + (["tasks-axi"] if REAL_TASKS else [])
+        missing = [tool for tool in needed if not shutil.which(tool)]
+        if missing:
+            raise RuntimeError(f"missing test prerequisite: {', '.join(missing)}")
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -86,6 +127,9 @@ class PreviewTest(unittest.TestCase):
         bin_dir.mkdir()
         (bin_dir / "gh-axi").write_text(FAKE_GH)
         (bin_dir / "gh-axi").chmod(0o755)
+        if not REAL_TASKS:
+            (bin_dir / "tasks-axi").write_text(FAKE_TASKS)
+            (bin_dir / "tasks-axi").chmod(0o755)
         self.forge = self.tmp / "forge.json"
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith(("FM_", "TASKS_AXI_"))}
@@ -121,10 +165,23 @@ class PreviewTest(unittest.TestCase):
         (self.home / "state" / f"{reviewer}.refute.json").write_text(json.dumps(
             {"candidate": {"pr": url(number), "head": sha(number)}, "reviewer": reviewer}))
 
-    def hold(self, task, title, *extra, home=None):
+    def hold(self, task, title, review=None, home=None):
+        reason = "synthetic (choice)\npending"
+        if not REAL_TASKS:
+            body = "Captain hold set: 2026-01-01T00:00:00Z"
+            if review:
+                body += f"\nCaptain hold review: {review[0]} {review[1]}"
+            backlog = (home or self.home) / "data" / "backlog.md"
+            tasks = json.loads(backlog.read_text()) if backlog.exists() else []
+            tasks.append({"id": task, "title": title, "hold_kind": "captain", "body": body,
+                          "hold_reason": "fm-hold-v1:" + base64.b64encode(reason.encode()).decode(),
+                          "links": f"pr:{review[0]}" if review else "none"})
+            backlog.write_text(json.dumps(tasks))
+            return
+        extra = ["--require-review", *review] if review else []
         env = {**self.env, "FM_HOME": str(home or self.home)}
         subprocess.run([TASKS, "add", task, title, "--kind", "captain"], env=env, check=True, capture_output=True)
-        subprocess.run([HOLD, "hold", task, "--reason", "synthetic (choice)\npending", *extra],
+        subprocess.run([HOLD, "hold", task, "--reason", reason, *extra],
                        env=env, check=True, capture_output=True)
 
     def ready(self, number, head):
@@ -140,7 +197,7 @@ class PreviewTest(unittest.TestCase):
         self.hold("h105", f"Decide {url(105)}")
         self.record("t106", f"pr={url(106)}", status=["done: ready"])
         self.hold("t106", "Decide the owning task")
-        self.hold("h107", "Decide after review", "--require-review", url(107), sha("old-107"))
+        self.hold("h107", "Decide after review", review=(url(107), sha("old-107")))
         self.record("t108", f"pr={url(108)}", status=[
             "working [at=1]: fixing", "resolved [at=2] [key=x]: annotation"])
         self.record("t109", "branch=fm/task+109")
@@ -214,6 +271,7 @@ class PreviewTest(unittest.TestCase):
         self.assertIn("review dispatch record", self.rows()[112]["reason"])
         (self.home / "state" / "bad.refute.json").unlink()
         (self.mate / "data" / "backlog.md").unlink()
+        # A linked backlog is refused by bin/fm-tasks-axi.sh itself.
         (self.mate / "data" / "backlog.md").symlink_to(self.tmp / "nowhere")
         self.assertIn("held tasks", self.rows()[112]["reason"])
 
