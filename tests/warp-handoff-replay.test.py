@@ -54,6 +54,7 @@ class Fixture(unittest.TestCase):
         self.env = {
             name: value for name, value in os.environ.items()
             if not name.startswith(("FM_", "GIT_", "GH_", "GITHUB_"))
+            and name != "NO_MISTAKES_GATE"
         }
         self.env.update(
             HOME=str(self.tmp / "user"), PATH=f"{self.fake}{os.pathsep}{os.environ['PATH']}",
