@@ -1,0 +1,6 @@
+SCENARIO 1: latest ready report without head withdraws earlier fix evidence
+{"pr": "https://github.com/acme/widget/pull/110", "status": "verify-fix", "fix_evidence": null, "reason": "the head changed with no published fix evidence; verify the fix before re-review"}
+SCENARIO 2: unreadable owner/scout uncertainty stays scoped
+{"111": {"status": "unknown", "reason": "unreadable input: local evidence unavailable"}, "112": {"status": "verify-fix", "reason": "the head changed with no published fix evidence; verify the fix before re-review"}, "114": {"status": "unknown", "reason": "unreadable input: local evidence unavailable"}}
+SCENARIO 3: second-home owner/hold details remain undisclosed in JSON and text
+{"pr": "https://github.com/acme/widget/pull/112", "status": "verify-fix", "owners": null, "holds": null, "private_markers_absent": true}
