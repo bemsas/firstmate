@@ -2248,6 +2248,24 @@ Only fresh no-mistakes and direct-PR ships whose publication target is a GitHub 
 A worker on another machine that has not opened its pull request yet is invisible to this count, so two machines spawning for one repository at the same moment can each take the last place.
 [`bin/fm-review-capacity-lib.sh`](../bin/fm-review-capacity-lib.sh) owns which spawns are judged, what holds a place, the forge read, and those limits.
 
+## Review eligibility preview
+
+Before starting another review, a supervisor can ask which open pull requests of a GitHub repository look ready for one.
+The preview reports and never acts, needs no configuration, and is not part of any dispatch path.
+
+```text
+FM_HOME=/absolute/home bin/fm-review-eligibility-preview.sh owner/repo [--limit 20] [--pr <number>] [--json]
+```
+
+Each row names the exact head and the time it was observed, recorded verdicts, any ready report that names that head, known owners and holds, and the reason for its disposition.
+`fix-evidenced` means an eligible earlier verdict exists, the head changed, and the owning task reported that exact head ready; it is a candidate for re-review, not proof that the findings are fixed.
+`verify-fix` means the head changed without such a report, so check the fix before re-reviewing it.
+`reviewed-head`, `draft`, `held`, `owned`, and `review-dispatched` rows propose no new review.
+`unknown` means an input could not be read or joined, which includes a pull request with no recorded eligible verdict; `none` beside an input is reported only when every read of it succeeded.
+It reads the task records, verdict journals, refute dispatch records, and held backlog tasks of every local Firstmate home on this machine, so work recorded only on another machine is invisible to it.
+Every row is advice, and the dispatch owner still rechecks the live head, holds, owners, capacity, proof, and model.
+[`bin/fm-review-eligibility-preview.sh`](../bin/fm-review-eligibility-preview.sh) owns the inputs and bounds, and [`bin/fm-review-eligibility-preview.py`](../bin/fm-review-eligibility-preview.py) owns the disposition order.
+
 ## Host resource gate
 
 Every local launch - a fresh ship or scout spawn, a local secondmate spawn, and a relaunch through `bin/fm-spawn.sh --relaunch` or `bin/fm-control.sh <task-id> relaunch` - first asks `bin/fm-capacity.sh --host-gate`, which needs no configuration.

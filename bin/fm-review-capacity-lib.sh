@@ -154,6 +154,47 @@ fm_review_capacity_target() {  # <project-dir> <consent>
   return 0
 }
 
+# One bounded read-only GraphQL call about <owner>/<repo> through gh-axi, the
+# forge read this library and bin/fm-review-eligibility-preview.sh share.
+# <jq> must reduce the answer to one line starting `<marker> ` that carries no
+# quote or backslash. Sets FM_REVIEW_QUERY_BODY to that line and returns 0;
+# returns 1 with FM_REVIEW_QUERY_ERROR when gh-axi is absent, the call fails or
+# exceeds FM_REVIEW_CAPACITY_TIMEOUT seconds, the answer is not reported
+# untruncated, or it is not <what>.
+fm_review_capacity_query() {  # <host> <owner> <repo> <query> <jq> <marker> <what>
+  local host=$1 owner=$2 repo=$3 query=$4 jq_expr=$5 marker=$6 what=$7 out rc body
+  FM_REVIEW_QUERY_BODY='' FM_REVIEW_QUERY_ERROR=''
+  command -v gh-axi >/dev/null 2>&1 || {
+    FM_REVIEW_QUERY_ERROR="gh-axi is not installed"
+    return 1
+  }
+  rc=0
+  out=$(
+    fm_pr_github_host_export "$host"
+    fm_run_timed "${FM_REVIEW_CAPACITY_TIMEOUT:-20}" gh-axi api graphql -X POST \
+      --field query="$query" --field owner="$owner" --field name="$repo" \
+      --jq "$jq_expr" --full </dev/null 2>/dev/null
+  ) || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    FM_REVIEW_QUERY_ERROR="the gh-axi call timed out after ${FM_REVIEW_CAPACITY_TIMEOUT:-20} s"
+    return 1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    FM_REVIEW_QUERY_ERROR="the gh-axi call failed with exit $rc"
+    return 1
+  fi
+  if ! printf '%s\n' "$out" | grep -qx '  truncated: false'; then
+    FM_REVIEW_QUERY_ERROR="gh-axi did not report a complete, untruncated answer"
+    return 1
+  fi
+  body=$(printf '%s\n' "$out" | sed -n "s/^  body: \"\{0,1\}\($marker [^\"]*\)\"\{0,1\}$/\1/p" | head -n 1)
+  if [ -z "$body" ]; then
+    FM_REVIEW_QUERY_ERROR="gh-axi's answer is not $what"
+    return 1
+  fi
+  FM_REVIEW_QUERY_BODY=$body
+}
+
 # One bounded observation of a GitHub repository's open pull requests.
 # Sets FM_REVIEW_INVENTORY to space-separated <number>:<draft 0|1>:
 # <approved|open>:<head-repository>:<base-branch>:<head-branch> entries (the head
@@ -168,40 +209,22 @@ fm_review_capacity_target() {  # <project-dir> <consent>
 # pull request was listed, else 0. Returns 1 with FM_REVIEW_INVENTORY_ERROR
 # when the observation is unknown.
 fm_review_capacity_observe() {  # <host> <owner> <repo>
-  local host=$1 owner=$2 repo=$3 out rc body listed total query jq_expr
+  local host=$1 owner=$2 repo=$3 body listed total query jq_expr
   FM_REVIEW_INVENTORY='' FM_REVIEW_INVENTORY_TOTAL='' FM_REVIEW_INVENTORY_COMPLETE=0 FM_REVIEW_INVENTORY_ERROR=''
   FM_REVIEW_INVENTORY_DEFAULT=''
   FM_REVIEW_INVENTORY_AT=$(date +%s)
-  command -v gh-axi >/dev/null 2>&1 || {
-    FM_REVIEW_INVENTORY_ERROR="gh-axi is not installed"
-    return 1
-  }
   query="query(\$owner:String!,\$name:String!){repository(owner:\$owner,name:\$name){defaultBranchRef{name} pullRequests(states:OPEN,first:$FM_REVIEW_CAPACITY_PAGE,orderBy:{field:CREATED_AT,direction:DESC}){totalCount nodes{number baseRefName headRefName headRefOid headRepository{nameWithOwner} isDraft reviewDecision latestOpinionatedReviews(first:100){nodes{state commit{oid}}}}}}}"
   # The answer is reduced inside gh-axi's own jq to plain tokens; the head
   # name is percent-encoded, so it is kept exactly and still carries no quote,
   # backslash, space, or newline into the parser below.
   # shellcheck disable=SC2016 # jq variables, not shell expansions.
   jq_expr='.data.repository as $r | $r.pullRequests as $p | ([$p.nodes[] | . as $n | "\($n.number):\(if $n.isDraft then 1 else 0 end):\(if ($n.reviewDecision == "APPROVED") or ($n.reviewDecision == null and ([$n.latestOpinionatedReviews.nodes[] | select(.state == "APPROVED" and .commit.oid == $n.headRefOid)] | length) > 0) then "approved" else "open" end):\(($n.headRepository.nameWithOwner // "") | ascii_downcase | @uri):\($n.baseRefName // "" | @uri):\($n.headRefName | @uri)"] | "fm-review-inventory total=\($p.totalCount) listed=\($p.nodes | length) default=\($r.defaultBranchRef.name // "" | @uri) \(join(" "))")'
-  rc=0
-  out=$(
-    fm_pr_github_host_export "$host"
-    fm_run_timed "${FM_REVIEW_CAPACITY_TIMEOUT:-20}" gh-axi api graphql -X POST \
-      --field query="$query" --field owner="$owner" --field name="$repo" \
-      --jq "$jq_expr" --full </dev/null 2>/dev/null
-  ) || rc=$?
-  if [ "$rc" -eq 124 ]; then
-    FM_REVIEW_INVENTORY_ERROR="the gh-axi call timed out after ${FM_REVIEW_CAPACITY_TIMEOUT:-20} s"
+  fm_review_capacity_query "$host" "$owner" "$repo" "$query" "$jq_expr" \
+    fm-review-inventory "an open pull request inventory" || {
+    FM_REVIEW_INVENTORY_ERROR=$FM_REVIEW_QUERY_ERROR
     return 1
-  fi
-  if [ "$rc" -ne 0 ]; then
-    FM_REVIEW_INVENTORY_ERROR="the gh-axi call failed with exit $rc"
-    return 1
-  fi
-  if ! printf '%s\n' "$out" | grep -qx '  truncated: false'; then
-    FM_REVIEW_INVENTORY_ERROR="gh-axi did not report a complete, untruncated answer"
-    return 1
-  fi
-  body=$(printf '%s\n' "$out" | sed -n 's/^  body: "\{0,1\}\(fm-review-inventory [^"]*\)"\{0,1\}$/\1/p' | head -n 1)
+  }
+  body=$FM_REVIEW_QUERY_BODY
   case "$body" in
     'fm-review-inventory total='*' listed='*) ;;
     *)
