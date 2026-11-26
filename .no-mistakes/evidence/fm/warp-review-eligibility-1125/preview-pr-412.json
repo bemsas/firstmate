@@ -1,0 +1,23 @@
+{
+  "repository": "github.com/acme/widget",
+  "observed_at": "2026-11-26T17:08:43Z",
+  "open_total": 1,
+  "error": null,
+  "rows": [
+    {
+      "pr": "https://github.com/acme/widget/pull/412",
+      "observed_at": "2026-11-26T17:08:43Z",
+      "status": "unknown",
+      "reason": "no eligible prior verdict joins this pull request",
+      "head": "0123456789abcdef0123456789abcdef01234567",
+      "current_verdicts": [],
+      "prior_verdicts": [],
+      "refute_merges": [],
+      "fix_evidence": null,
+      "owners": null,
+      "holds": null,
+      "unreadable": []
+    }
+  ],
+  "note": "Advice only, bound to the observed head and time. Other-home owner and hold evidence is unknown; the dispatch owner rechecks the live head, holds, owners, capacity, proof and model."
+}
