@@ -331,6 +331,19 @@ class PreviewTest(unittest.TestCase):
         env["FM_STATE_OVERRIDE"] = str(self.home / "state")
         self.assertEqual([json.loads(line)["eligible"] for line in history().stdout.splitlines()], [False, True])
 
+    def test_verdict_receipts_reject_noncanonical_pr_and_incomplete_head(self):
+        state = self.home / "state"
+        journal = state / "review-verdicts.jsonl"
+        valid = {"pr": url(1), "head": sha(1), "verdict": "merge", "reviewer": "reviewer"}
+        for invalid in ({**valid, "pr": "https://github.com/example/widget/pull/01"},
+                        {**valid, "head": "invalid"}):
+            journal.write_text(json.dumps(invalid) + "\n")
+            history = subprocess.run([VERDICT, "history"], env=self.env, text=True, capture_output=True)
+            self.assertNotEqual(history.returncode, 0)
+            passing = subprocess.run([VERDICT, "passing", url(1), sha(1)], env=self.env,
+                                      text=True, capture_output=True)
+            self.assertNotEqual(passing.returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

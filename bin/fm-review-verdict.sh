@@ -34,7 +34,9 @@ FILE="$STATE/review-verdicts.jsonl"
 # shellcheck disable=SC2016 # jq variables, not shell expansions.
 RECEIPTS='
   def receipt:
-    if type == "object" and (.pr | type == "string") and (.head | type == "string")
+    if type == "object"
+       and (.pr | type == "string" and test("^https://github\\.com/[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9._-]{1,100}/pull/[1-9][0-9]*$"))
+       and (.head | type == "string" and test("^[0-9a-f]{40}$"))
        and (.reviewer | type == "string") and (.verdict == "merge" or .verdict == "fix")
     then . else error("invalid verdict receipt") end;
   def eligible: .verdict == "fix" or (has("refute") | not);
