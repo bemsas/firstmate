@@ -15,6 +15,7 @@ Firstmate does not support placing an individual worker remotely or failing a re
 | Check whether a host is ready, or repair it | [Readiness, repair, and the human steps](#readiness-repair-and-the-human-steps) |
 | Create the route and the remote home | [Provision a route](#provision-a-route) |
 | Launch, recover, message, and read a remote second mate | [Normal operation](#normal-operation) |
+| Send Boston batches directly between VM Build and Ops | [Boston batch relay](#boston-batch-relay) |
 | Move queued work to the remote home | [Backlog handoff](#backlog-handoff) |
 | Push configuration, relaunch, update, or retire | [Sync, update, and retirement](#sync-update-and-retirement) |
 | Run the tests or a real-host smoke test | [Verification](#verification) |
@@ -632,6 +633,61 @@ Semantic callers preserve the route or pending request:
 
 An unavailable remote home is projected as unknown and is never replaced by a local second mate.
 
+## Boston batch relay
+
+VM Build and Ops can exchange explicitly routed Boston overflow requests and results directly through the existing authenticated SSH job worker.
+Ordinary owning-VM test work and test-slot admission stay outside this route.
+Both homes need existing non-interactive SSH access to the other and relay-capable Firstmate code.
+Each home opts in with its own `config/boston-batch-relay`.
+The file contains the local role on line one and one remote record in the usual secondmate registry format on line two, naming the opposite role.
+For example, VM Build uses the following configuration with its own host and path values.
+
+```text
+vm-build-mate
+- ops - Boston batches (host: ops-ssh; root: /srv/firstmate-code; home: /srv/ops-home; scope: Boston tests; projects: none; added 2026-11-26)
+```
+
+Ops sets the first line to `ops` and the peer ID to `vm-build-mate`, with the VM Build alias and paths.
+The peer record only routes the Boston receiver and leaves both homes' managed-secondmate registries untouched.
+The SSH account remains the authentication boundary.
+
+Use the [relay command](../bin/fm-boston-batch-relay.py) in each sender's home, with an explicit `FM_HOME`.
+VM Build runs `python3 bin/fm-boston-batch-relay.py send <correlation> <request.md>` with a new 16-character lowercase hex correlation.
+Ops uses the same command and correlation with one result file as each authorized case finishes.
+A request uses the Boston Markdown header and one row per PR and suite.
+
+```text
+# Boston test requests from vm-build-mate (report PASS/FAIL with head)
+
+- https://github.com/example/widget/pull/7 head 1111111111111111111111111111111111111111 | make test | from widget-7
+```
+
+When the integration base is known, add `base <full commit SHA>` after the head.
+Each result repeats its exact originating request row, including the PR, head, optional base, suite and task ID, followed by a terminal outcome.
+Use `PASS` or `FAIL` for a completed suite and `INFRA` for a setup or transport failure that prevented a trustworthy test outcome.
+The receiver checks the row against the original batch and accepts results in any order.
+Optional `Evidence: ` and `Counts: ` lines each carry up to 512 bytes of plain text.
+
+```text
+# Boston test results for vm-build-mate
+
+- https://github.com/example/widget/pull/7 head 1111111111111111111111111111111111111111 | make test | from widget-7 | PASS
+Evidence: suite completed against the requested head
+Counts: 24 passed, 1 skipped
+```
+
+The suite field is text for Ops to inspect, and receiving a batch does not dispatch tests.
+
+The sender saves the exact Markdown in `data/boston-batch-relay/outbox/` before opening SSH.
+On a failed or unconfirmed delivery, `python3 bin/fm-boston-batch-relay.py retry` replays pending records from that home after reconnect or restart.
+An installation may schedule that command under the same home and account for unattended retry.
+The receiver writes an immutable request receipt per correlation and an immutable result receipt per correlation and case in `data/boston-batch-relay/inbox/`.
+It derives the case ID from the SHA-256 of the exact request row without its newline and includes the ID in the result filename and native check wake.
+A retry reuses the same receipt and repairs a missing wake.
+Ops uses the request correlation and case identity to track dispatch.
+A new authorized attempt after a terminal outcome needs a new correlation.
+Retain the outbox request and inbox receipt while either home may still need to match or replay that correlation.
+
 ## Backlog handoff
 
 Move already-judged queued work with the normal command:
@@ -709,7 +765,8 @@ SSH exit 255 preserves both the route and local records because completion is un
 
 No generic remote delete or write surface exists:
 
-- Remote writes are confined to inherited allowlist files and backlog handoff scratch files.
+- Remote file transfer writes are confined to inherited allowlist files and backlog handoff scratch files.
+- The [Boston batch relay](#boston-batch-relay) writes its own typed receipts in opted-in homes.
 - Remote home removal is reachable only through guarded secondmate retirement.
 
 ## Verification
@@ -732,6 +789,7 @@ The portable tests run with these commands:
 
 ```sh
 bin/fm-test-run.sh tests/fm-on.test.sh
+bin/fm-test-run.sh tests/fm-boston-batch-relay.test.sh
 bin/fm-test-run.sh tests/fm-send-remote-delivery.test.sh
 bin/fm-test-run.sh tests/fm-secondmate-reconcile.test.sh
 bin/fm-test-run.sh tests/fm-peek-remote.test.sh
