@@ -1,0 +1,23 @@
+{
+  "repository": "github.com/bemsas/firstmate",
+  "observed_at": "2026-11-26T17:30:51Z",
+  "open_total": 7,
+  "error": null,
+  "rows": [
+    {
+      "pr": "https://github.com/bemsas/firstmate/pull/17",
+      "observed_at": "2026-11-26T17:30:51Z",
+      "status": "unknown",
+      "reason": "no eligible prior verdict joins this pull request",
+      "head": "43326a4d305a484db86a2ad142d431882df118cb",
+      "current_verdicts": [],
+      "prior_verdicts": [],
+      "refute_merges": [],
+      "fix_evidence": null,
+      "owners": null,
+      "holds": null,
+      "unreadable": []
+    }
+  ],
+  "note": "Advice only, bound to the observed head and time. Other-home owner and hold evidence is unknown; the dispatch owner rechecks the live head, holds, owners, capacity, proof and model."
+}

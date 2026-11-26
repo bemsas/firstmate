@@ -1,0 +1,36 @@
+{
+  "repository": "github.com/acme/widget",
+  "observed_at": "2026-11-26T17:37:16Z",
+  "open_total": 20,
+  "error": null,
+  "rows": [
+    {
+      "pr": "https://github.com/acme/widget/pull/110",
+      "observed_at": "2026-11-26T17:37:16Z",
+      "status": "fix-evidenced",
+      "reason": "the head changed and its owner reported this exact head ready",
+      "head": "5e796e48332af4142b10ca0f86e65d9bfdb05884",
+      "current_verdicts": [],
+      "prior_verdicts": [
+        {
+          "head": "244a6245ebf61744bd848028abbfb3617fb62cb9",
+          "verdict": "fix"
+        }
+      ],
+      "refute_merges": [],
+      "fix_evidence": [
+        {
+          "present": true
+        }
+      ],
+      "owners": [
+        {
+          "present": true
+        }
+      ],
+      "holds": null,
+      "unreadable": []
+    }
+  ],
+  "note": "Advice only, bound to the observed head and time. Other-home owner and hold evidence is unknown; the dispatch owner rechecks the live head, holds, owners, capacity, proof and model."
+}

@@ -1,0 +1,184 @@
+review eligibility preview: github.com/acme/widget observed 2026-11-26T17:37:01Z (20 shown, 20 open)
+
+https://github.com/acme/widget/pull/101  reviewed-head
+  head: dbc0f004854457f59fb16ab863a3a1722cef553f
+  observed: 2026-11-26T17:37:01Z
+  verdicts: fix dbc0f004854457f59fb16ab863a3a1722cef553f
+  fix evidence: none
+  owner: unknown
+  hold: unknown
+  reason: a fix verdict is already recorded for this head; no repeat review
+
+https://github.com/acme/widget/pull/102  reviewed-head
+  head: c8306ae139ac98f432932286151dc0ec55580eca
+  observed: 2026-11-26T17:37:01Z
+  verdicts: merge c8306ae139ac98f432932286151dc0ec55580eca
+  fix evidence: none
+  owner: unknown
+  hold: unknown
+  reason: a merge verdict is already recorded for this head; no repeat review
+
+https://github.com/acme/widget/pull/103  reviewed-head
+  head: 934385f53d1bd0c1b8493e44d0dfd4c8e88a04bb
+  observed: 2026-11-26T17:37:01Z
+  verdicts: refute merge 934385f53d1bd0c1b8493e44d0dfd4c8e88a04bb (not eligible)
+  fix evidence: none
+  owner: unknown
+  hold: unknown
+  reason: a refute merge verdict is already recorded for this head; no repeat review
+
+https://github.com/acme/widget/pull/104  draft
+  head: 78a8efcbaaa1a9a30f9f327aa89d0b6acaaffb03
+  observed: 2026-11-26T17:37:01Z
+  verdicts: fix 986a5183e20f93184069f0194e87813765501099
+  fix evidence: none
+  owner: unknown
+  hold: unknown
+  reason: the pull request is a draft
+
+https://github.com/acme/widget/pull/105  held
+  head: e114c448f4ab8554ad14eff3d66dfeb3965ce8fc
+  observed: 2026-11-26T17:37:01Z
+  verdicts: fix eb797135562f4f80f9ea84ad4ad01784b1e93664
+  fix evidence: none
+  owner: unknown
+  hold: present
+  reason: a local hold applies
+
+https://github.com/acme/widget/pull/106  held
+  head: 7224f997fc148baa0b7f81c1eda6fcc3fd003db0
+  observed: 2026-11-26T17:37:01Z
+  verdicts: fix 3adec1166807ce266736085d375c34f42bbc44d6
+  fix evidence: none
+  owner: present
+  hold: present
+  reason: a local hold applies
+
+https://github.com/acme/widget/pull/107  held
+  head: 524e05dc77239f3a15dab766aaa59a9e432efde7
+  observed: 2026-11-26T17:37:01Z
+  verdicts: fix 2a0ed20a140b9c22fb69030faf6ee372647c3535
+  fix evidence: none
+  owner: unknown
+  hold: present
+  reason: a local hold applies
+
+https://github.com/acme/widget/pull/108  owned
+  head: 17503a6b2326f09fbc4e3a7c03874c7333002038
+  observed: 2026-11-26T17:37:01Z
+  verdicts: fix 689fa436bf9d2379ddff106ee3541155e50842cb
+  fix evidence: none
+  owner: present
+  hold: unknown
+  reason: a local task is active
+
+https://github.com/acme/widget/pull/109  owned
+  head: a1422e6a168630cdd214ac5e31ca01ae1bee8d92
+  observed: 2026-11-26T17:37:01Z
+  verdicts: fix bf8780fc4b40f1268f28654c80c2b210a13351bd
+  fix evidence: none
+  owner: present
+  hold: unknown
+  reason: a local task is active
+
+https://github.com/acme/widget/pull/110  fix-evidenced
+  head: 5e796e48332af4142b10ca0f86e65d9bfdb05884
+  observed: 2026-11-26T17:37:01Z
+  verdicts: fix 244a6245ebf61744bd848028abbfb3617fb62cb9
+  fix evidence: present
+  owner: present
+  hold: unknown
+  reason: the head changed and its owner reported this exact head ready
+
+https://github.com/acme/widget/pull/111  verify-fix
+  head: 6216f8a75fd5bb3d5f22b6f9958cdede3fc086c2
+  observed: 2026-11-26T17:37:01Z
+  verdicts: fix b3629b7db0667e91f14748032501e816741f2027
+  fix evidence: none
+  owner: present
+  hold: unknown
+  reason: the head changed with no published fix evidence; verify the fix before re-review
+
+https://github.com/acme/widget/pull/112  verify-fix
+  head: 601ca99d55f00a2e8e736676b606a4d31d374fdd
+  observed: 2026-11-26T17:37:01Z
+  verdicts: fix 57a6c668773726e7f6ad156cbe470f5c0c87b534
+  fix evidence: none
+  owner: unknown
+  hold: unknown
+  reason: the head changed with no published fix evidence; verify the fix before re-review
+
+https://github.com/acme/widget/pull/113  unknown
+  head: e993215bfdaa515f6ea00fafc1918f549119f993
+  observed: 2026-11-26T17:37:01Z
+  verdicts: none
+  fix evidence: none
+  owner: unknown
+  hold: unknown
+  reason: no eligible prior verdict joins this pull request
+
+https://github.com/acme/widget/pull/114  review-dispatched
+  head: ecb7937db58ec9dea0c47db88463d85e81143032
+  observed: 2026-11-26T17:37:01Z
+  verdicts: fix 0baaa856d6d56e7cf005bf95779513f233d84706
+  fix evidence: none
+  owner: unknown
+  hold: unknown
+  reason: review dispatched for this head
+
+https://github.com/acme/widget/pull/115  unknown
+  head: efa6e44dfa0145249be273ecd84a97f534b04920
+  observed: 2026-11-26T17:37:01Z
+  verdicts: fix 20e0ddf4bc5826fca3607ab83578f46e0daba83c
+  fix evidence: none
+  owner: unknown
+  hold: unknown
+  reason: a local review dispatch record has neither a verdict nor a live scout
+
+https://github.com/acme/widget/pull/116  verify-fix
+  head: 683e725c03a87baaad2623231644e944e537acab
+  observed: 2026-11-26T17:37:01Z
+  verdicts: fix 7ba0b61bebf059423a5b129fc4e3687f0a791812
+  fix evidence: none
+  owner: unknown
+  hold: unknown
+  reason: the head changed with no published fix evidence; verify the fix before re-review
+
+https://github.com/acme/widget/pull/117  verify-fix
+  head: d0e2dbb0bac1917d360aaf52c01a2a4b669e8cdb
+  observed: 2026-11-26T17:37:01Z
+  verdicts: fix a3c8d7c69bf76beb8a17f212eb98758bb9325714
+  fix evidence: none
+  owner: unknown
+  hold: unknown
+  reason: the head changed with no published fix evidence; verify the fix before re-review
+
+https://github.com/acme/widget/pull/118  verify-fix
+  head: 12f0de3dc76e067d21ed85125716e02e9f1e69f0
+  observed: 2026-11-26T17:37:01Z
+  verdicts: fix f08ef2f972e9b2226b0dc9cefc66c0daf889b121
+  fix evidence: none
+  owner: unknown
+  hold: unknown
+  reason: the head changed with no published fix evidence; verify the fix before re-review
+
+https://github.com/acme/widget/pull/119  verify-fix
+  head: a2e33d344f272e100d4a8efeabc7ae8a60a8ba7a
+  observed: 2026-11-26T17:37:01Z
+  verdicts: fix c6fe26674fec130e2c8d8f67de3f2325e26f313b
+  fix evidence: none
+  owner: present
+  hold: unknown
+  reason: the head changed with no published fix evidence; verify the fix before re-review
+
+https://github.com/acme/widget/pull/120  verify-fix
+  head: 775bc5c30e27f0e562115d136e7f7edbd3cead89
+  observed: 2026-11-26T17:37:01Z
+  verdicts: fix 46dee581ae20f53c84edbe300e59d06b80b644d0
+  fix evidence: none
+  owner: unknown
+  hold: unknown
+  reason: the head changed with no published fix evidence; verify the fix before re-review
+
+counts: draft 1, fix-evidenced 1, held 3, owned 2, review-dispatched 1, reviewed-head 3, unknown 2, verify-fix 7
+Advice only, bound to the observed head and time. Other-home owner and hold evidence is unknown; the dispatch owner rechecks the live head, holds, owners, capacity, proof and model.

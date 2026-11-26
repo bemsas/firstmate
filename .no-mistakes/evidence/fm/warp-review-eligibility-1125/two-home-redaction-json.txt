@@ -1,0 +1,424 @@
+{
+  "repository": "github.com/acme/widget",
+  "observed_at": "2026-11-26T17:37:00Z",
+  "open_total": 20,
+  "error": null,
+  "rows": [
+    {
+      "pr": "https://github.com/acme/widget/pull/101",
+      "observed_at": "2026-11-26T17:37:00Z",
+      "status": "reviewed-head",
+      "reason": "a fix verdict is already recorded for this head; no repeat review",
+      "head": "dbc0f004854457f59fb16ab863a3a1722cef553f",
+      "current_verdicts": [
+        {
+          "head": "dbc0f004854457f59fb16ab863a3a1722cef553f",
+          "verdict": "fix"
+        }
+      ],
+      "prior_verdicts": [],
+      "refute_merges": [],
+      "fix_evidence": null,
+      "owners": null,
+      "holds": null,
+      "unreadable": []
+    },
+    {
+      "pr": "https://github.com/acme/widget/pull/102",
+      "observed_at": "2026-11-26T17:37:00Z",
+      "status": "reviewed-head",
+      "reason": "a merge verdict is already recorded for this head; no repeat review",
+      "head": "c8306ae139ac98f432932286151dc0ec55580eca",
+      "current_verdicts": [
+        {
+          "head": "c8306ae139ac98f432932286151dc0ec55580eca",
+          "verdict": "merge"
+        }
+      ],
+      "prior_verdicts": [],
+      "refute_merges": [],
+      "fix_evidence": null,
+      "owners": null,
+      "holds": null,
+      "unreadable": []
+    },
+    {
+      "pr": "https://github.com/acme/widget/pull/103",
+      "observed_at": "2026-11-26T17:37:00Z",
+      "status": "reviewed-head",
+      "reason": "a refute merge verdict is already recorded for this head; no repeat review",
+      "head": "934385f53d1bd0c1b8493e44d0dfd4c8e88a04bb",
+      "current_verdicts": [],
+      "prior_verdicts": [],
+      "refute_merges": [
+        {
+          "head": "934385f53d1bd0c1b8493e44d0dfd4c8e88a04bb",
+          "verdict": "merge"
+        }
+      ],
+      "fix_evidence": null,
+      "owners": null,
+      "holds": null,
+      "unreadable": []
+    },
+    {
+      "pr": "https://github.com/acme/widget/pull/104",
+      "observed_at": "2026-11-26T17:37:00Z",
+      "status": "draft",
+      "reason": "the pull request is a draft",
+      "head": "78a8efcbaaa1a9a30f9f327aa89d0b6acaaffb03",
+      "current_verdicts": [],
+      "prior_verdicts": [
+        {
+          "head": "986a5183e20f93184069f0194e87813765501099",
+          "verdict": "fix"
+        }
+      ],
+      "refute_merges": [],
+      "fix_evidence": null,
+      "owners": null,
+      "holds": null,
+      "unreadable": []
+    },
+    {
+      "pr": "https://github.com/acme/widget/pull/105",
+      "observed_at": "2026-11-26T17:37:00Z",
+      "status": "held",
+      "reason": "a local hold applies",
+      "head": "e114c448f4ab8554ad14eff3d66dfeb3965ce8fc",
+      "current_verdicts": [],
+      "prior_verdicts": [
+        {
+          "head": "eb797135562f4f80f9ea84ad4ad01784b1e93664",
+          "verdict": "fix"
+        }
+      ],
+      "refute_merges": [],
+      "fix_evidence": null,
+      "owners": null,
+      "holds": [
+        {
+          "present": true
+        }
+      ],
+      "unreadable": []
+    },
+    {
+      "pr": "https://github.com/acme/widget/pull/106",
+      "observed_at": "2026-11-26T17:37:00Z",
+      "status": "held",
+      "reason": "a local hold applies",
+      "head": "7224f997fc148baa0b7f81c1eda6fcc3fd003db0",
+      "current_verdicts": [],
+      "prior_verdicts": [
+        {
+          "head": "3adec1166807ce266736085d375c34f42bbc44d6",
+          "verdict": "fix"
+        }
+      ],
+      "refute_merges": [],
+      "fix_evidence": null,
+      "owners": [
+        {
+          "present": true
+        }
+      ],
+      "holds": [
+        {
+          "present": true
+        }
+      ],
+      "unreadable": []
+    },
+    {
+      "pr": "https://github.com/acme/widget/pull/107",
+      "observed_at": "2026-11-26T17:37:00Z",
+      "status": "held",
+      "reason": "a local hold applies",
+      "head": "524e05dc77239f3a15dab766aaa59a9e432efde7",
+      "current_verdicts": [],
+      "prior_verdicts": [
+        {
+          "head": "2a0ed20a140b9c22fb69030faf6ee372647c3535",
+          "verdict": "fix"
+        }
+      ],
+      "refute_merges": [],
+      "fix_evidence": null,
+      "owners": null,
+      "holds": [
+        {
+          "present": true
+        }
+      ],
+      "unreadable": []
+    },
+    {
+      "pr": "https://github.com/acme/widget/pull/108",
+      "observed_at": "2026-11-26T17:37:00Z",
+      "status": "owned",
+      "reason": "a local task is active",
+      "head": "17503a6b2326f09fbc4e3a7c03874c7333002038",
+      "current_verdicts": [],
+      "prior_verdicts": [
+        {
+          "head": "689fa436bf9d2379ddff106ee3541155e50842cb",
+          "verdict": "fix"
+        }
+      ],
+      "refute_merges": [],
+      "fix_evidence": null,
+      "owners": [
+        {
+          "present": true
+        }
+      ],
+      "holds": null,
+      "unreadable": []
+    },
+    {
+      "pr": "https://github.com/acme/widget/pull/109",
+      "observed_at": "2026-11-26T17:37:00Z",
+      "status": "owned",
+      "reason": "a local task is active",
+      "head": "a1422e6a168630cdd214ac5e31ca01ae1bee8d92",
+      "current_verdicts": [],
+      "prior_verdicts": [
+        {
+          "head": "bf8780fc4b40f1268f28654c80c2b210a13351bd",
+          "verdict": "fix"
+        }
+      ],
+      "refute_merges": [],
+      "fix_evidence": null,
+      "owners": [
+        {
+          "present": true
+        }
+      ],
+      "holds": null,
+      "unreadable": []
+    },
+    {
+      "pr": "https://github.com/acme/widget/pull/110",
+      "observed_at": "2026-11-26T17:37:00Z",
+      "status": "fix-evidenced",
+      "reason": "the head changed and its owner reported this exact head ready",
+      "head": "5e796e48332af4142b10ca0f86e65d9bfdb05884",
+      "current_verdicts": [],
+      "prior_verdicts": [
+        {
+          "head": "244a6245ebf61744bd848028abbfb3617fb62cb9",
+          "verdict": "fix"
+        }
+      ],
+      "refute_merges": [],
+      "fix_evidence": [
+        {
+          "present": true
+        }
+      ],
+      "owners": [
+        {
+          "present": true
+        }
+      ],
+      "holds": null,
+      "unreadable": []
+    },
+    {
+      "pr": "https://github.com/acme/widget/pull/111",
+      "observed_at": "2026-11-26T17:37:00Z",
+      "status": "verify-fix",
+      "reason": "the head changed with no published fix evidence; verify the fix before re-review",
+      "head": "6216f8a75fd5bb3d5f22b6f9958cdede3fc086c2",
+      "current_verdicts": [],
+      "prior_verdicts": [
+        {
+          "head": "b3629b7db0667e91f14748032501e816741f2027",
+          "verdict": "fix"
+        }
+      ],
+      "refute_merges": [],
+      "fix_evidence": null,
+      "owners": [
+        {
+          "present": true
+        }
+      ],
+      "holds": null,
+      "unreadable": []
+    },
+    {
+      "pr": "https://github.com/acme/widget/pull/112",
+      "observed_at": "2026-11-26T17:37:00Z",
+      "status": "verify-fix",
+      "reason": "the head changed with no published fix evidence; verify the fix before re-review",
+      "head": "601ca99d55f00a2e8e736676b606a4d31d374fdd",
+      "current_verdicts": [],
+      "prior_verdicts": [
+        {
+          "head": "57a6c668773726e7f6ad156cbe470f5c0c87b534",
+          "verdict": "fix"
+        }
+      ],
+      "refute_merges": [],
+      "fix_evidence": null,
+      "owners": null,
+      "holds": null,
+      "unreadable": []
+    },
+    {
+      "pr": "https://github.com/acme/widget/pull/113",
+      "observed_at": "2026-11-26T17:37:00Z",
+      "status": "unknown",
+      "reason": "no eligible prior verdict joins this pull request",
+      "head": "e993215bfdaa515f6ea00fafc1918f549119f993",
+      "current_verdicts": [],
+      "prior_verdicts": [],
+      "refute_merges": [],
+      "fix_evidence": null,
+      "owners": null,
+      "holds": null,
+      "unreadable": []
+    },
+    {
+      "pr": "https://github.com/acme/widget/pull/114",
+      "observed_at": "2026-11-26T17:37:00Z",
+      "status": "review-dispatched",
+      "reason": "review dispatched for this head",
+      "head": "ecb7937db58ec9dea0c47db88463d85e81143032",
+      "current_verdicts": [],
+      "prior_verdicts": [
+        {
+          "head": "0baaa856d6d56e7cf005bf95779513f233d84706",
+          "verdict": "fix"
+        }
+      ],
+      "refute_merges": [],
+      "fix_evidence": null,
+      "owners": null,
+      "holds": null,
+      "unreadable": []
+    },
+    {
+      "pr": "https://github.com/acme/widget/pull/115",
+      "observed_at": "2026-11-26T17:37:00Z",
+      "status": "unknown",
+      "reason": "a local review dispatch record has neither a verdict nor a live scout",
+      "head": "efa6e44dfa0145249be273ecd84a97f534b04920",
+      "current_verdicts": [],
+      "prior_verdicts": [
+        {
+          "head": "20e0ddf4bc5826fca3607ab83578f46e0daba83c",
+          "verdict": "fix"
+        }
+      ],
+      "refute_merges": [],
+      "fix_evidence": null,
+      "owners": null,
+      "holds": null,
+      "unreadable": []
+    },
+    {
+      "pr": "https://github.com/acme/widget/pull/116",
+      "observed_at": "2026-11-26T17:37:00Z",
+      "status": "verify-fix",
+      "reason": "the head changed with no published fix evidence; verify the fix before re-review",
+      "head": "683e725c03a87baaad2623231644e944e537acab",
+      "current_verdicts": [],
+      "prior_verdicts": [
+        {
+          "head": "7ba0b61bebf059423a5b129fc4e3687f0a791812",
+          "verdict": "fix"
+        }
+      ],
+      "refute_merges": [],
+      "fix_evidence": null,
+      "owners": null,
+      "holds": null,
+      "unreadable": []
+    },
+    {
+      "pr": "https://github.com/acme/widget/pull/117",
+      "observed_at": "2026-11-26T17:37:00Z",
+      "status": "verify-fix",
+      "reason": "the head changed with no published fix evidence; verify the fix before re-review",
+      "head": "d0e2dbb0bac1917d360aaf52c01a2a4b669e8cdb",
+      "current_verdicts": [],
+      "prior_verdicts": [
+        {
+          "head": "a3c8d7c69bf76beb8a17f212eb98758bb9325714",
+          "verdict": "fix"
+        }
+      ],
+      "refute_merges": [],
+      "fix_evidence": null,
+      "owners": null,
+      "holds": null,
+      "unreadable": []
+    },
+    {
+      "pr": "https://github.com/acme/widget/pull/118",
+      "observed_at": "2026-11-26T17:37:00Z",
+      "status": "verify-fix",
+      "reason": "the head changed with no published fix evidence; verify the fix before re-review",
+      "head": "12f0de3dc76e067d21ed85125716e02e9f1e69f0",
+      "current_verdicts": [],
+      "prior_verdicts": [
+        {
+          "head": "f08ef2f972e9b2226b0dc9cefc66c0daf889b121",
+          "verdict": "fix"
+        }
+      ],
+      "refute_merges": [],
+      "fix_evidence": null,
+      "owners": null,
+      "holds": null,
+      "unreadable": []
+    },
+    {
+      "pr": "https://github.com/acme/widget/pull/119",
+      "observed_at": "2026-11-26T17:37:00Z",
+      "status": "verify-fix",
+      "reason": "the head changed with no published fix evidence; verify the fix before re-review",
+      "head": "a2e33d344f272e100d4a8efeabc7ae8a60a8ba7a",
+      "current_verdicts": [],
+      "prior_verdicts": [
+        {
+          "head": "c6fe26674fec130e2c8d8f67de3f2325e26f313b",
+          "verdict": "fix"
+        }
+      ],
+      "refute_merges": [],
+      "fix_evidence": null,
+      "owners": [
+        {
+          "present": true
+        }
+      ],
+      "holds": null,
+      "unreadable": []
+    },
+    {
+      "pr": "https://github.com/acme/widget/pull/120",
+      "observed_at": "2026-11-26T17:37:00Z",
+      "status": "verify-fix",
+      "reason": "the head changed with no published fix evidence; verify the fix before re-review",
+      "head": "775bc5c30e27f0e562115d136e7f7edbd3cead89",
+      "current_verdicts": [],
+      "prior_verdicts": [
+        {
+          "head": "46dee581ae20f53c84edbe300e59d06b80b644d0",
+          "verdict": "fix"
+        }
+      ],
+      "refute_merges": [],
+      "fix_evidence": null,
+      "owners": null,
+      "holds": null,
+      "unreadable": []
+    }
+  ],
+  "note": "Advice only, bound to the observed head and time. Other-home owner and hold evidence is unknown; the dispatch owner rechecks the live head, holds, owners, capacity, proof and model."
+}
