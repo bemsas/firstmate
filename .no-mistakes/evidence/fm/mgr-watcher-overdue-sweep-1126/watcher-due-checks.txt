@@ -1,0 +1,4 @@
+Live watcher checkpoint against disposable home
+cycle 1: exit=0; checks=bosun,cfo,coo; wake=check: process-event result captured: procevent:live-source:1
+cycle 2: exit=0; checks=bosun,cfo,coo; wake=check: process-event result captured: procevent:repeat-1:1
+cycle 3: exit=0; checks=bosun,cfo,coo; wake=check: process-event result captured: procevent:repeat-2:1

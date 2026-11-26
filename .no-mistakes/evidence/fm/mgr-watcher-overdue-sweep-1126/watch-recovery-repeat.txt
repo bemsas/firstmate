@@ -1,0 +1,4 @@
+Live watcher checkpoint against disposable recovery home
+cycle 1: exit=0; scheduled_check=True; wake=check: rearm-resurface
+cycle 2: exit=0; scheduled_check=True; wake=check: rearm-resurface
+cycle 3: exit=0; scheduled_check=True; wake=check: rearm-resurface
