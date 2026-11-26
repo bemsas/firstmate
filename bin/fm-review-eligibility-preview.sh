@@ -158,7 +158,7 @@ collect_forge() {
 # selected pull request's head: its last status event and ready reports.
 collect_record() {  # <state> <meta>
   local state=$1 meta=$2 id text kind pr pr_path pr_number branch pr_match=0 branch_match=0 target='' sources='' affected_prs='' pair
-  local status last='' verb='' note line scan done_lines=''
+  local status last='' verb='' note line scan ready_url report_head done_lines=''
   if ! fm_review_capacity_read_record "$meta"; then
     [ -e "$meta" ] || return 0
     unreadable owners "task record $meta cannot be read coherently"
@@ -205,15 +205,19 @@ collect_record() {  # <state> <meta>
         status_line_verb "$line" note
         [ "$note" = "done" ] || continue
         status_line_note "$line" note
-        fm_dod_candidate_fields "$note" || continue
-        done_lines="$done_lines$FM_DOD_CANDIDATE_URL $FM_DOD_CANDIDATE_HEAD $line"$'\n'
+        ready_url=$(fm_dod_ready_note_url "$note") || continue
+        report_head=''
+        if fm_dod_candidate_fields "$note"; then
+          report_head=$FM_DOD_CANDIDATE_HEAD
+        fi
+        done_lines="$done_lines$ready_url $report_head"$'\n'
       done < "$status"
     else
       verb=unreadable
     fi
   fi
   fact '{t:"record",state:$state,id:$id,kind:$kind,pr:$pr,branch:$branch,sources:($sources|split(" ")|map(select(length>0))),verb:$verb,
-         done:($reports|split("\n")|map(select(length>0)|capture("^(?<url>[^ ]+) (?<head>[^ ]+) (?<line>.*)$")))}' \
+         done:($reports|split("\n")|map(select(length>0)|capture("^(?<url>[^ ]+) (?<head>[^ ]*)$")))}' \
     --arg state "$state" --arg id "$id" --arg kind "$kind" --arg pr "$pr" --arg branch "$branch" \
     --arg sources "$sources" --arg verb "$verb" --arg reports "$done_lines"
 }

@@ -293,6 +293,14 @@ class PreviewTest(unittest.TestCase):
         self.assertEqual(rows[111]["status"], "unknown")
         self.assertEqual(rows[112]["status"], "verify-fix")
 
+    def test_latest_ready_report_without_exact_head_withdraws_old_head_evidence(self):
+        self.seed()
+        self.record("t110", f"pr={url(110)}", status=[
+            self.ready(110, sha(110)), f"done [at=2]: PR {url(110)}"])
+        row = self.rows("--pr", "110")[110]
+        self.assertEqual(row["status"], "verify-fix")
+        self.assertIsNone(row["fix_evidence"])
+
     def test_unreadable_owner_status_makes_disposition_unknown(self):
         self.seed()
         self.record("t111", f"pr={url(111)}", status=[self.ready(111, sha("old-111"))])
