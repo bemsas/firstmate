@@ -1,7 +1,15 @@
-Live command: FM_HOME=<disposable-home> bin/fm-fleet-snapshot.sh --json
+source=head
+command: FM_HOME=<disposable>/home FM_SNAPSHOT_PARENT_ACTIVITY_BYTES=400000 FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT=20 bin/fm-fleet-snapshot.sh --json
+linux_max_arg_strlen=131072
+status_file_bytes=336800
+decision_summary_bytes=165090 activity_summary_bytes=160230
+exit=0 stdout_bytes=1234062
 schema=fm-fleet-snapshot.v1
-task=large-ledger
-open_decisions=180
-first_key=decision-0
-last_key=decision-179
-first_row_fields=key,summary,verb
+open_decisions_json_bytes=185781
+open_activities_json_bytes=161101
+activity_scan_json_bytes=161250
+reconciliation_json_bytes=376443
+state=no_active_work provenance=structured-home
+task_open_decisions=400 reconciled_decisions=400 reconciled_activities=20
+first_decision=d0 last_decision=d399 verdicts=all-contradicts contradiction=True inconclusive=False
+ASSERTIONS=pass (all keys and summaries present, in order)
