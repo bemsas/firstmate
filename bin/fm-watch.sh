@@ -4485,10 +4485,12 @@ while :; do
     fi
     # Away-mode lane refill (bin/fm-lane-refill.sh owns the rule): off costs
     # one file test, and the scan itself does nothing unless the record is an
-    # away one and a second mate is registered. Its emitted episodes are queued
+    # away one and a second mate is registered. Both scans below run under
+    # this sweep's own check bound (FM_CHECK_TIMEOUT), so a slow scan is cut
+    # like any other check rather than holding the sweep. Its emitted episodes are queued
     # durably; the scan re-emits an unsent one later if this wake is lost.
     if [ -f "$STATE/.afk-contract" ]; then
-      CHECK_TIMEOUT=${FM_LANE_REFILL_TIMEOUT:-90} FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      CHECK_TIMEOUT=${FM_LANE_REFILL_TIMEOUT:-$CHECK_TIMEOUT} FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
         run_check_capture "$SCRIPT_DIR/fm-lane-refill.sh" scan || exit 1
       if [ -n "$FM_CHECK_CUT" ]; then
         # A cut scan published nothing it could not finish; the next sweep
@@ -4506,7 +4508,7 @@ while :; do
     # Busy lanes with no new PR for an hour (bin/fm-pr-progress.sh owns the
     # rule and throttles itself); it reads only local status records and the
     # shared lane count, and does nothing for a home with no busy lanes.
-    CHECK_TIMEOUT=${FM_PR_PROGRESS_TIMEOUT:-90} FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    CHECK_TIMEOUT=${FM_PR_PROGRESS_TIMEOUT:-$CHECK_TIMEOUT} FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       run_check_capture "$SCRIPT_DIR/fm-pr-progress.sh" scan || exit 1
     if [ -n "$FM_CHECK_CUT" ]; then
       triage_log "no-pr-progress scan $FM_CHECK_CUT"
