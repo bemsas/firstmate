@@ -3,8 +3,13 @@
 
 Usage: fm-worker-pretool-check.py [--root WORKTREE] [--cursor] [--kimi] [--polytoken]
 Exit 2 blocks vendor/basisone writes and git worktree add/remove/prune/move.
+The vendor rule is CommercialEye's: it is skipped only when --root (bound at
+launch, never the payload cwd) is a checkout whose origin verifies as another
+repository. A missing or unverifiable identity keeps the rule.
 Read tools remain available. Shell commands touching protected paths are allowed
-only for known read operations; this is a tool-call seatbelt, not an OS sandbox.
+only for known read operations, whose redirections name literal paths outside
+the subtree. Quoted here-documents that cat writes to literal paths outside it
+are data. This is a tool-call seatbelt, not an OS sandbox.
 --kimi scopes the global hook to an authenticated Firstmate worker pointer.
 --polytoken emits that harness's native allow outcome.
 """
@@ -15,6 +20,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import subprocess
 import sys
 
 
@@ -69,7 +75,9 @@ def tokens(command):
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>()\n")
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
-    lexer.commenters = "#"
+    # strip_heredocs already removed real comments; a mid-word # is literal and
+    # must not hide a later redirection.
+    lexer.commenters = ""
     return list(lexer)
 
 
@@ -88,8 +96,9 @@ def strip_heredocs(command):
     """Split here-document bodies out of the command text.
 
     Returns (text, bodies): text keeps every operator and word outside the
-    bodies, bodies lists each literal chunk a << or <<- operator feeds, so
-    heredoc data with unbalanced quotes never breaks tokenisation.
+    bodies, bodies lists a (chunk, delimiter, tabs, literal) tuple for each
+    << or <<- operator, so heredoc data with unbalanced quotes never breaks
+    tokenisation. literal means a quoted delimiter whose terminator was found.
     """
     out = []
     bodies = []
@@ -114,8 +123,8 @@ def strip_heredocs(command):
             i += 1
             continue
         if ch == "\\" and i + 1 < n:
-            out.append(ch)
-            out.append(command[i + 1])
+            # Kept as one chunk so an escaped space never starts a comment.
+            out.append(command[i:i + 2])
             i += 2
             continue
         if ch == "#" and (not out or out[-1] in " \t\n;&|<>()"):
@@ -140,22 +149,24 @@ def strip_heredocs(command):
                     i += 1
                     continue
                 delimiter = command[j + 1:close]
+                quoted = True
                 j = close + 1
             else:
                 end = j
                 while end < n and command[end] not in " \t\n;&|<>()":
                     end += 1
                 delimiter = command[j:end]
+                quoted = "\\" in delimiter
                 j = end
             if delimiter:
-                pending.append((delimiter.replace("\\", ""), tabs))
+                pending.append((delimiter.replace("\\", ""), tabs, quoted))
             out.append(command[i:j])
             i = j
             continue
         if ch == "\n" and pending:
             out.append(ch)
             i += 1
-            for delimiter, tabs in pending:
+            for delimiter, tabs, quoted in pending:
                 body_start = i
                 while i < n:
                     body_stop = i
@@ -167,10 +178,10 @@ def strip_heredocs(command):
                     if probe.endswith("\r"):
                         probe = probe[:-1]
                     if probe == delimiter:
-                        bodies.append(command[body_start:body_stop])
+                        bodies.append((command[body_start:body_stop], delimiter, tabs, quoted))
                         break
                 else:
-                    bodies.append(command[body_start:n])
+                    bodies.append((command[body_start:n], delimiter, tabs, False))
             pending = []
             continue
         out.append(ch)
@@ -178,23 +189,75 @@ def strip_heredocs(command):
     return "".join(out), bodies
 
 
-def conservative_reason(command):
+def literal_target(word, cwd):
+    """A redirection target that provably names a path outside the subtree."""
+    return (not any(char in word for char in "$`*?[]{}()<>;&|\n")
+            and (not word.startswith("~") or word.startswith("~/"))
+            and not protected(word, cwd, parents=True))
+
+
+def data_authoring(words, bodies, cwd):
+    """True when every command is cat writing one literal here-document."""
+    if not bodies or not all(body[3] for body in bodies):
+        return False
+    pending = list(bodies)
+    segment = []
+    for word in [*words, "\n"]:
+        if not (set(word) <= set(";&\n") and word.strip("\n") in {"", ";", "&&"}):
+            segment.append(word)
+            continue
+        if not segment:
+            continue
+        if segment[0] != "cat" or len(segment) % 2 == 0:
+            return False
+        feeds = 0
+        for operator, target in zip(segment[1::2], segment[2::2]):
+            if operator == "<<" and pending:
+                _, delimiter, tabs, _ = pending.pop(0)
+                if target != delimiter and not (tabs and target == "-" + delimiter):
+                    return False
+                feeds += 1
+            elif operator not in {">", ">>"} or not literal_target(target, cwd):
+                return False
+        if feeds != 1:
+            return False
+        segment = []
+    return not pending
+
+
+def without_safe_redirects(words, cwd):
+    """Drop redirections that cannot write the subtree; None if any might."""
+    kept = []
+    remaining = iter(words)
+    for word in remaining:
+        if "<" not in word and ">" not in word:
+            kept.append(word)
+            continue
+        target = next(remaining, "")
+        if word == ">&" and target.isdigit():
+            continue
+        if word not in {"<", ">", ">>", "&>"} or not target or not literal_target(target, cwd):
+            return None
+    return kept
+
+
+def conservative_reason(command, vendor):
     """Raw-text fallback when the lexer still cannot tokenise the command."""
-    if re.search(r"\bvendor/+basisone(?:/|\b)", command):
+    if vendor and re.search(r"\bvendor/+basisone(?:/|\b)", command):
         return "worker edits to vendor/basisone are blocked"
     if re.search(r"\bgit\b[^;\n&|]*\bworktree\s+(?:add|remove|prune|move)\b", command):
         return "workers cannot administer git worktrees"
     return None
 
 
-def shell_reason(command, cwd, depth=0):
+def shell_reason(command, cwd, vendor=True, depth=0):
     if depth > 8:
         return "shell nesting exceeds the worker guardrail limit"
     stripped, bodies = strip_heredocs(command)
     try:
         words = tokens(stripped)
     except ValueError:
-        return conservative_reason(command)
+        return conservative_reason(command, vendor)
     # Scan each command, including commands behind env, command, sudo and shell
     # operators. Quoted shell scripts are inspected recursively, never executed.
     for i, word in enumerate(words):
@@ -206,29 +269,32 @@ def shell_reason(command, cwd, depth=0):
             rest = words[i + 1:]
             for j, arg in enumerate(rest[:-1]):
                 if arg.startswith("-") and "c" in arg:
-                    reason = shell_reason(rest[j + 1], cwd, depth + 1)
+                    reason = shell_reason(rest[j + 1], cwd, vendor, depth + 1)
                     if reason:
                         return reason
                     break
-    mentions = protected(cwd, cwd) or any(
+    mentions = vendor and (protected(cwd, cwd) or any(
         protected(word, cwd, parents=True) or re.search(r"\bvendor/+basisone(?:/|\b)", word)
         for word in words
-    )
+    ))
     if not mentions:
-        # Heredoc bodies are data, but they can feed interpreters or hide
-        # paths, so each stripped body is inspected like a quoted shell script.
+        # Heredoc bodies can feed interpreters or hide paths, so each stripped
+        # body is inspected like a quoted shell script. Proven data keeps every
+        # rule except the vendor one, since only its literal targets are written.
+        body_vendor = vendor and not data_authoring(words, bodies, cwd)
         for body in bodies:
-            denied = shell_reason(body, cwd, depth + 1)
+            denied = shell_reason(body[0], cwd, body_vendor, depth + 1)
             if denied:
                 return denied
         return None
-    # Redirections, substitutions and unknown interpreters with a protected
-    # path are not proven read-only. Require explicit read commands throughout.
-    if any("<" in word or ">" in word or word in {"(", ")"} for word in words) or "$" in command or "`" in command:
+    # Substitutions, unproven redirections and unknown interpreters with a
+    # protected path are not read-only. Require explicit read commands throughout.
+    words = without_safe_redirects(words, cwd)
+    if words is None or any(word in {"(", ")"} for word in words) or "$" in command or "`" in command:
         return "shell writes or indirection involving vendor/basisone are blocked"
     segments = [[]]
     for word in words:
-        if word in {";", "&&", "||", "|", "&", "\n"}:
+        if set(word) <= set(";&|\n"):
             segments.append([])
         else:
             segments[-1].append(word)
@@ -249,7 +315,45 @@ def shell_reason(command, cwd, depth=0):
     return None
 
 
+# Reuse the role library's offline remote normalization for repository identity.
+IDENTITY_SCRIPT = r"""
+. "$1" || exit 1
+[ "$(git -C "$2" rev-parse --show-toplevel)" -ef "$2" ] || exit 1
+remotes=$(git -C "$2" remote) || exit 1
+for remote in $remotes; do
+  url=$(git -C "$2" remote get-url "$remote") || exit 1
+  printf '%s\t%s\n' "$remote" "$(fm_role_remote_identity "$url" "$2")"
+done
+"""
+
+
+def commercialeye_scope(root):
+    """False only when the launch root verifies as some other repository."""
+    if not root:
+        return True
+    library = Path(__file__).resolve().with_name("fm-role-lib.sh")
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    try:
+        result = subprocess.run(["bash", "-c", IDENTITY_SCRIPT, "identity", str(library), str(root)],
+                                env=env, text=True, capture_output=True, timeout=5)
+        identities = dict(line.split("\t", 1) for line in result.stdout.splitlines())
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return True
+    origin = identities.get("origin", "")
+    if result.returncode or not origin or origin.startswith("path:"):
+        return True
+    return any(identity.rsplit("/", 1)[-1].lower().removesuffix(".git") == "commercialeye"
+               for identity in identities.values())
+
+
 def reason(payload, root):
+    denied = evaluate(payload, root, True)
+    if denied and not commercialeye_scope(root):
+        return evaluate(payload, root, False)
+    return denied
+
+
+def evaluate(payload, root, vendor):
     name = str(payload.get("tool_name", payload.get("toolName", ""))).lower()
     args = payload.get("tool_input", payload.get("toolInput", payload.get("input", {})))
     cwd = payload.get("cwd") or root or os.getcwd()
@@ -260,15 +364,15 @@ def reason(payload, root):
         if isinstance(command, list):
             command = shlex.join(command)
         if isinstance(command, str):
-            denied = shell_reason(command, cwd)
+            denied = shell_reason(command, cwd, vendor)
             if denied:
                 return denied
-        if name not in READ_TOOLS and any(protected(p, cwd, parents=True) for p in paths(args)):
+        if vendor and name not in READ_TOOLS and any(protected(p, cwd, parents=True) for p in paths(args)):
             return "worker edits to vendor/basisone are blocked"
-    if "patch" in name:
+    if vendor and "patch" in name:
         for text in strings(args):
             for match in re.finditer(r"^(?:\*\*\* (?:Add|Update|Delete|Move to) File: |\*\*\* Move to: |(?:rename|copy) (?:from|to) )(.+)$", text, re.M):
-                if protected(match[1], cwd):
+                if protected(match[1], cwd, parents=True):
                     return "worker patches to vendor/basisone are blocked"
     return None
 
