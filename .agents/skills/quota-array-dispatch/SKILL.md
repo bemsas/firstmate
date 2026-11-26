@@ -24,6 +24,12 @@ Make no `quota-axi` call, apply no quota row, quota floor, runway gate, or `spen
 Account for every candidate as always, stating in place of quota evidence that quota ranking is off by home declaration.
 The declared value must be a boolean; anything else is an actionable configuration error.
 
+## Launch login and the spawn gate
+
+Every launch and relaunch rereads the selected login's quota and refuses only on current exhaustion, as [`docs/configuration.md`](../../../docs/configuration.md#launch-quota-gate) describes.
+Never carry an earlier refusal, snapshot, or account figure across a login change, a pause, or a recovery: read again or let the spawn gate read.
+A stale or missing reading is disclosed uncertainty, never a reason to hold a launch.
+
 ## Worker-side quota helper
 
 The canonical shell helper for a worker that has already performed its model-selection reasoning and now needs to pick the first viable candidate is `bin/fm-quota-choose.sh`.

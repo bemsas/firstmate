@@ -70,6 +70,12 @@
 #   AGY Claude/GPT models bind to scope claude_gpt. With no rules, it returns
 #   a non-clear result so firstmate keeps using the existing intake.
 #
+# Account scope: the snapshot is read fresh, and its rows are those of the
+#   login a launch from this home would spend (bin/fm-quota-launch-lib.sh,
+#   fm_quota_launch_snapshot). A Claude pin that cannot be read, or a declared
+#   Claude account list, leaves Claude unmeasured rather than judged on the
+#   ambient login.
+#
 # Shared-quota opt-out: an optional top-level "shared_quota": true in the
 #   rules file declares this home draws every provider's usage from one single
 #   shared budget, so per-provider quota rows do not describe what is left.
@@ -152,6 +158,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-quota-axi-lib.sh
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
+# shellcheck source=bin/fm-quota-launch-lib.sh
+. "$SCRIPT_DIR/fm-quota-launch-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-env-lib.sh
@@ -651,7 +659,7 @@ if [ "$SHARED_QUOTA" = true ]; then
   SQ=true
 else
   command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
-  quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
+  fm_quota_launch_snapshot "$CONFIG" > "$QUOTA" || emit_error "quota-axi --json failed"
   fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
 fi
 

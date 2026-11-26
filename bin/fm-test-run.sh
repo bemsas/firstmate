@@ -402,7 +402,7 @@ family_for_basename() {
     fm-herdr-session-cleanup.test.sh|fm-pane-retire.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
     fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|fm-kimi-trust.test.sh|\
-    fm-worker-account.test.sh|\
+    fm-worker-account.test.sh|fm-quota-launch-gate.test.sh|\
     fm-git-strip-ai-trailers.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
     fm-spawn-claude-sandbox.test.sh|fm-spawn-compact-adviser-disable.test.sh|\
@@ -905,6 +905,7 @@ tests/fm-project-origin.test.sh 123
 tests/fm-public-followup.test.sh 381564
 tests/fm-quota-array-dispatch-live-e2e.test.sh 50
 tests/fm-quota-choose.test.sh 2860
+tests/fm-quota-launch-gate.test.sh 46257
 tests/fm-read-repetition-live.test.sh 1110
 tests/fm-read-repetition.test.sh 602
 tests/fm-record-export-remote-home.test.sh 16875
@@ -1705,6 +1706,11 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       printf '%s\n' "__script__:fm-claude-account-quota.test.sh"
+      printf '%s\n' "__script__:fm-quota-launch-gate.test.sh"
+      ;;
+    bin/fm-quota-launch-lib.sh)
+      printf '%s\n' backend-dispatch
+      printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       ;;
     bin/fm-procevent-quota.sh)
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
@@ -1717,6 +1723,7 @@ families_for_changed_path() {
       ;;
     bin/fm-dispatch-resolve.sh)
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
+      printf '%s\n' "__script__:fm-quota-launch-gate.test.sh"
       ;;
     bin/fm-capacity.sh)
       printf '%s\n' "__script__:fm-capacity.test.sh"
