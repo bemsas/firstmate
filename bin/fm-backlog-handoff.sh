@@ -72,11 +72,10 @@
 # tracked in wake-pending state and is retried under the same correlation by
 # later resumes and handoffs. If wake-pending state cannot be recorded, the wake
 # is reported as DROPPED and marker removal is attempted while the mate still
-# owns reconciliation from its durable backlog. Any unsafe, invalid, or
-# undeletable stale marker is reported and ignored by later resumes and handoffs.
-# A delivered pending marker is preserved long enough to prevent duplicate wake
-# intent, then cleanup removes it; marker cleanup never fails a completed remote
-# handoff.
+# owns reconciliation from its durable backlog. Any unsafe, invalid, delivered,
+# or undeletable stale marker is reported and ignored by later resumes and
+# handoffs, so wake-state cleanup neither suppresses a new wake nor fails a
+# completed remote handoff.
 # Usage: fm-backlog-handoff.sh <secondmate-id> <item-key>...
 #        fm-backlog-handoff.sh --resume-pending
 set -eu
@@ -707,8 +706,7 @@ remote_deliver_outbox() { # <secondmate-id> <outbox-path>
   if [ "$RECEIVER_WAKE_IGNORE_ID" = "$id" ]; then
     wake_state=dropped
     wake_rc=1
-  elif ! receiver_wake_pending_valid "$id" && ! receiver_wake_pending_delivered_valid "$id" &&
-    ! receiver_wake_confirmed_valid "$id"; then
+  elif ! receiver_wake_pending_valid "$id" && ! receiver_wake_confirmed_valid "$id"; then
     receiver_wake_mark_pending "$id" || {
       wake_state=dropped
       wake_rc=1
