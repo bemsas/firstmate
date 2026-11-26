@@ -706,7 +706,8 @@ remote_deliver_outbox() { # <secondmate-id> <outbox-path>
   if [ "$RECEIVER_WAKE_IGNORE_ID" = "$id" ]; then
     wake_state=dropped
     wake_rc=1
-  elif ! receiver_wake_pending_valid "$id" && ! receiver_wake_confirmed_valid "$id"; then
+  elif ! receiver_wake_pending_valid "$id" && ! receiver_wake_pending_delivered_valid "$id" &&
+    ! receiver_wake_confirmed_valid "$id"; then
     receiver_wake_mark_pending "$id" || {
       wake_state=dropped
       wake_rc=1
