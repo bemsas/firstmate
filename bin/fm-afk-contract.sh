@@ -167,8 +167,8 @@
 #     live guarded admission in bin/fm-spawn.sh (project capacity, lane
 #     admission, the away dispatch rules) still decides every spawn;
 #   - an explicit --spend still wins and is recorded unchanged;
-#   - a configured target that cannot be read (target=invalid) is never
-#     guessed: the record keeps keep_full with lane_target `-` and falls back
+#   - a configured target that cannot be read (target=invalid, or no capacity
+#     report at all) is never guessed: the record keeps keep_full with lane_target `-` and falls back
 #     to the ordinary default cap above, so broken limits never widen spend.
 # The record is written once at entry and is the same whichever actor spawns
 # first, so a keep-full window never collapses to the default merely because
@@ -245,15 +245,16 @@ fm_afk_contract_entry_spend_default() {  # [state-dir]
 
 # This home's authoritative configured lane target for KEEP FULL: the
 # `target=` value bin/fm-capacity.sh reads from config/lane-capacity. Prints a
-# non-negative integer (0 is an explicit zero-lane limit), `-` for no target,
-# or `invalid` for an unreadable one.
+# non-negative integer (0 is an explicit zero-lane limit), `-` for no target
+# (`target=none`), or `invalid` for an unreadable one, including a capacity
+# report that was not produced at all.
 fm_afk_contract_configured_lane_target() {
   local line target
   line=$(FM_STATE_OVERRIDE="$FM_AFK_CONTRACT_STATE" "$FM_AFK_CONTRACT_DIR/fm-capacity.sh" 2>/dev/null | sed -n '1p')
   target=$(printf '%s\n' "$line" | tr ' ' '\n' | sed -n 's/^target=//p')
   case "$target" in
-    '' | none) printf -- '-\n' ;;
-    *[!0-9]*) printf 'invalid\n' ;;
+    none) printf -- '-\n' ;;
+    '' | *[!0-9]*) printf 'invalid\n' ;;
     *) printf '%s\n' "$((10#$target))" ;;
   esac
 }

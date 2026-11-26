@@ -28,10 +28,12 @@
 #                bin/fm-pr-merge.sh exactly as before.
 #   <mate-id>    no ordinary record here, and exactly one registered second
 #                mate (state/<mate>.meta with kind=secondmate) has a relay
-#                line whose subject is `child <id>` and whose structured PR
-#                evidence is this exact canonical URL (bin/fm-pr-progress.sh
-#                owns that grammar: `PR ready: <url>`, `done: PR <url>`, or a
-#                `pr=<url>` field); a child or URL merely cited in a note
+#                line whose subject is `child <id>` (or the inactive-outcome
+#                fallback's `inactive terminal child=<id>`) and whose
+#                structured PR evidence is this exact canonical URL
+#                (bin/fm-pr-progress.sh owns that grammar: `PR ready: <url>`,
+#                `done: PR <url>`, or a `pr=<url>` field); a child or URL
+#                merely cited in a note
 #                proves nothing: hand off.
 #   missing      neither: hold; nothing here proves who owns the PR.
 #   conflicting  more than one owner claims it (a record here and a relay, or

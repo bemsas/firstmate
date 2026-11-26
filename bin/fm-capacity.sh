@@ -50,16 +50,19 @@
 # young record counts as occupying: stale metadata can never free a lane by
 # itself, and an unknown reading never frees one either.
 # --admit and --spawn-gate read no process table of their own (they must stay
-# fast under the admission lock): they reuse the stopped keys of the watcher's
-# last --publish (lanes.stopped_keys in state/lane-capacity.json) when it was
-# generated within FM_CAPACITY_STOPPED_MAX_AGE seconds (default 120), keeping
-# only keys whose record still exists and is still past its grace, and set
-# nothing aside otherwise.
+# fast under the admission lock): they reuse the stopped records of the
+# watcher's last --publish (lanes.stopped_keys in state/lane-capacity.json)
+# when it was generated within FM_CAPACITY_STOPPED_MAX_AGE seconds (default
+# 120), keeping only a record that still exists with the same task id,
+# worktree, and spawn time (a home's index in the local-home registry can shift
+# between a publish and an admission, so it never identifies a record) and is
+# still past its grace, and set nothing aside otherwise.
 # A stopped record and its worktree are left exactly as they are; the report's
-# human summary says how many it set aside, and --json carries the count as
-# lanes.stopped and the keys as lanes.stopped_keys only when at least one was
-# set aside, so the first line's fixed key list and a home with none set aside
-# print exactly what they did before.
+# human summary says how many it set aside, and --json carries this home's count as
+# lanes.stopped only when it is above zero and every home's stopped records as
+# lanes.stopped_keys ({key, worktree, spawn} objects) only when there is at
+# least one, so the first line's fixed key list and a machine with none set
+# aside print exactly what they did before.
 # secondmates counts persistent secondmates separately; they hold no lane.
 #
 # target is the cap from config/lane-capacity. Absent means no target, so
@@ -830,15 +833,16 @@ auto_lane_rows() {
   done
 }
 
-# capacity_stopped_keys <lanes-file> <attr-file>: print the key (<idx>:<id>) of
-# every auto_lane_rows row proven stopped (the header's lanes paragraph): an
+# capacity_stopped_keys <lanes-file> <attr-file>: print "<idx>:<id>\t<worktree>\t
+# <spawn>" for every auto_lane_rows row proven stopped (the header's lanes
+# paragraph): an
 # existing worktree directory, a spawn time at least PENDING_GRACE old, and no
 # attributed process. Call it only with a successful attribution taken from a
 # readable process table.
 capacity_stopped_keys() {
   awk -F'\t' -v now="$now" -v grace="$PENDING_GRACE" '
     FILENAME == ARGV[1] { live[$1] = 1; next }
-    $3 != "" && $7 ~ /^[0-9]+$/ && now - $7 >= grace && !(($1 ":" $2) in live) { print $1 ":" $2 "\t" $3 }
+    $3 != "" && $7 ~ /^[0-9]+$/ && now - $7 >= grace && !(($1 ":" $2) in live) { print $1 ":" $2 "\t" $3 "\t" $7 }
   ' "$2" "$1" | capacity_keep_present_worktrees
 }
 
@@ -852,8 +856,11 @@ capacity_attribution_complete() {
   [ -n "$pids" ] || return 0
   me=$(id -u 2>/dev/null) || return 1
   if [ "$os" = Darwin ]; then
-    # shellcheck disable=SC2086 # one pid list argument per ps -p
-    line=$(ps -o pid=,uid=,state= -p "$(printf '%s' $pids | tr '\n' ',')" 2>/dev/null) || line=
+    # One comma-separated -p list. A query that reports no row at all cannot
+    # tell exited processes from a failed read, so it proves nothing; once it
+    # reports any row, a pid it leaves out has exited.
+    line=$(ps -o pid=,uid=,state= -p "$(printf '%s' "$pids" | tr '\n' ',')" 2>/dev/null) || true
+    [ -n "$line" ] || return 1
     for pid in $pids; do
       uid=$(printf '%s\n' "$line" | awk -v p="$pid" '$1 == p { print $2 " " substr($3, 1, 1); exit }')
       case "$uid" in
@@ -880,18 +887,19 @@ capacity_attribution_complete() {
   ' "${files[@]}" 2>/dev/null
 }
 
-# Read "<key>\t<worktree>" lines and print each key whose worktree is an
-# existing directory on this host.
+# Read "<key>\t<worktree>\t<spawn>" lines and print each one whose worktree is
+# an existing directory on this host.
 capacity_keep_present_worktrees() {
-  local key wt
-  while IFS="$(printf '\t')" read -r key wt; do
-    [ -n "$wt" ] && [ -d "$wt" ] && printf '%s\n' "$key"
+  local key wt spawn
+  while IFS="$(printf '\t')" read -r key wt spawn; do
+    [ -n "$wt" ] && [ -d "$wt" ] && printf '%s\t%s\t%s\n' "$key" "$wt" "$spawn"
   done
   return 0
 }
 
-# capacity_published_stopped <lanes-file>: the admission path's stopped keys -
-# the last fresh publish's, still present and still past grace - or nothing.
+# capacity_published_stopped <lanes-file>: the admission path's stopped records -
+# the last fresh publish's, matched by task id, worktree, and spawn time (never
+# by home index), still present and still past grace - or nothing.
 capacity_published_stopped() {
   local at max=${FM_CAPACITY_STOPPED_MAX_AGE:-120}
   is_uint "$max" || max=120
@@ -899,9 +907,11 @@ capacity_published_stopped() {
   at=$(jq -r '.generated_epoch // empty' "$PUBLISHED" 2>/dev/null) || return 0
   is_uint "$at" && [ "$at" -le "$now" ] && [ $((now - at)) -le "$max" ] || return 0
   awk -F'\t' -v now="$now" -v grace="$PENDING_GRACE" '
-    FILENAME == ARGV[1] { k[$1] = 1; next }
-    (($1 ":" $2) in k) && $3 != "" && $7 ~ /^[0-9]+$/ && now - $7 >= grace { print $1 ":" $2 "\t" $3 }
-  ' <(jq -r '.lanes.stopped_keys[]? | strings' "$PUBLISHED" 2>/dev/null) "$1" | capacity_keep_present_worktrees
+    FILENAME == ARGV[1] { k[$1 "\t" $2 "\t" $3] = 1; next }
+    (($2 "\t" $3 "\t" $7) in k) && $3 != "" && $7 ~ /^[0-9]+$/ && now - $7 >= grace { print $1 ":" $2 "\t" $3 "\t" $7 }
+  ' <(jq -r '.lanes.stopped_keys[]? | objects
+      | select((.key | type) == "string" and (.worktree | type) == "string" and (.spawn | type) == "number")
+      | [(.key | sub("^[0-9]+:"; "")), .worktree, (.spawn | tostring)] | @tsv' "$PUBLISHED" 2>/dev/null) "$1" | capacity_keep_present_worktrees
 }
 
 # The fixed-cap path's stopped records for this home (auto_budget applies the
@@ -1023,7 +1033,7 @@ def dur: if . == null then "?" elif . >= 86400 then "\(. / 86400 | floor)d" elif
    disk_gb: (if ($hd | length) >= 5 then ([($hd | p90), 0.5] | max) else 3 end),
    source: (if ($hm | length) >= 5 then "learned" else "default" end),
    samples: ($hm | length)} as $fp
-| ($stopped_tsv | split("\n") | map(select(length > 0))) as $stopped
+| ($stopped_tsv | split("\n") | map(select(length > 0) | split("\t")[0])) as $stopped
 | ([ $lanes[] | select(.key as $k | $stopped | index($k) | not) ] | length) as $mlanes
 | ([ $lanes[] | select(.spawn != null and ($now - .spawn) >= 0 and ($now - .spawn) < $young_s) ] | length) as $young
 | ($avail != null) as $measurable
@@ -1600,7 +1610,10 @@ doc=$(jq -n \
   def lines: split("\n") | map(select(. != ""));
   {schema: "fm-lane-capacity.v1", generated_epoch: $now, home: $home, machine: $machine,
    lanes: ({count: ($lanes | tonumber), pr_ready: ($pr_ready | tonumber), ids: ($lane_ids | lines)}
-     + (if ($stopped | tonumber) > 0 then {stopped: ($stopped | tonumber), stopped_keys: ($stopped_keys | lines)} else {} end)),
+     + (if ($stopped | tonumber) > 0 then {stopped: ($stopped | tonumber)} else {} end)
+     + (if ($stopped_keys | lines | length) > 0
+        then {stopped_keys: ($stopped_keys | lines | map(split("\t") | {key: .[0], worktree: .[1], spawn: (.[2] | tonumber)}))}
+        else {} end)),
    cap: {target: (if $cap_status == "ok" then ($target | tonumber) else null end), status: $cap_status},
    projects: ($projects | lines),
    pressure: {level: $level, why: ($why | lines), basis: $basis, beat_age_s: ($beat_age | num),

@@ -99,7 +99,10 @@ kind_of() { sed -n 's/^kind=//p' "$1" 2>/dev/null | tail -1; }
 #   child <id> done: PR <url> ...     a relayed done line (subject <id>)
 #   done: PR <url> ...                a task's own done line (no subject)
 #   pr=<url>                          a structured field on any line; its
-#                                     subject is the line's `child <id>`, if any
+#                                     subject is the line's `child <id>`, or
+#                                     the <id> of a line whose body starts
+#                                     `inactive terminal child=<id>` (the
+#                                     bin/fm-inactive-reconcile.sh fallback)
 # Each match prints `<epoch|-> <subject|-> <url> <line>`, tab-separated, where
 # the epoch is the line's [at=] stamp. The URL must be a whole field.
 evidence() {
@@ -119,7 +122,9 @@ evidence() {
       split("", done_url)
       subject = "-"
       n = split(body, w, " ")
-      if (w[1] == "child" && n >= 3) {
+      if (w[1] == "inactive" && w[2] == "terminal" && w[3] ~ /^child=[^ ]+$/) {
+        subject = substr(w[3], 7)
+      } else if (w[1] == "child" && n >= 3) {
         subject = w[2]
         rest = substr(body, length("child " w[2] " ") + 1)
         if (substr(rest, 1, 10) == "PR ready: ") {
@@ -147,19 +152,25 @@ first_seen() {
 
 # The earliest first-seen time of each PR for one home, from its live logs
 # <files...> (possibly none) and the recorded ledger, as "<epoch>\t<url>".
+# Fails, printing nothing, when the ledger exists but cannot be read: it may be
+# the only remaining evidence once a task's live log is gone.
 home_first_seen() {  # <home> [<files>...]
-  local home=$1
+  local home=$1 recorded=
   shift
+  if [ -e "$SEEN" ]; then
+    recorded=$(awk -F '\t' -v h="$home" -v OFS='\t' '$1 == h { print $2, $3 }' "$SEEN" 2>/dev/null) || return 1
+  fi
   {
     [ "$#" -eq 0 ] || first_seen "$@"
-    awk -F '\t' -v h="$home" -v OFS='\t' '$1 == h { print $2, $3 }' "$SEEN" 2>/dev/null
+    [ -z "$recorded" ] || printf '%s\n' "$recorded"
   } | awk -F '\t' -v OFS='\t' '!($2 in m) || $1 < m[$2] { m[$2] = $1 } END { for (u in m) print m[u], u }'
 }
 
 # Record every PR the live logs show in the ledger, and drop ledger rows older
-# than SEEN_KEEP. Call it only under the scan lock.
+# than SEEN_KEEP. An existing ledger that cannot be read is left as it is,
+# never replaced. Call it only under the scan lock.
 seen_refresh() {
-  local home meta files status next
+  local home meta files status next rows
   next=$(mktemp "$STATE/.pr-progress-seen.next.XXXXXX") || return 0
   while IFS= read -r home; do
     files=()
@@ -173,8 +184,9 @@ seen_refresh() {
     else
       [ -f "$STATE/$home.status" ] && files=("$STATE/$home.status")
     fi
-    home_first_seen "$home" ${files[@]+"${files[@]}"} | awk -F '\t' -v h="$home" -v OFS='\t' -v floor=$((NOW - SEEN_KEEP)) \
-      '$1 >= floor { print h, $1, $2 }' >> "$next"
+    rows=$(home_first_seen "$home" ${files[@]+"${files[@]}"}) || { rm -f "$next"; return 1; }
+    printf '%s\n' "$rows" | awk -F '\t' -v h="$home" -v OFS='\t' -v floor=$((NOW - SEEN_KEEP)) \
+      'NF >= 2 && $1 >= floor { print h, $1, $2 }' >> "$next"
   done <<EOF
 $(homes)
 EOF
@@ -183,7 +195,7 @@ EOF
 
 # Count PRs first seen at or after <since> for one home; prints N or unknown.
 home_count() {  # <home> <since>
-  local home=$1 since=$2 meta files=() status
+  local home=$1 since=$2 meta files=() status rows
   if [ "$home" = self ]; then
     for meta in "$STATE"/*.meta; do
       [ -f "$meta" ] || continue
@@ -198,12 +210,13 @@ home_count() {  # <home> <since>
     [ -f "$status" ] && [ -r "$status" ] || { echo unknown; return 0; }
     files=("$status")
   fi
-  home_first_seen "$home" ${files[@]+"${files[@]}"} | awk -F '\t' -v s="$since" '$1 >= s { n++ } END { print n + 0 }'
+  rows=$(home_first_seen "$home" ${files[@]+"${files[@]}"}) || { echo unknown; return 0; }
+  printf '%s\n' "$rows" | awk -F '\t' -v s="$since" 'NF >= 2 && $1 >= s { n++ } END { print n + 0 }'
 }
 
 # The newest first-seen PR time at or after <since>, or empty.
 home_latest() {  # <home> <since>
-  local home=$1 since=$2 meta files=() status
+  local home=$1 since=$2 meta files=() status rows
   if [ "$home" = self ]; then
     for meta in "$STATE"/*.meta; do
       [ -f "$meta" ] || continue
@@ -214,7 +227,8 @@ home_latest() {  # <home> <since>
   else
     [ -f "$STATE/$home.status" ] && files=("$STATE/$home.status")
   fi
-  home_first_seen "$home" ${files[@]+"${files[@]}"} | awk -F '\t' -v s="$since" '$1 >= s && $1 > m { m = $1 } END { if (m) print m }'
+  rows=$(home_first_seen "$home" ${files[@]+"${files[@]}"}) || return 0
+  printf '%s\n' "$rows" | awk -F '\t' -v s="$since" 'NF >= 2 && $1 >= s && $1 > m { m = $1 } END { if (m) print m }'
 }
 
 homes() {
