@@ -1,35 +1,11 @@
-test_kill_after_the_staged_move_resumes_to_exactly_one_delivery (__main__.InterruptedAfterFirstCommit.test_kill_after_the_staged_move_resumes_to_exactly_one_delivery) ... FAIL
-test_torn_staged_move_removes_the_sender_copy_before_delivery (__main__.InterruptedAfterFirstCommit.test_torn_staged_move_removes_the_sender_copy_before_delivery) ... FAIL
+$ bash tests/warp-handoff-replay.test.sh
+test_kill_after_the_staged_move_resumes_to_exactly_one_delivery (__main__.InterruptedAfterFirstCommit.test_kill_after_the_staged_move_resumes_to_exactly_one_delivery) ... ok
+test_torn_staged_move_removes_the_sender_copy_before_delivery (__main__.InterruptedAfterFirstCommit.test_torn_staged_move_removes_the_sender_copy_before_delivery) ... ok
 test_ready_wording_never_stands_in_for_the_acceptance_record (__main__.ReadyWithoutDurableAcceptance.test_ready_wording_never_stands_in_for_the_acceptance_record) ... ok
 test_repeated_ready_notices_leave_the_held_decision_in_place (__main__.RepeatedReadyWhileHeld.test_repeated_ready_notices_leave_the_held_decision_in_place) ... ok
 test_resumed_owner_cannot_carry_an_old_head_forward (__main__.SupersededHeadOnResume.test_resumed_owner_cannot_carry_an_old_head_forward) ... ok
 
-======================================================================
-FAIL: test_kill_after_the_staged_move_resumes_to_exactly_one_delivery (__main__.InterruptedAfterFirstCommit.test_kill_after_the_staged_move_resumes_to_exactly_one_delivery)
-----------------------------------------------------------------------
-Traceback (most recent call last):
-  File "~/.no-mistakes/worktrees/e6b827affbab/01M8C97SXK64D9VAPD7J4X9Y8M/tests/warp-handoff-replay.test.py", line 532, in test_kill_after_the_staged_move_resumes_to_exactly_one_delivery
-    self.assert_delivered_once(confirmed_pending=True)
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
-  File "~/.no-mistakes/worktrees/e6b827affbab/01M8C97SXK64D9VAPD7J4X9Y8M/tests/warp-handoff-replay.test.py", line 517, in assert_delivered_once
-    self.assertRegex(marker.read_text(), r"^confirmed:[a-f0-9]{16}\n$")
-    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-AssertionError: Regex didn't match: '^confirmed:[a-f0-9]{16}\\n$' not found in 'pending:0a2efdfba656cfd5\n'
+Ran 5 tests in 27.053s
 
-======================================================================
-FAIL: test_torn_staged_move_removes_the_sender_copy_before_delivery (__main__.InterruptedAfterFirstCommit.test_torn_staged_move_removes_the_sender_copy_before_delivery)
-----------------------------------------------------------------------
-Traceback (most recent call last):
-  File "~/.no-mistakes/worktrees/e6b827affbab/01M8C97SXK64D9VAPD7J4X9Y8M/tests/warp-handoff-replay.test.py", line 542, in test_torn_staged_move_removes_the_sender_copy_before_delivery
-    self.assert_delivered_once(confirmed_pending=True)
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
-  File "~/.no-mistakes/worktrees/e6b827affbab/01M8C97SXK64D9VAPD7J4X9Y8M/tests/warp-handoff-replay.test.py", line 517, in assert_delivered_once
-    self.assertRegex(marker.read_text(), r"^confirmed:[a-f0-9]{16}\n$")
-    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-AssertionError: Regex didn't match: '^confirmed:[a-f0-9]{16}\\n$' not found in 'pending:6cb8b96066b4fc6e\n'
-
-----------------------------------------------------------------------
-Ran 5 tests in 26.917s
-
-FAILED (failures=2)
-not ok - handoff replay cases failed
+OK
+ok - four durable handoff failure shapes stay refused or converge through their owners
