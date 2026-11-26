@@ -360,6 +360,20 @@ class PreviewTest(unittest.TestCase):
                                       text=True, capture_output=True)
             self.assertNotEqual(passing.returncode, 0)
 
+    def test_verdict_receipts_accept_configured_github_enterprise_host(self):
+        config = self.home / "config"
+        config.mkdir()
+        (config / "github-hosts").write_text("github.acme.test\n")
+        enterprise_url = "https://github.acme.test/acme/widget/pull/1"
+        (self.home / "state" / "review-verdicts.jsonl").write_text(json.dumps({
+            "pr": enterprise_url, "head": sha(1), "verdict": "merge", "reviewer": "reviewer"}) + "\n")
+        history = subprocess.run([VERDICT, "history"], env=self.env, text=True, capture_output=True)
+        self.assertEqual(history.returncode, 0, history.stderr)
+        self.assertEqual(json.loads(history.stdout)["pr"], enterprise_url)
+        passing = subprocess.run([VERDICT, "passing", enterprise_url, sha(1)], env=self.env,
+                                 text=True, capture_output=True)
+        self.assertEqual(passing.returncode, 0, passing.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

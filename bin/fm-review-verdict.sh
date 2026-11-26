@@ -30,29 +30,39 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 FILE="$STATE/review-verdicts.jsonl"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 # The one definition of a readable receipt and of which receipts are eligible.
 # shellcheck disable=SC2016 # jq variables, not shell expansions.
 RECEIPTS='
   def receipt:
     if type == "object"
-       and (.pr | type == "string" and test("^https://github\\.com/[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9._-]{1,100}/pull/[1-9][0-9]*$"))
+       and (.pr | type == "string" and test("^https://[a-z0-9.-]{1,253}/[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9._-]{1,100}/pull/[1-9][0-9]*$"))
        and (.head | type == "string" and test("^[0-9a-f]{40}$"))
        and (.reviewer | type == "string") and (.verdict == "merge" or .verdict == "fix")
     then . else error("invalid verdict receipt") end;
   def eligible: .verdict == "fix" or (has("refute") | not);
   def receipts: [split("\n")[] | select(length > 0) | fromjson | receipt];
 '
+
+fm_review_verdict_receipts_valid() {
+  local urls url
+  urls=$(jq -Rsc "$RECEIPTS"'[receipts[].pr]' "$FILE") || return 1
+  while IFS= read -r url; do
+    fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = github ] || return 1
+  done < <(printf '%s\n' "$urls" | jq -r '.[]')
+}
+
 # Answered before the wake library is sourced, because sourcing it creates the
 # state directory.
 if [ "$#" -eq 1 ] && [ "$1" = history ]; then
   [ -e "$FILE" ] || [ -L "$FILE" ] || exit 0
   [ -f "$FILE" ] && [ ! -L "$FILE" ] || exit 1
+  fm_review_verdict_receipts_valid || exit 1
   exec jq -Rsc "$RECEIPTS"'
     receipts[] | {pr, head, verdict, reviewer, eligible: eligible}
   ' "$FILE"
 fi
-# shellcheck source=bin/fm-pr-lib.sh
-. "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 usage() {
@@ -69,6 +79,7 @@ if [ "${1:-}" = passing ]; then
     exit 2
   fi
   [ -d "$STATE" ] && [ ! -L "$STATE" ] && [ -f "$FILE" ] && [ ! -L "$FILE" ] || exit 1
+  fm_review_verdict_receipts_valid || exit 1
   exec jq -Res --arg pr "$FM_PR_URL" --arg head "$3" "$RECEIPTS"'
     [receipts[] | select(.pr == $pr and .head == $head and eligible)]
     | last | .verdict == "merge"
