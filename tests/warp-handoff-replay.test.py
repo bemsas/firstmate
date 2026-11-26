@@ -427,7 +427,12 @@ class RepeatedReadyWhileHeld(Fixture):
 
 
 class InterruptedAfterFirstCommit(Fixture):
-    """A remote handoff killed once its first durable commit, the outbox, exists."""
+    """A remote handoff killed once its first durable commit, the outbox, exists.
+
+    The torn move is covered for a retry that names the key. The generic
+    --resume-pending path after a torn move is not covered: it fails on the
+    current owner.
+    """
 
     def setUp(self):
         super().setUp()
@@ -455,22 +460,44 @@ class InterruptedAfterFirstCommit(Fixture):
         self.events = self.tmp / "events.log"
         self.env["FM_SSH_BIN"] = str(self.fake / "replay-ssh")
         # The transport runs the real remote scripts locally. The endpoint is only logged.
+        # Around the receiver commit it records what each durable file holds.
         executable(self.fake / "replay-ssh", f"""
             #!{sys.executable}
-            import base64, os, subprocess, sys
+            import base64, json, os, subprocess, sys
+            from pathlib import Path
             args = sys.argv[sys.argv.index("--") + 1:]
             assert args[:2] == ["replay-host", "fm-remote-entrypoint.sh"], args
             home = base64.b64decode(args[4]).decode()
             command = base64.b64decode(args[5]).decode().split("\\0")[:-1]
-            with open({str(self.events)!r}, "a") as log:
-                log.write(command[0] + "\\n")
+            event = {{"host": args[0], "home": home, "command": list(command)}}
+
+            def record():
+                with open({str(self.events)!r}, "a") as log:
+                    log.write(json.dumps(event) + "\\n")
+
+            def holdings():
+                paths = {{"sender": {str(self.main)!r}, "outbox": {str(self.outbox)!r},
+                         "receiver": {str(self.destination)!r}}}
+                return {{name: sum(line.startswith("- [ ] cut-item ")
+                                  for line in (Path(path).read_text().splitlines() if Path(path).exists() else []))
+                        for name, path in paths.items()}}
+
             if command[0] == "fm-remote-secondmate-control.sh":
+                record()
                 sys.exit(0)
             assert command[0] in ("fm-remote-file.sh", "fm-backlog-receive.sh"), command
             env = {{k: v for k, v in os.environ.items() if not k.startswith("FM_")}}
             env.update(FM_HOME=home, FM_ROOT_OVERRIDE={str(ROOT)!r})
             command[0] = os.path.join({str(BIN)!r}, command[0])
-            sys.exit(subprocess.call(command, env=env))
+            commit = event["command"][0] == "fm-backlog-receive.sh"
+            if commit:
+                event["before"] = holdings()
+            status = subprocess.call(command, env=env)
+            if commit:
+                event["after"] = holdings()
+                event["status"] = status
+            record()
+            sys.exit(status)
         """)
 
     def kill_after_staging(self, torn):
@@ -515,10 +542,29 @@ class InterruptedAfterFirstCommit(Fixture):
         self.assertFalse(self.outbox.exists(), "a confirmed receipt kept its outbox")
         self.assertFalse((self.state / ".backlog-handoff-replay-mate.wake-pending").exists())
         self.assertEqual((1, 0), (self.count(self.main, "kept-item"), self.count(self.destination, "kept-item")))
-        self.assertEqual(
-            ["fm-remote-file.sh", "fm-backlog-receive.sh", "fm-remote-secondmate-control.sh"],
-            self.lines(self.events),
-        )
+        self.assert_receiving_identity()
+        self.assert_sender_clean_at_receiver_commit()
+
+    def transport(self):
+        return [json.loads(line) for line in self.lines(self.events)]
+
+    def assert_receiving_identity(self):
+        """Every transport call names the one registered host, home and receiving task."""
+        put, receive, wake = events = self.transport()
+        self.assertEqual([("replay-host", str(self.remote))] * 3, [(e["host"], e["home"]) for e in events])
+        outbox = "state/handoff/replay-mate.outbox.md"
+        self.assertEqual(["fm-remote-file.sh", "put", outbox], put["command"][:3])
+        self.assertEqual(["fm-backlog-receive.sh", outbox], receive["command"][:2])
+        self.assertEqual(put["command"][4:], receive["command"][2:], "the receiver committed other bytes")
+        self.assertEqual(["fm-remote-secondmate-control.sh", "send-stdin", "replay-mate"], wake["command"])
+        self.assertEqual("replay-mate\n", (self.remote / ".fm-secondmate-home").read_text())
+
+    def assert_sender_clean_at_receiver_commit(self):
+        """The sender has let go before the receiver commits, and the outbox outlives that commit."""
+        receive = self.transport()[1]
+        self.assertEqual(0, receive["status"])
+        self.assertEqual({"sender": 0, "outbox": 1, "receiver": 0}, receive["before"])
+        self.assertEqual({"sender": 0, "outbox": 1, "receiver": 1}, receive["after"])
 
     def test_kill_after_the_staged_move_resumes_to_exactly_one_delivery(self):
         self.kill_after_staging(torn=False)
