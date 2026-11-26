@@ -3,9 +3,11 @@
 
 Usage: fm-worker-pretool-check.py [--root WORKTREE] [--cursor] [--kimi] [--polytoken]
 Exit 2 blocks vendor/basisone writes and git worktree add/remove/prune/move.
-The vendor rule is CommercialEye's: it is skipped only when --root (bound at
-launch, never the payload cwd) is a checkout whose origin verifies as another
-repository. A missing or unverifiable identity keeps the rule.
+The vendor rule is CommercialEye's. A structured write or patch is exempt only
+when both --root (bound at launch, never the payload cwd) and the checkout that
+holds each resolved destination have origins that verify as other repositories.
+A missing or unverifiable identity keeps the rule, as do shell commands, whose
+actual write targets cannot be proven for that exemption.
 Read tools remain available. Shell commands touching protected paths are allowed
 only for known read operations, whose redirections name literal paths outside
 the subtree. Quoted here-documents that cat writes to literal paths outside it
@@ -15,6 +17,7 @@ are data. This is a tool-call seatbelt, not an OS sandbox.
 """
 
 import argparse
+import functools
 import json
 import os
 from pathlib import Path
@@ -24,7 +27,8 @@ import subprocess
 import sys
 
 
-def protected(value, cwd, parents=False):
+def protected(value, cwd, parents=False, by_destination=False):
+    """by_destination ignores subtrees held by a verified other repository."""
     if not isinstance(value, str) or not value:
         return False
     path = Path(os.path.expanduser(value))
@@ -32,9 +36,10 @@ def protected(value, cwd, parents=False):
         path = Path(cwd) / path
     for candidate in (Path(os.path.abspath(path)), path.resolve()):
         parts = candidate.parts
-        if any(parts[i:i + 2] == ("vendor", "basisone") for i in range(len(parts) - 1)):
-            return True
+        holders = [i for i in range(len(parts) - 1) if parts[i:i + 2] == ("vendor", "basisone")]
         if parents and candidate.name == "vendor":
+            holders.append(len(parts) - 1)
+        if any(not by_destination or commercialeye_scope(str(Path(*parts[:i]))) for i in holders):
             return True
     return False
 
@@ -327,8 +332,9 @@ done
 """
 
 
+@functools.lru_cache(maxsize=None)
 def commercialeye_scope(root):
-    """False only when the launch root verifies as some other repository."""
+    """False only when this checkout verifies as some other repository."""
     if not root:
         return True
     library = Path(__file__).resolve().with_name("fm-role-lib.sh")
@@ -347,13 +353,13 @@ def commercialeye_scope(root):
 
 
 def reason(payload, root):
-    denied = evaluate(payload, root, True)
+    denied = evaluate(payload, root, False)
     if denied and not commercialeye_scope(root):
-        return evaluate(payload, root, False)
+        return evaluate(payload, root, True)
     return denied
 
 
-def evaluate(payload, root, vendor):
+def evaluate(payload, root, by_destination):
     name = str(payload.get("tool_name", payload.get("toolName", ""))).lower()
     args = payload.get("tool_input", payload.get("toolInput", payload.get("input", {})))
     cwd = payload.get("cwd") or root or os.getcwd()
@@ -364,15 +370,17 @@ def evaluate(payload, root, vendor):
         if isinstance(command, list):
             command = shlex.join(command)
         if isinstance(command, str):
-            denied = shell_reason(command, cwd, vendor)
+            denied = shell_reason(command, cwd)
             if denied:
                 return denied
-        if vendor and name not in READ_TOOLS and any(protected(p, cwd, parents=True) for p in paths(args)):
+        if name not in READ_TOOLS and any(
+            protected(p, cwd, True, by_destination) for p in paths(args)
+        ):
             return "worker edits to vendor/basisone are blocked"
-    if vendor and "patch" in name:
+    if "patch" in name:
         for text in strings(args):
             for match in re.finditer(r"^(?:\*\*\* (?:Add|Update|Delete|Move to) File: |\*\*\* Move to: |(?:rename|copy) (?:from|to) )(.+)$", text, re.M):
-                if protected(match[1], cwd, parents=True):
+                if protected(match[1], cwd, True, by_destination):
                     return "worker patches to vendor/basisone are blocked"
     return None
 
