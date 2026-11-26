@@ -947,7 +947,7 @@ task_json_row() {  # <captured-meta> <id>
     home_json=$(jq -n '{path:null,present:false}')
   fi
 
-  jq -n \
+  printf '%s' "$open_decisions_json" | jq -Rs \
     --arg id "$id" \
     --arg kind "$kind" \
     --arg harness "$harness" \
@@ -976,11 +976,11 @@ task_json_row() {  # <captured-meta> <id>
     --argjson worktree_path "$worktree_json" \
     --argjson home_path "$home_json" \
     --argjson endpoint_exists "$endpoint_exists" \
-    --argjson open_decisions "$open_decisions_json" \
     --argjson pending_decision "$(bool_json "$pending_decision")" \
     --argjson blocked_event "$(bool_json "$blocked_event")" \
     --argjson report_present "$(bool_json "$report_present")" \
-    '{
+    'fromjson as $open_decisions
+    | {
       id:$id,
       kind:$kind,
       harness:($harness // ""),
@@ -1812,8 +1812,14 @@ terminal_evidence_json() {  # <parent-task-json> <event-note> <evidence-contradi
 }
 
 parent_evidence_reconciliation_json() {  # <summary-json-file> <activities-json> <decisions-json>
-  jq -n --slurpfile summary "$1" --argjson activities "$2" --argjson decisions "$3" '
-    ($summary[0]) as $summary
+  # Aggregated status JSON can exceed Linux's per-argument limit, so it reaches jq
+  # on stdin, split on the 0x1E byte that valid JSON cannot contain; this needs no
+  # /proc. The part count and fromjson reject missing or malformed input.
+  printf '%s\036%s' "$2" "$3" | jq -Rs --slurpfile summary "$1" '
+    split("\u001e")
+    | if length == 2 then map(fromjson) else error("invalid reconciliation input") end
+    | . as [$activities, $decisions]
+    | ($summary[0]) as $summary
     |
     def keyed: . != null and . != "" and . != "default";
     def result($e; $matches; $complete; $surface):
@@ -2031,15 +2037,17 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
           '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no useful contradiction check",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
       fi
       if printf '%s' "$terminal" | jq -e '.contradiction == true' >/dev/null; then contradiction=true; fi
-      jq -n \
+      printf '%s\036%s\036%s\036%s' "$decisions" "$activities" "$activity_scan" "$reconciliation" | jq -Rs \
         --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg state "$state" --arg observed "$summary_observed" \
         --arg summary_source "$summary_source" --arg summary_freshness "$summary_freshness" --argjson summary_age "$summary_age" \
         --arg spawn_gen "$sampled_spawn_gen" \
-        --argjson registered "$registered" --slurpfile summary "$summary_file" --argjson summary_valid "$summary_valid" --argjson decisions "$decisions" \
-        --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
-        --argjson reconciliation "$reconciliation" --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
+        --argjson registered "$registered" --slurpfile summary "$summary_file" --argjson summary_valid "$summary_valid" \
+        --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
         --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" '
-        ($summary[0]) as $summary
+        split("\u001e")
+        | if length == 4 then map(fromjson) else error("invalid record input") end
+        | . as [$decisions, $activities, $activity_scan, $reconciliation]
+        | ($summary[0]) as $summary
         |
         {id:$id,home:$home,host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          spawn_gen:($spawn_gen | if . == "" then null else . end),
@@ -2071,13 +2079,16 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
         terminal=$(jq -n --arg observed "$SNAPSHOT_NOW" \
           '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no parent event to compare",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
       fi
-      jq -n \
+      printf '%s\036%s\036%s' "$decisions" "$activities" "$activity_scan" | jq -Rs \
         --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
         --arg spawn_gen "$sampled_spawn_gen" \
         --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
-        --argjson registered "$registered" --argjson event_age "$event_age" --argjson observed_age "$observed_age" --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
-        --argjson decisions "$decisions" --argjson terminal "$terminal" --slurpfile summary "$summary_file" --argjson summary_sampled "$summary_sampled" '
-        ($summary[0]) as $summary
+        --argjson registered "$registered" --argjson event_age "$event_age" --argjson observed_age "$observed_age" \
+        --argjson terminal "$terminal" --slurpfile summary "$summary_file" --argjson summary_sampled "$summary_sampled" '
+        split("\u001e")
+        | if length == 3 then map(fromjson) else error("invalid record input") end
+        | . as [$decisions, $activities, $activity_scan]
+        | ($summary[0]) as $summary
         |
         {id:$id,home:($home | if . == "" then null else . end),host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          spawn_gen:($spawn_gen | if . == "" then null else . end),
