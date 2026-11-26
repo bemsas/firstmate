@@ -916,7 +916,6 @@ tests/fm-remote-doctor.test.sh 14460
 tests/fm-remote-entrypoint.test.sh 134
 tests/fm-remote-herdr-guard.test.sh 3140
 tests/fm-remote-herdr-identity.test.sh 6158
-tests/fm-remote-job-claim-reap.test.sh 4059
 tests/fm-remote-job-claim-retention.test.sh 247
 tests/fm-remote-job-orphan-reap.test.sh 2985
 tests/fm-remote-job-process-start.test.sh 11871
