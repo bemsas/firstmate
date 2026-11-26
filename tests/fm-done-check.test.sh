@@ -551,10 +551,13 @@ A_ID=ship-accept
 A_META="$A_STATE/$A_ID.meta"
 A_STATUS="$A_STATE/$A_ID.status"
 A_URL=https://github.com/acme/widget/pull/8
-A_POLICY="$A_HOME/config/done-acceptance/$A_ID.json"
+# Policies are injected through FM_CONFIG_OVERRIDE, so the fixture home itself
+# never opts in to done acceptance.
+A_CONFIG="$A/injected"
+A_POLICY="$A_CONFIG/done-acceptance/$A_ID.json"
 A_VERDICT="$ROOT/bin/fm-review-verdict.sh"
 A_FAKE=$(make_spawn_fakebin "$A/tools" codex claude gh)
-mkdir -p "$A_STATE" "$A_HOME/config/done-acceptance" "$A_HOME/data/$A_ID" "$A_HOME/projects"
+mkdir -p "$A_STATE" "$A_CONFIG/done-acceptance" "$A_HOME/data/$A_ID" "$A_HOME/projects"
 touch "$A_STATE/.last-watcher-beat"
 
 cat > "$A_FAKE/gh-axi" <<'STUB'
@@ -641,7 +644,7 @@ STUB
 chmod +x "$A_FAKE/gh"
 
 accept_cmd() {
-  FM_ROOT_OVERRIDE="$ROOT_STUB" FM_HOME="$A_HOME" PATH="$A_FAKE:$PATH" \
+  FM_ROOT_OVERRIDE="$ROOT_STUB" FM_HOME="$A_HOME" FM_CONFIG_OVERRIDE="$A_CONFIG" PATH="$A_FAKE:$PATH" \
     A_HEAD="$A_HEAD" A_BASE="$A_BASE" A_URL="$A_URL" "$@"
 }
 
@@ -785,6 +788,8 @@ SH
 // Documentation example: test.skip("deferred", check);
 /* Documentation example: test.only("focused", check); */
 if (checkHelp) /test.skip()/.test(helpText);
+if (rows. while) /test.skip()/.test(helpText);
+const matches = () => { return /test.skip()/.test(helpText); };
 test("render test.skip() in the guide", () => expect(guide()).toContain("skip"));
 test(`render test.only() in the guide`, () => expect(guide()).toContain("only"));
 test(`render test.skip() for ${locale}`, () => expect(guide(locale)).toContain("skip"));
@@ -837,6 +842,11 @@ literal-js|src/iterator.test.js|added trivial assertion|it("sample", () => expec
 after-pattern-js|src/iterator.test.js|added skip|if (checkHelp) /test.skip()/.test(helpText); test.skip("later", check);
 divided-call-js|src/iterator.test.js|added skip|const half = (total) / test.skip("later", check) / 2;
 divided-method-js|src/iterator.test.js|added skip|const half = rows.if(total) / test.skip("later", check) / 2;
+spaced-method-js|src/iterator.test.js|added skip|const half = rows. if(total) / test.skip("later", check) / 2;
+spaced-line-js|src/iterator.test.js|added skip|const half = rows\n  .\n  while(total) / test.skip("later", check) / 2;
+spaced-comment-js|src/iterator.test.js|added skip|const half = rows?. /* count */ for(total) / test.skip("later", check) / 2;
+divided-property-js|src/iterator.test.js|added skip|const half = rows.return / test.skip("later", check) / 2;
+divided-name-js|src/iterator.test.js|added skip|const half = $return / test.skip("later", check) / 2;
 quoted-condition-js|src/iterator.test.js|added skip|if (mark === ") /") test.skip("later", check); use("/");
 commented-condition-js|src/iterator.test.js|added skip|if (mark /* ) /" */) test.skip("later", check); use("/");
 after-title-js|src/iterator.test.js|added skip|it(`a ${x} b`, check);\ntest.skip("later", check);\nit(`c`, check);
@@ -1174,7 +1184,7 @@ test_acceptance_entry_points() {
     fail "a symlink to the candidate's own project should name the same project"
   accept_refused "$scout.meta" "$A_VERDICT" refute "$A_ID" "$scout" "$A_HEAD"
 
-  result=$(A_HEAD="$A_HEAD" A_BASE="$A_BASE" A_URL="$A_URL" \
+  result=$(A_HEAD="$A_HEAD" A_BASE="$A_BASE" A_URL="$A_URL" FM_TEST_CONFIG="$A_CONFIG" \
     fm_test_run_spawn "$A_HOME" "$A/pool" "$A_FAKE" "$scout" "$A_REPO" \
     --scout --backend tmux --harness codex --model gpt-5.6-sol) || fail "native scout did not launch: $result"
   write_report "$scout" merge 'Checked the criterion against app.py. No blocker.'
@@ -1379,6 +1389,285 @@ test_review_event_retry() {
   pass "retrying a recorded review appends nothing and a later decision on the same head stays effective"
 }
 
+# Every normal read and registration entry point, with the scout's newest report
+# not yet recorded by the supervisor.
+assert_accepted() {  # <label>
+  local result
+  result=$(accept_cmd "$SCRIPT" passing "$A_ID" "$A_URL" "$A_HEAD" 2>&1) || fail "$1: passing refused: $result"
+  result=$(accept_cmd "$SCRIPT" assert "$A_ID" "$A_URL" "$A_HEAD" 2>&1) || fail "$1: assert refused: $result"
+  result=$(accept_cmd "$PR_CHECK" "$A_ID" "$A_URL" 2>&1) || fail "$1: PR registration refused: $result"
+  result=$(ship_done_read) || fail "$1: current-state read refused: $result"
+}
+
+assert_displaced() {  # <label> <scout>
+  local reason="native review report from $2 is not the saved verdict"
+  accept_refused "$reason" "$SCRIPT" passing "$A_ID" "$A_URL" "$A_HEAD"
+  accept_refused "$reason" "$SCRIPT" assert "$A_ID" "$A_URL" "$A_HEAD"
+  accept_refused "$reason" "$SCRIPT" accept "$A_ID" "$A_URL"
+  accept_refused "$reason" "$PR_CHECK" "$A_ID" "$A_URL"
+  FM_PR_CHECK_MERGE=1 accept_refused "$reason" "$PR_CHECK" "$A_ID" "$A_URL"
+  ship_done_read >/dev/null && fail "$1: current-state read kept a displaced acceptance"
+}
+
+# The current-state, reconciliation and delivery readers share this library gate.
+ship_done_read() {
+  accept_cmd bash -c '. "$1"; fm_dod_accept_ship_done ship direct-PR "$2" "$2" "$3" "$4" "$5" "$6"' fixture \
+    "$ROOT/bin/fm-dod-lib.sh" "$A_REPO" "$(tail -n 1 "$A_STATUS")" "$A_STATE" "$A_ID" "$A_META"
+}
+
+test_native_report_displaces_acceptance() {
+  local report="$A_HOME/data/keeper/report.md" status="$A_STATE/keeper.status" scout
+  accept_reset
+  printf 'value = 37\n' > "$A_REPO/app.py"
+  accept_candidate
+  rm -f "$A_STATE/review-verdicts.jsonl" "$A_STATE/$A_ID.accepted.json"
+  prepare_review_record keeper 'Checked app.py. No blocker.' merge
+  record_review keeper
+  accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL" >/dev/null || fail "could not accept the recorded review"
+  assert_accepted "recorded review"
+  cp "$report" "$A/keeper.report"
+  cp "$status" "$A/keeper.status"
+
+  # The same scout's newer report, its status, or both, before it is recorded.
+  write_report keeper fix 'Found a blocker in app.py.'
+  assert_displaced "replaced report" keeper
+  cat "$A/keeper.report" > "$report"
+  assert_accepted "exact saved report"
+  report_review keeper fix
+  assert_displaced "newer status" keeper
+  cat "$A/keeper.status" > "$status"
+  write_report keeper merge 'Rechecked app.py. Still no blocker.'
+  report_review keeper merge
+  assert_displaced "revised merge report" keeper
+  cat "$A/keeper.report" > "$report"
+
+  # A retry of the saved merge is not a new report.
+  assert_review_retry keeper "repeated merge report"
+  assert_accepted "repeated merge report"
+  printf 'working: rechecking the fixture\n' >> "$status"
+  assert_displaced "withdrawn status" keeper
+  report_review keeper merge
+  assert_accepted "merge reported again"
+
+  # A fresh scout displaces the saved verdict when it reports, not when it is
+  # dispatched. A report it leaves behind without a status still blocks.
+  prepare_review_record rival 'Found a blocker in app.py.' fix
+  mv "$A_HOME/data/rival/report.md" "$A/rival.report"
+  mv "$A_STATE/rival.status" "$A/rival.status"
+  assert_accepted "dispatched scout without a report"
+  cp "$A/rival.report" "$A_HOME/data/rival/report.md"
+  assert_displaced "fresh scout report" rival
+  cp "$A/rival.status" "$A_STATE/rival.status"
+  assert_displaced "fresh scout verdict" rival
+  mkdir "$A/retired"
+  mv "$A_STATE/rival.meta" "$A_STATE/rival.status" "$A/retired/"
+  assert_displaced "retired scout with an unrecorded blocker" rival
+  mv "$A/retired/rival.meta" "$A/retired/rival.status" "$A_STATE/"
+  record_review rival
+  accept_refused "missing passing fresh-context review" "$SCRIPT" passing "$A_ID" "$A_URL" "$A_HEAD"
+
+  # A later recorded merge needs its own acceptance, and a blocker reported
+  # again displaces that one too.
+  prepare_review_record arbiter 'Blocker does not reproduce.' merge
+  accept_refused "missing passing fresh-context review" "$SCRIPT" accept "$A_ID" "$A_URL"
+  record_review arbiter
+  accept_refused "accepted evidence no longer matches" "$SCRIPT" passing "$A_ID" "$A_URL" "$A_HEAD"
+  accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL" >/dev/null || fail "could not accept the later review"
+  assert_accepted "later review"
+  cp "$A_STATE/rival.status" "$A/rival.status"
+  report_review rival fix
+  assert_displaced "blocker reported again" rival
+  cat "$A/rival.status" > "$A_STATE/rival.status"
+
+  # An interrupted retirement can leave a scout with only its status or only its
+  # task record. Saved evidence still counts and an unsaved blocker still holds.
+  mkdir "$A/partial"
+  mv "$A_STATE/keeper.meta" "$A_STATE/rival.meta" "$A_STATE/arbiter.meta" "$A/partial/"
+  assert_accepted "scouts without task records"
+  accept_refused "cannot be recorded without rival.meta" "$A_VERDICT" refute "$A_ID" rival "$A_HEAD"
+  report_review rival fix
+  assert_displaced "blocker reported again without a task record" rival
+  cat "$A/rival.status" > "$A_STATE/rival.status"
+  mv "$A/partial/"*.meta "$A_STATE/"
+  mv "$A_STATE/keeper.status" "$A_STATE/rival.status" "$A_STATE/arbiter.status" "$A/partial/"
+  assert_accepted "scouts without status"
+  accept_refused "cannot be recorded without arbiter.status" "$A_VERDICT" refute "$A_ID" arbiter "$A_HEAD"
+  mv "$A/partial/"*.status "$A_STATE/"
+  prepare_review_record spare 'Checked app.py. No blocker.' merge
+  assert_displaced "unsaved merge from a complete scout" spare
+  mv "$A_STATE/spare.meta" "$A/partial/"
+  assert_accepted "unsaved merge without a task record"
+  report_review spare fix
+  assert_displaced "unsaved blocker in a remaining status" spare
+  mv "$A/partial/spare.meta" "$A_STATE/"
+  rm "$A_STATE/spare.status"
+  assert_accepted "unsaved merge without a status"
+  write_report spare fix 'Found a blocker in app.py.'
+  assert_displaced "unsaved blocker without a status" spare
+  rm "$A_STATE/spare.meta" "$A_STATE/spare.refute.json"
+
+  # Retired scouts keep the saved verdict, and its report must stay exact.
+  for scout in keeper rival arbiter; do
+    rm "$A_STATE/$scout.meta" "$A_STATE/$scout.status"
+  done
+  assert_accepted "retired scouts"
+  write_report arbiter merge 'Rewritten after retirement.'
+  assert_displaced "rewritten report of a retired scout" arbiter
+  pass "a native review report displaces the saved verdict at every acceptance entry point before it is recorded"
+}
+
+# The real teardown of a review scout, with a fake terminal and pool.
+retire_scout() {  # <scout>
+  local fake="$A/retire-fakebin" tool
+  if [ ! -d "$fake" ]; then
+    mkdir "$fake"
+    for tool in tmux treehouse no-mistakes; do
+      printf '#!/usr/bin/env bash\nexit 0\n' > "$fake/$tool"
+      chmod +x "$fake/$tool"
+    done
+    cat > "$fake/tmux" <<'STUB'
+#!/usr/bin/env bash
+if [ -n "${A_LATE_REPORT:-}" ] && [ ! -e "$A_LATE_REPORT.sent" ]; then
+  : > "$A_LATE_REPORT.sent"
+  cat "$A_LATE_REPORT" >> "$A_LATE_STATUS"
+fi
+exit 0
+STUB
+  fi
+  if [ ! -d "$A/scratch-$1" ]; then
+    git clone --quiet --branch dev "$A/origin.git" "$A/scratch-$1" || fail "cannot create scratch copy for $1"
+    printf '%s\n' "window=firstmate:fm-$1" "endpoint_task_id=$1" "worktree=$A/scratch-$1" \
+      "mode=no-mistakes" "decisions_reviewed=1" >> "$A_STATE/$1.meta"
+  fi
+  accept_cmd env PATH="$fake:$A_FAKE:$PATH" "$ROOT/bin/fm-teardown.sh" "$1" > "$A/retire.out" 2>&1
+}
+
+assert_retirement_held() {  # <label> <scout>
+  retire_scout "$2"
+  assert_displaced "$1" "$2"
+  assert_grep "REFUSED: refute scout $2" "$A/retire.out" "$1: teardown should explain the hold"
+  assert_present "$A_STATE/$2.status" "$1: teardown removed the only evidence of the blocker"
+  assert_present "$A_STATE/$2.meta" "$1: teardown removed the scout record"
+}
+
+assert_retired() {  # <label> <scout>
+  retire_scout "$2" || fail "$1: teardown refused: $(cat "$A/retire.out")"
+  assert_absent "$A_STATE/$2.status" "$1: retired scout kept its status"
+  assert_absent "$A_STATE/$2.meta" "$1: retired scout kept its record"
+}
+
+# The ship's pending-close record, written by its owning library.
+write_ship_close() {  # <spawn-gen>
+  accept_cmd bash -c '. "$1"; fm_backlog_close_marker_write "$2" "$3" "$4" "$5"' fixture \
+    "$ROOT/bin/fm-backlog-transition-lib.sh" "$A_STATE" "$A_ID" "$A_HOME/data" "$1" ||
+    fail "could not write the ship's pending close"
+}
+
+test_scout_retirement_keeps_unrecorded_blocker() {
+  accept_reset
+  printf 'value = 41\n' > "$A_REPO/app.py"
+  accept_candidate
+  rm -f "$A_STATE/review-verdicts.jsonl" "$A_STATE/$A_ID.accepted.json"
+  prepare_review_record critic 'Found a blocker in app.py.' fix
+  record_review critic
+  prepare_review_record judge 'Blocker does not reproduce.' merge
+  record_review judge
+  accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL" >/dev/null || fail "could not accept the later review"
+  assert_accepted "later review"
+
+  # The same blocker reported again changes only the scout's status.
+  report_review critic fix
+  assert_retirement_held "blocker reported again" critic
+  record_review critic
+  assert_retired "recorded blocker" critic
+  accept_refused "missing passing fresh-context review" "$SCRIPT" passing "$A_ID" "$A_URL" "$A_HEAD"
+
+  # A blocker announced only in the status is held the same way.
+  prepare_review_record umpire 'Rechecked app.py. No blocker.' merge
+  record_review umpire
+  accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL" >/dev/null || fail "could not accept the newest review"
+  report_review judge fix
+  assert_retirement_held "blocker announced in the status" judge
+  report_review judge merge
+  assert_accepted "withdrawn announcement"
+
+  # A progress line neither withdraws an announced blocker nor lets retirement
+  # restore a withdrawn pass.
+  report_review judge fix
+  printf 'working: rechecking the fixture\n' >> "$A_STATE/judge.status"
+  assert_retirement_held "blocker followed by progress" judge
+  report_review judge merge
+  assert_accepted "replaced announcement"
+  printf 'working: rechecking the fixture\n' >> "$A_STATE/umpire.status"
+  assert_retirement_held "withdrawn merge" umpire
+  report_review umpire merge
+  assert_accepted "merge reported again"
+  printf 'working: the evidence is unavailable\n' >> "$A_STATE/umpire.status"
+  assert_retirement_held "latest reviewer withdraws again" umpire
+  prepare_review_record relief 'Rechecked app.py. No blocker.' merge
+  record_review relief
+  accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL" >/dev/null || fail "could not accept the replacement review"
+
+  # Scouts with only recorded or replaced evidence retire and the acceptance stands.
+  assert_retired "recorded merge" judge
+  assert_retired "replaced withdrawn merge" umpire
+  assert_retired "latest recorded merge" relief
+  assert_accepted "retired scouts"
+
+  # An unrecorded blocker for a superseded candidate holds nothing.
+  prepare_review_record late 'Found a blocker in app.py.' fix
+  assert_retirement_held "unrecorded blocker" late
+  cp "$A_POLICY" "$A/reviewed.policy"
+  (umask 077; jq '.criteria="The value is two or more."' "$A/reviewed.policy" > "$A_POLICY")
+  accept_refused "did not sign off" "$A_VERDICT" refute "$A_ID" late "$A_HEAD"
+  retire_scout late && fail "a policy re-pin released an unrecorded blocker"
+  assert_grep "unsaved blocker 'Refute $A_BASE $A_HEAD fix'" "$A/retire.out" "the hold should name the blocker"
+  assert_grep "publish and report a fresh exact candidate against the current approved base and policy" \
+    "$A/retire.out" "the hold should name a remedy that works after a policy re-pin"
+  cat "$A/reviewed.policy" > "$A_POLICY"
+
+  # A ship record left without its status releases a scout only through the
+  # pending close that owns that incarnation's retirement.
+  prepare_review_record orphan 'Found a blocker in app.py.' fix
+  mv "$A_STATUS" "$A/ship.status"
+  retire_scout orphan && fail "a missing ship status alone released an unrecorded blocker"
+  assert_grep "no pending close proves" "$A/retire.out" "the hold should name the missing proof"
+  write_ship_close s999.200.300
+  retire_scout orphan && fail "another incarnation's pending close released an unrecorded blocker"
+  write_ship_close s100.200.300
+  assert_retired "retiring ship" orphan
+  rm "$A_STATE/$A_ID.backlog-close"
+  mv "$A/ship.status" "$A_STATUS"
+  printf 'value = 42\n' > "$A_REPO/app.py"
+  accept_candidate
+  assert_retired "superseded candidate" late
+
+  # A blocker reported while teardown is already closing the scout is held too,
+  # and recording it lets the same teardown finish.
+  prepare_review_record tardy 'Rechecked app.py. Still no blocker.' merge
+  record_review tardy
+  accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL" >/dev/null || fail "could not accept the tardy scout's review"
+  printf 'done [at=1]: Refute %s %s fix\n' "$A_BASE" "$A_HEAD" > "$A/late.report"
+  local backlog="$A_HOME/data/backlog.md" ledger="$A_STATE/fleet-ledger.jsonl"
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$backlog"
+  printf '%s\n' 'backend = "markdown"' '' '[markdown]' 'path = "data/backlog.md"' > "$A_HOME/.tasks.toml"
+  (cd "$A_HOME" && tasks-axi add tardy "Review tardy" --kind scout --file "$backlog" &&
+    tasks-axi start tardy --file "$backlog") >/dev/null || fail "could not seed the scout's backlog row"
+  : > "$A_CONFIG/fleet-ledger"
+  A_LATE_REPORT="$A/late.report" A_LATE_STATUS="$A_STATE/tardy.status" assert_retirement_held "late report" tardy
+  assert_present "$A/late.report.sent" "the fixture should report during teardown"
+  assert_absent "$A_STATE/tardy.backlog-close" "a refused retirement left a close for session start to replay"
+  assert_absent "$ledger" "the fleet ledger reported a refused cleanup"
+  write_report tardy fix 'Found a blocker while closing.'
+  record_review tardy
+  assert_retired "recorded late report" tardy
+  jq -se 'any(.[]; .event == "task.cleaned_up" and .task == "tardy")' "$ledger" >/dev/null ||
+    fail "the fleet ledger missed the completed cleanup"
+  assert_absent "$A_STATE/tardy.backlog-close" "the completed close left its pending record"
+  rm "$A_CONFIG/fleet-ledger" "$A_HOME/.tasks.toml" "$backlog"
+  pass "retiring a refute scout never removes the only evidence of a current blocker"
+}
+
 test_acceptance_inspects_pipeline_objects() {
   local result cache="$A_STATE/$A_ID.acceptance-git"
   accept_reset
@@ -1431,6 +1720,8 @@ fi
 
 if [ "${1:-}" = --review-events ]; then
   test_review_event_retry
+  test_native_report_displaces_acceptance
+  test_scout_retirement_keeps_unrecorded_blocker
   exit
 fi
 
@@ -1442,5 +1733,7 @@ test_acceptance_pinned_test_signals
 test_acceptance_regression
 test_acceptance_entry_points
 test_review_event_retry
+test_native_report_displaces_acceptance
+test_scout_retirement_keeps_unrecorded_blocker
 test_acceptance_inspects_pipeline_objects
 test_acceptance_requires_complete_builder_lineage

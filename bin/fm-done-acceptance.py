@@ -98,7 +98,7 @@ def metadata(task):
     return unique_fields(line.split("=", 1) for line in records if "=" in line)
 
 
-def done_event(task):
+def done_event(task, announcing=()):
     path = STATE / f"{task}.status"
     snapshot, info = private_bytes(path, private=False, with_stat=True)
     # Only home-recorded byte ranges can identify supervisor operational
@@ -126,6 +126,9 @@ def done_event(task):
         if not (operational.match(line) and any(start <= offset and end <= stop for start, stop in ranges)):
             retained.append((line, end))
         offset = end
+    if announcing:
+        retained = [(line, end) for line, end in retained
+                    if line.lstrip().startswith(b"done") and line.rstrip().endswith(announcing)]
     result = subprocess.check_output(
         ["bash", "-c",
          '. "$1"; scan=$(_fm_crew_status_event_scan); line=${scan##*$\'\\n\'}; '
@@ -564,11 +567,14 @@ def js_signals(data, _path):
     comment = r"//[^\r\n]*|/\*[\s\S]*?\*/"
     quoted = r"'(?:\\[\s\S]|[^'\\\r\n])*'" r'|"(?:\\[\s\S]|[^"\\\r\n])*"'
     regex = (
-        r"""(?:[(,=:\[&|?;]|=>|\breturn\b|(?<![.#\w$])(?:if|while|for)\s*\([^(){}'"`/\r\n]*\))\s*"""
+        r"""(?:[(,=:\[&|?;]|=>|(?<![.#\w$])(?:return\b|(?:if|while|for)\s*\([^(){}'"`/\r\n]*\)))\s*"""
         r"/(?![*/])(?:\\.|\[(?:\\.|[^\]\\\r\n])*\]|[^/\\\[\r\n])+/"
     )
     gap = rf"(?:\s|{comment})*"
     dot = rf"{gap}\.{gap}"
+    # A keyword after a dot is a property name, however far the dot is. Consume
+    # both so it cannot start a statement whose regular expression hides code.
+    member = rf"\.{gap}(?:return|if|while|for)\b"
     modifier = rf"(?:(?:concurrent|sequential){dot})?(?:skip|skipIf|runIf|todo|only)"
     skip = (
         rf"\b(?:describe|it|test){dot}{modifier}(?:{gap}\(|{dot}each{gap}[(`])"
@@ -580,7 +586,7 @@ def js_signals(data, _path):
         rf"to(?:Be|Equal|StrictEqual){gap}\({gap}(?P=expected){gap}\)"
     )
     signals = re.compile(
-        rf"{comment}|{quoted}|{regex}|(?P<skip>{skip})|(?P<trivial>{expect})|(?P<template>[`{{}}])"
+        rf"{comment}|{quoted}|{member}|{regex}|(?P<skip>{skip})|(?P<trivial>{expect})|(?P<template>[`{{}}])"
     )
     template_text = re.compile(r"(?:\\[\s\S]|[^\\`$]|\$(?!\{))*(?P<end>`|\$\{|)")
     text = data.decode()
@@ -883,6 +889,9 @@ def review_result(task, reviewer, head):
     require(identity == ticket["candidate"] and head == identity["head"]
             and ticket["reviewer"] == reviewer and reviewer != task,
             "review did not sign off on this exact task, base and head")
+    for record in ("meta", "status"):
+        require(os.path.lexists(STATE / f"{reviewer}.{record}"),
+                f"review cannot be recorded without {reviewer}.{record}")
     meta = metadata(reviewer)
     require(meta.get("kind") == "scout" and meta.get("spawn_gen")
             and same_project(meta.get("project"), identity["project"])
@@ -912,8 +921,62 @@ def review_result(task, reviewer, head):
     print(json_bytes(row).decode().strip())
 
 
-def passing_review(identity):
+def reviewer_record(identity, reviewer, ticket, row):
+    # What a reviewer reports now, and whether its report and status are the ones
+    # its last saved row stands for under the retry rule in review_event.
+    status, meta = (STATE / f"{reviewer}.{record}" for record in ("status", "meta"))
+    note, event = done_event(reviewer) if os.path.lexists(status) else ("", "")
+    pins = f"Refute {identity['base']} {identity['head']} "
+    if note not in (pins + "merge", pins + "fix") and os.path.lexists(status):
+        # Only another verdict replaces an announced blocker.
+        announced = done_event(reviewer, ((pins + "merge").encode(), (pins + "fix").encode()))
+        if announced[0] == pins + "fix":
+            note, event = announced
+    path = DATA / reviewer / "report.md"
+    report = private_bytes(path, private=False) if os.path.lexists(path) else b""
+    title = report.partition(b"\n")[0].decode(errors="replace")
+    if row is None:
+        return note, title, False, False
+    refute = row["refute"]
+    verdict = pins + row["verdict"]
+    same_report = title == verdict and refute["report"] == digest(report) and refute["ticket"] == ticket
+    same_event = (note == verdict and (row["verdict"] == "merge" or refute["event"] == event)
+                  and (not os.path.lexists(meta)
+                       or metadata(reviewer).get("spawn_gen") == refute["generation"]))
+    return note, title, same_report, same_event
+
+
+def require_saved_reports(identity, saved, latest):
+    # A native report displaces the saved verdict when it is written, not when a
+    # supervisor records it. Compare each reviewer of this candidate with its own
+    # last saved row. A retired scout keeps its ticket and report; retire_review
+    # keeps a status that withdraws the saved pass or announces an unsaved blocker.
+    tickets = {}
+    for path in STATE.glob("*.refute.json"):
+        data = private_bytes(path)
+        ticket = decode(data)
+        if ticket["candidate"] == identity:
+            require(path == ticket_for(ticket["reviewer"]), "review dispatch record names another scout")
+            tickets[ticket["reviewer"]] = digest(data)
+    require(latest["reviewer"] in tickets, "recorded review has no dispatch record for this candidate")
+    pins = f"Refute {identity['base']} {identity['head']} "
+    verdicts = (pins + "merge", pins + "fix")
+    for reviewer, ticket in sorted(tickets.items()):
+        status, meta = (os.path.lexists(STATE / f"{reviewer}.{record}") for record in ("status", "meta"))
+        note, title, same_report, same_event = reviewer_record(identity, reviewer, ticket, saved.get(reviewer))
+        own = reviewer == latest["reviewer"]
+        # A retired scout's unsaved merge can no longer be recorded and cannot
+        # weaken a later saved verdict. Its unsaved fix still blocks.
+        blocking = verdicts if status and meta else (pins + "fix",)
+        require((same_report or not (own or title in blocking))
+                and (same_event or not ((own and status) or note in blocking)),
+                f"native review report from {reviewer} is not the saved verdict; record the current review "
+                "and accept again, or review a fresh exact candidate if it can no longer be recorded")
+
+
+def saved_reviews(identity):
     latest = None
+    saved = {}
     for row in journal_rows():
         if row.get("pr") != identity["pr"] or row.get("head") != identity["head"]:
             continue
@@ -931,19 +994,65 @@ def passing_review(identity):
                 and matches(SHA256, refute.get("ticket")) and matches(SHA256, refute.get("report"))
                 and matches(ID, row.get("reviewer")) and row["reviewer"] != identity["task"],
                 "recorded review does not identify an independent native scout")
-        latest = row
+        latest = saved[row["reviewer"]] = row
+    return latest, saved
+
+
+def passing_review(identity):
+    latest, saved = saved_reviews(identity)
     require(latest and latest.get("verdict") == "merge" and "refute" in latest,
             "missing passing fresh-context review for this task and exact head")
+    require_saved_reports(identity, saved, latest)
     return digest(json_bytes(latest))
+
+
+def retire_review(reviewer):
+    # Teardown removes the scout's status, which can be the only evidence of a
+    # blocker nobody recorded or of a withdrawn pass. Hold retirement while it is.
+    # A candidate whose ship retired or reported again can no longer be accepted.
+    data = private_bytes(ticket_for(reviewer))
+    ticket = decode(data)
+    identity = ticket["candidate"]
+    task = identity["task"]
+    require(ticket["reviewer"] == reviewer, "review dispatch record names another scout")
+    if not os.path.lexists(POLICY_DIR) or not os.path.lexists(STATE / f"{task}.meta"):
+        return
+    if metadata(task).get("spawn_gen") != identity["generation"]:
+        return
+    if not os.path.lexists(STATE / f"{task}.status"):
+        marker = STATE / f"{task}.backlog-close"
+        require(os.path.lexists(marker) and f"spawn_gen={identity['generation']}"
+                in private_bytes(marker, private=False).decode().splitlines(),
+                f"{task}.status is missing and no pending close proves that the reviewed task is retiring; "
+                f"finish retiring {task} or publish and report a fresh exact candidate, then retire the scout")
+        return
+    if done_event(task)[1] != identity["candidate_event"]:
+        return
+    latest, saved = saved_reviews(identity) if os.path.lexists(JOURNAL) else (None, {})
+    note, title, same_report, same_event = reviewer_record(identity, reviewer, digest(data), saved.get(reviewer))
+    fix = f"Refute {identity['base']} {identity['head']} fix"
+    require((same_report or title != fix) and (same_event or note != fix),
+            f"{reviewer} reports unsaved blocker '{fix}' for {task}; record it with "
+            f"fm-review-verdict.sh refute {task} {reviewer} {identity['head']} while the reviewed candidate, "
+            "base and policy still match, or publish and report a fresh exact candidate against the current "
+            "approved base and policy, then retire the scout")
+    passed = latest and latest["verdict"] == "merge" and latest["reviewer"] == reviewer
+    require(same_event or not (passed and os.path.lexists(STATE / f"{reviewer}.status")),
+            f"{reviewer}'s status no longer stands for its saved merge for {task}; have it report that verdict "
+            "again, record a replacement review, or publish and report a fresh exact candidate against the "
+            "current approved base and policy, then retire the scout")
 
 
 def main():
     action, task, *args = sys.argv[1:]
     require(matches(ID, task), "invalid task ID")
-    require(not os.environ.get("FM_TASK_ID") or action in ("passing", "assert"),
+    require(not os.environ.get("FM_TASK_ID") or action in ("passing", "assert", "retire-review"),
             "acceptance and review intake are supervisor operations")
     if action == "spawn-review" and len(args) == 6:
         spawn_review(task, *args)
+        return
+    if action == "retire-review" and not args:
+        retire_review(task)
         return
     if action == "review-result" and len(args) == 2 and matches(ID, args[0]) and matches(SHA, args[1]):
         review_result(task, *args)

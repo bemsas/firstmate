@@ -743,8 +743,9 @@ test_test_only_review_exemption() {
 test_pending_supervisor_acceptance() {
   local dir
   dir=$(live_case protected-pending 0)
-  printf '%s\n' dry-run > "$dir/home/config/merge-on-validated"
-  mkdir "$dir/home/config/done-acceptance"
+  local -x FM_CONFIG_OVERRIDE="$dir/injected"
+  mkdir -p "$FM_CONFIG_OVERRIDE/done-acceptance"
+  printf '%s\n' dry-run > "$FM_CONFIG_OVERRIDE/merge-on-validated"
   rm "$dir/bin/fm-done-check.sh"
   cat > "$dir/bin/fm-done-check.sh" <<'SH'
 #!/usr/bin/env bash

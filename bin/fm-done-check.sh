@@ -89,7 +89,7 @@ EOF
 fi
 
 case "${1:-}" in
-  review-brief|accept|passing|assert|spawn-review)
+  review-brief|accept|passing|assert|spawn-review|retire-review)
     export FM_HOME FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG"
     exec python3 "$SCRIPT_DIR/fm-done-acceptance.py" "$@"
     ;;
