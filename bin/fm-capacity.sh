@@ -11,7 +11,8 @@
 #                             declares admit-spawns (bin/fm-spawn.sh's check)
 #   fm-capacity.sh --spawn-gate-enabled  exit 0 when --spawn-gate would judge
 #                             a spawn, 1 when it would admit unconditionally
-#   fm-capacity.sh --host-gate  the always-on host resource gate (HOST GATE)
+#   fm-capacity.sh --host-gate  the always-on host resource verdict that
+#                             bin/fm-spawn.sh asks before any fresh worker
 #
 # It reads this home's state/*.meta, the optional config/lane-capacity, the
 # pressure files and reserve flags that file names, and the host's own probes.
@@ -241,29 +242,47 @@
 #
 # Environment: FM_HOME, FM_STATE_OVERRIDE, FM_CONFIG_OVERRIDE, and
 # FM_PROJECTS_OVERRIDE resolve the home exactly as the other bin/ scripts do.
-# FM_PROC_ROOT_OVERRIDE replaces /proc for every Linux read (tests). The cached
+# FM_PROC_ROOT_OVERRIDE replaces /proc for every Linux read (tests), and
+# FM_SYS_ROOT_OVERRIDE replaces /sys for --host-gate's cgroup read. The cached
 # Windows host view that --admit, --spawn-gate, --json, and the report use is
 # served for at most 120 s; --publish always queries the host live and rewrites
 # the cache, so the host-memory gate's reopen count never reads one sample
 # three times.
 #
-# HOST GATE (--host-gate; this script is its one owner, and bin/fm-spawn.sh and
-# bin/fm-control.sh's relaunch call it). It needs no config and judges only
-# this host's own probes above: it defers when the 1-minute load average is
-# above 1.5 times the logical cores, or when available memory is below 20
-# percent of total (MemAvailable/MemTotal on Linux, kern.memorystatus_level on
-# macOS). FM_HOST_GATE_LOAD_RATIO and FM_HOST_GATE_MIN_MEM_PCT may only make
-# those limits stricter; a looser value is ignored. It prints one line,
+# --host-gate needs no config and reads nothing but this host's own load,
+# core, and memory probes above (config/lane-capacity is not even parsed, so a
+# malformed one cannot open or close it). It prints one line on stdout:
 #   host-gate: verdict=<admit|defer> load1=<X|unknown> cores=<N|unknown>
-#     mem_avail_pct=<N|unknown> reason=<ok|load|memory|load,memory|unknown>
-# and exits 75 on defer, else 0. An unreadable probe is printed as unknown and
-# that signal is not judged: an unknown reading is never reported as healthy
-# (reason=unknown names it) and never by itself blocks work. Stricter
-# configured limits stay with --spawn-gate.
+#     load_limit=<X|unknown> mem_avail_pct=<N|unknown> mem_min_pct=20
+#     reasons=<cpu,memory|none> unknown=<load1,cores,mem_avail_pct|none>
+# (one physical line) and defers when an OBSERVED reading crosses a limit:
+#   cpu     the 1-minute load average is above 1.5 x the usable cores: off
+#           Darwin, the CPUs this process may run on (nproc, which honors CPU
+#           affinity), lowered to the tightest cgroup v2 cpu.max quota on this
+#           process's cgroup path; without nproc, the online count (getconf
+#           _NPROCESSORS_ONLN); on Darwin, sysctl hw.logicalcpu. A cgroup v1
+#           quota is not read. The report's cores= and load_limit= are that
+#           count and its limit rounded to two decimals; the comparison is
+#           exact, on the whole quota and period. The load average is
+#           host-wide while the cores are this process's own, a deliberately
+#           conservative pairing:
+#           a pinned or quota-limited process on a busy host is refused even
+#           when its own CPUs are idle, never admitted onto an overloaded one.
+#   memory  available memory is under 20 percent of total (Linux
+#           MemAvailable/MemTotal; Darwin kern.memorystatus_level)
+# Both limits are fixed; a stricter configured protection (config/lane-capacity
+# admit-spawns with max-load1, min-avail-gb, or an auto budget) is a separate
+# gate bin/fm-spawn.sh still asks afterwards, so this one can only add a
+# refusal, never remove one. An unknown reading is not an observation: it is
+# printed as unknown, named on stderr as a warning, and does not defer by
+# itself, so a host whose probes are unavailable (native Windows, a missing
+# /proc) is not refused every spawn; the other reading still judges. A
+# deferral prints one `deferred:` line on stderr naming the readings and
+# exits 75.
 #
 # Exit status: 0 on a report, 1 on an invalid config/lane-capacity (report,
 # --json, --admit), 2 on a usage error or --json without jq, 75 on an --admit
-# deferral.
+# or --host-gate deferral.
 set -u
 export LC_ALL=C
 
@@ -276,6 +295,7 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 LANE_CONFIG="$CONFIG/lane-capacity"
 PUBLISHED="$STATE/lane-capacity.json"
 PROC_ROOT=${FM_PROC_ROOT_OVERRIDE:-/proc}
+SYS_ROOT=${FM_SYS_ROOT_OVERRIDE:-/sys}
 
 MEM_FREE_MIN_PCT=10
 DISK_FREE_MIN_MB=5120
@@ -460,7 +480,7 @@ parse_lane_config() {
   done < "$LANE_CONFIG"
   [ -n "$target" ] || { config_error - "no lane cap: the first line must be one non-negative integer"; return 1; }
 }
-if [ -e "$LANE_CONFIG" ]; then
+if [ "$mode" != host_gate ] && [ -e "$LANE_CONFIG" ]; then
   if [ ! -r "$LANE_CONFIG" ] || ! parse_lane_config; then
     [ -n "$target_error" ] || config_error - "unreadable"
     target_error="config/lane-capacity: $target_error"
@@ -529,41 +549,89 @@ else
   fi
 fi
 
-# HOST GATE (header): judged on the probes above alone, before anything else.
-if [ "$mode" = host_gate ]; then
-  hg_ratio=1.5
-  v=${FM_HOST_GATE_LOAD_RATIO:-}
-  is_num "$v" && num_lt "$v" "$hg_ratio" && hg_ratio=$v
-  hg_min_mem=20
-  v=${FM_HOST_GATE_MIN_MEM_PCT:-}
-  is_uint "$v" && [ "$v" -gt "$hg_min_mem" ] && [ "$v" -le 100 ] && hg_min_mem=$v
-  hg_reason=
-  hg_unknown=0
-  if [ "$load1" = unknown ] || [ "$cores" = unknown ]; then
-    hg_unknown=1
-  elif awk -v l="$load1" -v c="$cores" -v r="$hg_ratio" 'BEGIN{exit !(l > c * r)}'; then
-    hg_reason=load
-  fi
-  if [ "$mem_free_pct" = unknown ]; then
-    hg_unknown=1
-  elif [ "$mem_free_pct" -lt "$hg_min_mem" ]; then
-    hg_reason=${hg_reason:+$hg_reason,}memory
-  fi
-  hg_verdict=admit
-  [ -z "$hg_reason" ] || hg_verdict=defer
-  [ -n "$hg_reason" ] || { [ "$hg_unknown" -eq 1 ] && hg_reason=unknown; } || hg_reason=ok
-  printf 'host-gate: verdict=%s load1=%s cores=%s mem_avail_pct=%s reason=%s\n' \
-    "$hg_verdict" "$load1" "$cores" "$mem_free_pct" "$hg_reason"
-  [ "$hg_verdict" = admit ] || exit 75
-  exit 0
-fi
-
 disk_free_mb=unknown
 v=$(df -Pk "$FM_HOME" 2>/dev/null | awk 'NR==2{print int($4 / 1024)}')
 is_uint "$v" && disk_free_mb=$v
 probe_disks=
 [ "$disk_free_mb" = unknown ] || probe_disks="home	$(awk -v m="$disk_free_mb" 'BEGIN{printf "%.1f", m / 1024}')
 "
+
+# --- host gate (--host-gate) ------------------------------------------------
+HOST_GATE_MEM_MIN_PCT=20
+# Usable cores for the host gate. Off Darwin this is the CPUs this process may
+# run on (nproc, which honors CPU affinity; the OpenMP variables it would also
+# honor are cleared), lowered to the tightest cgroup v2 cpu.max quota on this
+# process's cgroup path (quota / period, possibly fractional). Without nproc it
+# is the online count above; on Darwin it is hw.logicalcpu.
+host_gate_usable_cores() {  # prints "<quota> <period>", a whole count over 1
+  local n quota period path dir q='' p=''
+  if [ "$os" = Darwin ]; then
+    printf '%s 1\n' "$cores"
+    return 0
+  fi
+  n=$(env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc 2>/dev/null) || n=
+  is_uint "$n" && [ "$n" -gt 0 ] || n=$cores
+  [ "$n" != unknown ] || { printf 'unknown 1\n'; return 0; }
+  q=$n p=1
+  path=$(sed -n 's/^0:://p' "$PROC_ROOT/self/cgroup" 2>/dev/null | head -n 1)
+  case "$path" in /*) ;; *) path= ;; esac
+  dir="$SYS_ROOT/fs/cgroup$path"
+  while [ -n "$path" ] || [ "$dir" = "$SYS_ROOT/fs/cgroup" ]; do
+    # The kernel's period is at most 1000000; a quota past 12 digits is more
+    # CPUs than any host has, so it is never the tightest.
+    if { read -r quota period < "$dir/cpu.max"; } 2>/dev/null && is_uint "$quota" && is_uint "$period" &&
+      [ "${#quota}" -le 12 ] && [ "${#period}" -le 7 ] && [ "$period" -gt 0 ] && [ "$period" -le 1000000 ] &&
+      [ $((10#$quota * p)) -lt $((q * 10#$period)) ]; then
+      q=$((10#$quota)) p=$((10#$period))
+    fi
+    [ -n "$path" ] || break
+    path=${path%/*}
+    dir="$SYS_ROOT/fs/cgroup$path"
+  done
+  printf '%s %s\n' "$q" "$p"
+}
+
+# load > 1.5 x quota / period, in whole numbers: load x 2 x period > 3 x quota.
+host_gate_load_over() {  # <load> <quota> <period>
+  local whole=${1%%.*} frac='' scale=1 i
+  case "$1" in *.*) frac=${1#*.} ;; esac
+  i=${#frac}
+  while [ "$i" -gt 0 ]; do scale=$((scale * 10)); i=$((i - 1)); done
+  [ $((10#$whole$frac * 2 * $3)) -gt $((3 * $2 * scale)) ]
+}
+
+if [ "$mode" = host_gate ]; then
+  hg_reasons='' hg_unknown='' hg_limit=unknown
+  # The quota and period reach the comparison whole; only the report rounds. A
+  # load outside six whole and six decimal digits is no real reading.
+  [[ "$load1" =~ ^[0-9]{1,6}(\.[0-9]{1,6})?$ ]] || load1=unknown
+  read -r hg_quota hg_period <<< "$(host_gate_usable_cores)"
+  cores=$hg_quota
+  [ "$hg_period" = 1 ] || cores=$(awk -v q="$hg_quota" -v p="$hg_period" 'BEGIN{printf "%.2f", q / p}')
+  [ "$load1" != unknown ] || hg_unknown="${hg_unknown:+$hg_unknown,}load1"
+  [ "$cores" != unknown ] || hg_unknown="${hg_unknown:+$hg_unknown,}cores"
+  [ "$mem_free_pct" != unknown ] || hg_unknown="${hg_unknown:+$hg_unknown,}mem_avail_pct"
+  if [ "$cores" != unknown ]; then
+    hg_limit=$(awk -v q="$hg_quota" -v p="$hg_period" 'BEGIN{printf "%.2f", 1.5 * q / p}')
+    if [ "$load1" != unknown ] && host_gate_load_over "$load1" "$hg_quota" "$hg_period"; then
+      hg_reasons=cpu
+    fi
+  fi
+  if [ "$mem_free_pct" != unknown ] && [ "$mem_free_pct" -lt "$HOST_GATE_MEM_MIN_PCT" ]; then
+    hg_reasons="${hg_reasons:+$hg_reasons,}memory"
+  fi
+  hg_verdict=admit
+  [ -z "$hg_reasons" ] || hg_verdict=defer
+  printf 'host-gate: verdict=%s load1=%s cores=%s load_limit=%s mem_avail_pct=%s mem_min_pct=%s reasons=%s unknown=%s\n' \
+    "$hg_verdict" "$load1" "$cores" "$hg_limit" "$mem_free_pct" "$HOST_GATE_MEM_MIN_PCT" "${hg_reasons:-none}" "${hg_unknown:-none}"
+  [ -z "$hg_unknown" ] ||
+    echo "warning: host gate: this host's $hg_unknown reading is unknown, so it was not judged; only observed readings can defer a spawn" >&2
+  if [ "$hg_verdict" = defer ]; then
+    echo "deferred: this host is overloaded (1-minute load $load1 against a limit of $hg_limit for $cores cores; available memory ${mem_free_pct}% against a floor of ${HOST_GATE_MEM_MIN_PCT}%; over: $hg_reasons)" >&2
+    exit 75
+  fi
+  exit 0
+fi
 
 # --- pressure ---------------------------------------------------------------
 level_rank() {
@@ -762,7 +830,7 @@ auto_lane_rows() {
 # Call it only with an attribution taken from a readable process table.
 capacity_stopped_keys() {
   awk -F'\t' -v now="$now" -v grace="$PENDING_GRACE" '
-    FNR == NR { live[$1] = 1; next }
+    FILENAME == ARGV[1] { live[$1] = 1; next }
     $3 != "" && $7 ~ /^[0-9]+$/ && now - $7 >= grace && !(($1 ":" $2) in live) { print $1 ":" $2 }
   ' "$2" "$1"
 }
@@ -775,11 +843,10 @@ capacity_published_stopped() {
   [ -f "$PUBLISHED" ] || return 0
   at=$(jq -r '.generated_epoch // empty' "$PUBLISHED" 2>/dev/null) || return 0
   is_uint "$at" && [ "$at" -le "$now" ] && [ $((now - at)) -le "$max" ] || return 0
-  jq -r '.lanes.stopped_keys[]? | strings' "$PUBLISHED" 2>/dev/null |
-    awk -F'\t' -v now="$now" -v grace="$PENDING_GRACE" '
-      FNR == NR { k[$1] = 1; next }
-      (($1 ":" $2) in k) && $7 ~ /^[0-9]+$/ && now - $7 >= grace { print $1 ":" $2 }
-    ' - "$1"
+  awk -F'\t' -v now="$now" -v grace="$PENDING_GRACE" '
+    FILENAME == ARGV[1] { k[$1] = 1; next }
+    (($1 ":" $2) in k) && $7 ~ /^[0-9]+$/ && now - $7 >= grace { print $1 ":" $2 }
+  ' <(jq -r '.lanes.stopped_keys[]? | strings' "$PUBLISHED" 2>/dev/null) "$1"
 }
 
 # The fixed-cap path's stopped records for this home (auto_budget applies the

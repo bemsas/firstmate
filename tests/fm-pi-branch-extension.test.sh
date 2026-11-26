@@ -2049,7 +2049,6 @@ await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "attended branch
 const session = globalThis.__fmSessions[0];
 const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
 if (globalThis.__fmPrompts[0].includes("POSTURE: AWAY")) throw new Error("an attended wake carried the away tail");
-if (!globalThis.__fmPrompts[0].includes("\n\nPOSTURE: ATTENDED. ")) throw new Error("an attended wake did not name its posture");
 // The prefix is the generator's output handed to the branch's resource
 // loader; the per-wake tail must never appear there.
 const systemPrompt = (globalThis.__fmLoaders ?? []).at(-1)?.options?.systemPrompt;

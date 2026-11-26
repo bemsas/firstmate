@@ -438,10 +438,16 @@ terminal_outcome_corroborated() { # <state> <last-status-line> <state-line>
 # and it also replaces a recorded PR the status log named
 # (fm_dod_status_names_pr); a recorded PR the log never named stays.
 # A scout never delivers a PR, so it never carries one.
-pr_for_task() { # <meta> <terminal-line> <status-file>
+# A protected task's accepted candidate replaces any recorded PR.
+pr_for_task() { # <meta> <terminal-line> <status-file> <protected>
   local meta=$1 terminal=$2 status=$3 value ready=
   local github_shape='^https?://[^[:space:])"]+/pull/[0-9]+$'
   [ "$(meta_field "$meta" kind)" != scout ] || return 0
+  if [ "$4" = 1 ] && [ "$(status_line_verb "$terminal")" = "done" ] &&
+    fm_dod_candidate_fields "$(status_line_note "$terminal")"; then
+    clean_field "$FM_DOD_CANDIDATE_URL"
+    return
+  fi
   value=$(meta_field "$meta" pr)
   if [ ! -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/pr-register-scan" ]; then
     if [ -z "$value" ] && [ -n "$terminal" ]; then
@@ -538,16 +544,19 @@ claim_inactive_report_for_ledger() { # <task> <incarnation> <state> <ledger-fing
 # delivered, or nothing is owed, and 1 when it is owed but the parent channel
 # could not be written (the notice is queued once per record).
 report_child_ledger_locked() { # <id> <meta>
-  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line
+  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line candidate protected=0
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
-  pr=$(pr_for_task "$meta" "$last" "$status")
+  mode=$(meta_field "$meta" mode)
+  candidate=$(fm_dod_pr_url_from_done_note "$(status_line_note "$last")") || candidate=
+  [ "$mode" = local-only ] || ! fm_dod_acceptance_required "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$id" "$candidate" || protected=1
+  pr=$(pr_for_task "$meta" "$last" "$status" "$protected")
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
   if [ "$state" = "done" ] && [ ! -f "$(record_path "$fingerprint" reported)" ] \
-    && [ ! -f "$(record_path "$fingerprint" pending)" ] \
-    && ! fm_dod_accept_ship_done "$(meta_field "$meta" kind)" "$(meta_field "$meta" mode)" \
+    && { [ ! -f "$(record_path "$fingerprint" pending)" ] || [ "$protected" = 1 ]; } \
+    && ! fm_dod_accept_ship_done "$(meta_field "$meta" kind)" "$mode" \
       "$(meta_field "$meta" worktree)" "$(meta_field "$meta" project)" "$last" \
       "$STATE" "$id" "$meta" meta-locked >/dev/null; then
     return 0
@@ -566,7 +575,7 @@ report_child_ledger_locked() { # <id> <meta>
     return 1
   fi
   note=$(clean_field "$(status_line_note "$last")")
-  mode=$(clean_field "$(meta_field "$meta" mode)")
+  mode=$(clean_field "$mode")
   yolo=$(clean_field "$(meta_field "$meta" yolo)")
   data="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
   line="$state [key=$outcome_key]: child $id $state: $note"
@@ -586,7 +595,8 @@ report_child_ledger_locked() { # <id> <meta>
 }
 
 # Every direct child's ledger, under its meta lock. File reads, plus a local
-# git reachability check for a ship done: with no delivery record yet, so it
+# git reachability check for a ship done: with no delivery record yet.
+# A protected done claim rechecks acceptance before retrying parent delivery, so it
 # runs on every poll in a secondmate home; a delivery failure is already queued as a
 # notice and never fails the scan.
 ledger_pass() {

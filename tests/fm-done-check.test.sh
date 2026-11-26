@@ -4,6 +4,11 @@
 # shellcheck disable=SC2016
 set -u
 
+case "$#:${1:-}" in
+  0: | 1:--framework-paths | 1:--review-events) ;;
+  *) printf 'usage: %s [--framework-paths|--review-events]\n' "${0##*/}" >&2; exit 2 ;;
+esac
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -511,25 +516,1224 @@ test_top_level_heading_ends_checklist_section() {
   assert_equals pass "$(result_of tests)" 'top-level setup and rules must not become test commands'
   pass 'checklist sections stop at the next top-level heading'
 }
-test_top_level_heading_ends_checklist_section
-test_base_metadata_keys
+if [ -z "${1:-}" ]; then
+  test_top_level_heading_ends_checklist_section
+  test_base_metadata_keys
+  test_off_by_default_does_nothing
+  test_switch_comes_from_config_file_or_env
+  test_clean_pr_passes
+  test_base_must_match_the_brief
+  test_mergeable_uses_forge_and_local_merge
+  test_vision_must_be_unchanged_against_base
+  test_ai_trailers_fail
+  test_scope_follows_the_brief
+  test_tests_must_have_run
+  test_shadow_logs_and_never_acts
+  test_bounces_are_bounded
+  test_unconfirmed_steer_is_not_counted
+  test_unreadable_facts_never_bounce
+  test_pr_check_hook
+  test_proof_rider_on_ui_prs
+  test_auto_records_pr
+  test_watcher_runs_done_check on
+  test_watcher_runs_done_check shadow
+fi
 
-test_off_by_default_does_nothing
-test_switch_comes_from_config_file_or_env
-test_clean_pr_passes
-test_base_must_match_the_brief
-test_mergeable_uses_forge_and_local_merge
-test_vision_must_be_unchanged_against_base
-test_ai_trailers_fail
-test_scope_follows_the_brief
-test_tests_must_have_run
-test_shadow_logs_and_never_acts
-test_bounces_are_bounded
-test_unconfirmed_steer_is_not_counted
-test_unreadable_facts_never_bounce
-test_pr_check_hook
+# Real Git, network-free forge and native scout spawn with a fake terminal.
+# shellcheck source=tests/fixtures.sh
+. "$ROOT/tests/fixtures.sh"
 
-test_proof_rider_on_ui_prs
-test_auto_records_pr
-test_watcher_runs_done_check on
-test_watcher_runs_done_check shadow
+A="$T/acceptance"
+A_HOME="$A/home"
+A_STATE="$A_HOME/state"
+A_REPO="$A/repo"
+A_ID=ship-accept
+A_META="$A_STATE/$A_ID.meta"
+A_STATUS="$A_STATE/$A_ID.status"
+A_URL=https://github.com/acme/widget/pull/8
+# Policies are injected through FM_CONFIG_OVERRIDE, so the fixture home itself
+# never opts in to done acceptance.
+A_CONFIG="$A/injected"
+A_POLICY="$A_CONFIG/done-acceptance/$A_ID.json"
+A_VERDICT="$ROOT/bin/fm-review-verdict.sh"
+A_FAKE=$(make_spawn_fakebin "$A/tools" codex claude gh)
+mkdir -p "$A_STATE" "$A_CONFIG/done-acceptance" "$A_HOME/data/$A_ID" "$A_HOME/projects"
+touch "$A_STATE/.last-watcher-beat"
+
+cat > "$A_FAKE/gh-axi" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = api ] || exit 98
+[ "${A_FORGE_UNREADABLE:-0}" = 0 ] || exit 4
+case "$2" in
+  /repos/acme/widget/pulls/8)
+    body=$(jq -nr --arg url "$A_URL" --arg head "${A_LIVE_HEAD:-$A_HEAD}" \
+      --arg branch "${A_LIVE_BRANCH:-fm/ship-accept}" --arg repo "${A_LIVE_REPO:-acme/widget}" '
+      [$url,$repo,"dev","acme/widget",$branch,$head,"open",false] | @json | @base64
+    ') ;;
+  /repos/acme/widget/branches/dev)
+    body=$(jq -nr --arg base "${A_LIVE_BASE:-$A_BASE}" '["dev",$base] | @json | @base64') ;;
+  *) exit 98 ;;
+esac
+printf 'api_response:\n  body: %s\n  truncated: false\n' "$body"
+STUB
+chmod +x "$A_FAKE/gh-axi"
+
+fm_git_init_commit "$A_REPO"
+git -C "$A_REPO" checkout -qb dev || fail "cannot prepare acceptance base"
+mkdir -p "$A_REPO/tests" "$A_REPO/src/"{__tests__,shop,App.Tests,cypress/e2e,e2e,packaging}
+printf 'def test_contract():\n    assert actual() == 2\n' > "$A_REPO/tests/test_old.py"
+printf 'test_check() { expect_result; }\ntest_check\n' > "$A_REPO/tests/contract.test.sh"
+printf 'it("open", () => expect(state()).toBe("open"));\n' > "$A_REPO/src/__tests__/state.test.ts"
+for runner_path in tests.py shop/tests.py test.js foo.tests.ts FooTest.java App.Tests/FooTests.cs \
+  cypress/e2e/a.cy.ts e2e/login.ts conftest.py vitest.config.ts karma.conf.js .pytest.ini pytest.toml; do
+  printf 'fixture entry\n' > "$A_REPO/src/$runner_path"
+done
+printf 'fn value() -> u8 { 1 }\n#[cfg(test)]\nmod tests { #[test] fn value_is_positive() { assert!(super::value() > 0); } }\n' \
+  > "$A_REPO/src/lib.rs"
+printf '[tool.pytest.ini_options]\ntestpaths = ["checks"]\n' > "$A_REPO/src/pyproject.toml"
+printf '[tool:pytest]\npython_files = verify_*.py\n' > "$A_REPO/src/setup.cfg"
+printf '[project]\nname = "fixture"\nversion = "1.0"\n' > "$A_REPO/src/packaging/pyproject.toml"
+printf 'value = 1\n' > "$A_REPO/app.py"
+git -C "$A_REPO" add . || fail "cannot stage acceptance base"
+git -C "$A_REPO" commit -qm base || fail "cannot commit acceptance base"
+fm_git_add_origin "$A_REPO" "$A/origin.git"
+A_BASE=$(git -C "$A_REPO" rev-parse HEAD)
+ln -s "$A_REPO" "$A/repo-link"
+git clone --quiet --branch dev "$A/origin.git" "$A/pool" || fail "cannot initialize reviewer scratch"
+printf -- '- repo [direct-PR] - fixture (added 2026-01-01)\n' > "$A_HOME/data/projects.md"
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'real_git=%q\nforge_repo=%q\n' "$(command -v git)" "$A/origin.git"
+  cat <<'STUB'
+args=("$@")
+if [[ "$1" != -C || "$2" != *.acceptance-git ]]; then
+  exec "$real_git" "$@"
+fi
+for ((i=2; i<${#args[@]}; i++)); do
+  [ "${args[i]}" = fetch ] || continue
+  [ "${args[i+4]}" = https://github.com/acme/widget.git ] || exit 24
+  if [ -f "${GH_CONFIG_DIR:-/nonexistent}/require-fixture-auth" ]; then
+    cfg=("${args[@]:2:i-2}")
+    git_credential() {
+      printf 'protocol=https\nhost=%s\n\n' "$1" |
+        "$real_git" -C "$2" "${cfg[@]}" credential fill 2>/dev/null
+    }
+    if git_credential example.invalid "$2" >/dev/null; then exit 25; fi
+    reply=$(git_credential github.com "$2") || exit 26
+    [[ "$reply" == *$'\nusername=fixture-reader\npassword=fixture-only' ]] || exit 27
+    printf 'github.com only\n' >> "$GH_CONFIG_DIR/proof"
+  fi
+  exec "$real_git" -C "$2" -c fetch.fsckObjects=true fetch "$forge_repo" "${args[i+5]}" "${args[i+6]}"
+done
+exec "$real_git" "$@"
+STUB
+} > "$A_FAKE/git"
+chmod +x "$A_FAKE/git"
+
+mv "$A_FAKE/gh" "$A_FAKE/gh-fixture"
+cat > "$A_FAKE/gh" <<'STUB'
+#!/usr/bin/env bash
+if [ "$*" != 'auth git-credential get' ]; then
+  exec "$(dirname "$0")/gh-fixture" "$@"
+fi
+request=$(cat)
+[[ "$request" == $'protocol=https\nhost=github.com' ]] || exit 29
+[ "${GH_PROMPT_DISABLED:-}" = 1 ] && [ -f "$GH_CONFIG_DIR/authorized" ] || exit 30
+printf 'username=fixture-reader\npassword=fixture-only\n'
+STUB
+chmod +x "$A_FAKE/gh"
+
+accept_cmd() {
+  FM_ROOT_OVERRIDE="$ROOT_STUB" FM_HOME="$A_HOME" FM_CONFIG_OVERRIDE="$A_CONFIG" PATH="$A_FAKE:$PATH" \
+    A_HEAD="$A_HEAD" A_BASE="$A_BASE" A_URL="$A_URL" "$@"
+}
+
+accept_refused() {  # <reason> <command...>
+  local reason=$1 result
+  shift
+  result=$(accept_cmd "$@" 2>&1) && fail "unexpected acceptance: $*"$'\n'"$result"
+  assert_contains "$result" "$reason" "acceptance refusal should explain $reason"
+}
+
+accept_candidate() {
+  if [ "${1:-}" != staged ]; then
+    git -C "$A_REPO" add -A || fail "cannot stage candidate"
+  fi
+  git -C "$A_REPO" commit -qm candidate || fail "cannot commit candidate"
+  A_HEAD=$(git -C "$A_REPO" rev-parse HEAD)
+  git -C "$A_REPO" push --quiet "$A/origin.git" "$A_HEAD:refs/fixtures/$A_HEAD" || fail "cannot publish fixture objects"
+  printf 'done [at=100]: PR %s head %s\n' "$A_URL" "$A_HEAD" > "$A_STATUS"
+}
+
+accept_reset() {
+  git -C "$A_REPO" checkout -qf -B "fm/$A_ID" "$A_BASE" || fail "cannot reset candidate"
+  fm_write_meta "$A_META" "kind=ship" "mode=direct-PR" "project=$A_REPO" \
+    "worktree=$A_REPO" "branch=fm/$A_ID" "base_branch=dev" "spawn_gen=s100.200.300" \
+    "harness=claude" "model=claude-sonnet-4-6" "yolo=off" \
+    "builder_history=s100.200.300:claude:claude-sonnet-4-6"
+  (umask 077; jq -n --arg base "$A_BASE" '
+    {repo:"acme/widget",base_branch:"dev",base:$base,kind:"feature",
+     allow:["app.py","tests/","src/"],tests:[],criteria:"The value is two."}
+  ' > "$A_POLICY")
+  printf 'value = 2\n' > "$A_REPO/app.py"
+}
+
+test_acceptance_private_fetch() {
+  accept_reset
+  accept_candidate
+  local credentials="$A/credentials"
+  mkdir -m 700 "$credentials"
+  touch "$credentials/require-fixture-auth"
+  GH_CONFIG_DIR="$A_REPO" accept_refused "outside worker-controlled paths" \
+    "$SCRIPT" review-brief "$A_ID" "$A_URL" worker-credentials
+  GH_CONFIG_DIR="$credentials" accept_refused "check supervisor GitHub credentials" \
+    "$SCRIPT" review-brief "$A_ID" "$A_URL" needs-credentials
+  assert_absent "$credentials/proof" "fetch unexpectedly authenticated"
+  touch "$credentials/authorized"
+  GH_CONFIG_DIR="$credentials" accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" private-source >/dev/null ||
+    fail "trusted GitHub credential helper did not enable scoped fetch"
+  assert_equals 'github.com only' "$(cat "$credentials/proof")" "fetch requires a credential only for GitHub.com"
+  (umask 077; jq '.repo="Acme/Widget"' "$A_POLICY" > "$A/policy")
+  mv "$A/policy" "$A_POLICY"
+  accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" repository-case >/dev/null ||
+    fail "a policy repository that differs from the forge only in letter case should match"
+  A_LIVE_REPO=acme/gadget accept_refused "GitHub repository" "$SCRIPT" review-brief "$A_ID" "$A_URL" repository-name
+  pass "exact source fetch requires scoped supervisor authentication when forge objects demand it"
+}
+
+pin_new_fixture_test() {
+  local file=$1
+  (umask 077; jq --arg path "$file" --arg sum "$(fixture_sha256 "$A_REPO/$file")" \
+    '.new_tests[$path]=$sum' "$A_POLICY" > "$A/policy")
+  mv "$A/policy" "$A_POLICY"
+}
+
+test_acceptance_test_locations() {
+  local file marker=0
+  for file in tests.py shop/tests.py test.js foo.tests.ts FooTest.java App.Tests/FooTests.cs \
+    cypress/e2e/a.cy.ts e2e/login.ts conftest.py vitest.config.ts lib.rs; do
+    accept_reset
+    rm "$A_REPO/src/$file"
+    accept_candidate
+    marker=$((marker + 1))
+    accept_refused "existing test entry changed: 'src/$file'" \
+      "$SCRIPT" review-brief "$A_ID" "$A_URL" test-location-$marker
+  done
+  accept_reset
+  printf 'fn application() {}\n' > "$A_REPO/src/lib.rs"
+  accept_candidate
+  accept_refused "existing test entry changed: 'src/lib.rs'" "$SCRIPT" review-brief "$A_ID" "$A_URL" in-file-test
+  accept_reset
+  printf '# Fixture collection configuration changed.\n' > "$A_REPO/src/conftest.py"
+  accept_candidate
+  accept_refused "existing test entry changed: 'src/conftest.py'" "$SCRIPT" review-brief "$A_ID" "$A_URL" collection-change
+  pass "common test and runner paths and embedded Rust tests are protected by exact Git tree comparison"
+}
+
+test_acceptance_framework_config() {
+  local file
+  for file in karma.conf.js .pytest.ini pytest.toml pyproject.toml setup.cfg; do
+    accept_reset
+    rm "$A_REPO/src/$file"
+    accept_candidate
+    accept_refused "existing test entry changed: 'src/$file'" \
+      "$SCRIPT" review-brief "$A_ID" "$A_URL" "runner-$file"
+  done
+  accept_reset
+  printf '[project]\nname = "fixture"\nversion = "1.1"\n' > "$A_REPO/src/packaging/pyproject.toml"
+  accept_candidate
+  accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" packaging-change >/dev/null ||
+    fail "an in-scope pyproject without pytest configuration should admit"
+
+  accept_reset
+  sed 's/u8 { 1 }/u8 { 2 }/' "$A_REPO/src/lib.rs" > "$A/inline.rs"
+  mv "$A/inline.rs" "$A_REPO/src/lib.rs"
+  accept_candidate
+  accept_refused "existing test entry changed: 'src/lib.rs'" "$SCRIPT" review-brief "$A_ID" "$A_URL" inline-tests
+  pass "default Karma and pytest configs are protected and standalone packaging edits still admit"
+}
+
+test_acceptance_pinned_test_signals() {
+  accept_reset
+  cat > "$A_REPO/tests/test_iterator.py" <<'PY'
+def test_iterator(rows):
+    def fallback():
+        return "next"
+    assert rows.skip(1).first() == fallback()
+
+def test_nonempty():
+    assert [*read_rows()]
+    assert (*read_rows(),)
+    assert {*read_rows()}
+    assert {**read_counts()}
+PY
+  cat > "$A_REPO/tests/iterator.test.sh" <<'SH'
+cat > "$temporary_fixture" <<'FIXTURE'
+exit 0
+FIXTURE
+[ "$(selected_value)" = "$expected_value" ] || exit 1
+test true = "$actual" || exit 1
+assert true = "$actual" "reports true"
+assert 1 -eq "$count" 'one record'
+assert_true 1 "==" "$count"
+assert true != "$actual"
+assert_true "$(ready)" "true when ready"
+assert_equals ready "$state" "ready state"
+printf '%s\n' "usage: run.sh; exit 77 when tools are missing" 'or run.sh | skip-list; assert true' > "$usage"
+printf '%s\n' "Examples mention eval; exit 77 when prerequisites are missing."
+find "$fixtures" -type f -exec test -s {} \; || exit 1
+exit 0
+SH
+  cat > "$A_REPO/src/guide.test.js" <<'JS'
+// Documentation example: test.skip("deferred", check);
+/* Documentation example: test.only("focused", check); */
+if (checkHelp) /test.skip()/.test(helpText);
+if (rows. while) /test.skip()/.test(helpText);
+const matches = () => { return /test.skip()/.test(helpText); };
+test("render test.skip() in the guide", () => expect(guide()).toContain("skip"));
+test(`render test.only() in the guide`, () => expect(guide()).toContain("only"));
+test(`render test.skip() for ${locale}`, () => expect(guide(locale)).toContain("skip"));
+it(`${name} documents it.only("x")`, () => expect(guide()).toMatch(/don't `it.only(x)`/));
+it(`lists ${rows.map((row) => `${row.id} test.todo(`)} // xit(`, () => expect(rows).toEqual(load({ a: { b: 1 } })));
+it(`costs \${amount} \` test.skip(a)`, () => expect(price(`${amount}`)).toBe(`$5`));
+test.each`
+  input | output
+  ${1}  | ${2}
+`("doubles $input with test.skip() prose", ({ input, output }) => expect(double(input)).toBe(output));
+JS
+  pin_new_fixture_test tests/test_iterator.py
+  pin_new_fixture_test tests/iterator.test.sh
+  cat > "$A_REPO/src/guide_test.go" <<'GO'
+package guide
+
+// The old suite called t.Skip("offline") here; it now runs everywhere.
+/* Neither t.SkipNow()
+   nor t.Skipf("%s", reason) is needed. */
+func TestGuide(t *testing.T) {
+	quote, tick, escaped := '"', '`', '\''
+	link := "https://example.test/*" // a t.Skip( in prose, with "quotes" and a ` tick
+	want := "call \"t.Skip()\" to defer" + `
+		t.SkipNow() // raw text
+	`
+	if got := guide(quote, tick, escaped, link); got != want {
+		t.Fatalf("got %q; docs say t.Skip(reason)", got)
+	}
+}
+GO
+  pin_new_fixture_test src/guide.test.js
+  pin_new_fixture_test src/guide_test.go
+  accept_candidate
+  accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" pinned-stubs >/dev/null ||
+    fail "benign assertions, stubs and titles should be admitted when pinned"
+
+  local id file reason source
+  while IFS='|' read -r id file reason source; do
+    accept_reset
+    printf '%b\n' "$source" > "$A_REPO/$file"
+    pin_new_fixture_test "$file"
+    accept_candidate
+    accept_refused "$reason" "$SCRIPT" review-brief "$A_ID" "$A_URL" "$id"
+  done <<'CASES'
+conditional-js|src/iterator.test.js|added skip|it.skipIf(environment)("sample", check);
+focused-js|src/iterator.test.js|added skip|test.only("sample", check);
+focused-concurrent-js|src/iterator.test.js|added skip|test.concurrent.only("sample", check);
+commented-call-js|src/iterator.test.js|added skip|test /* note */ .skip("sample", check);
+literal-js|src/iterator.test.js|added trivial assertion|it("sample", () => expect("ready").toEqual("ready"));
+after-pattern-js|src/iterator.test.js|added skip|if (checkHelp) /test.skip()/.test(helpText); test.skip("later", check);
+divided-call-js|src/iterator.test.js|added skip|const half = (total) / test.skip("later", check) / 2;
+divided-method-js|src/iterator.test.js|added skip|const half = rows.if(total) / test.skip("later", check) / 2;
+spaced-method-js|src/iterator.test.js|added skip|const half = rows. if(total) / test.skip("later", check) / 2;
+spaced-line-js|src/iterator.test.js|added skip|const half = rows\n  .\n  while(total) / test.skip("later", check) / 2;
+spaced-comment-js|src/iterator.test.js|added skip|const half = rows?. /* count */ for(total) / test.skip("later", check) / 2;
+divided-property-js|src/iterator.test.js|added skip|const half = rows.return / test.skip("later", check) / 2;
+divided-name-js|src/iterator.test.js|added skip|const half = $return / test.skip("later", check) / 2;
+quoted-condition-js|src/iterator.test.js|added skip|if (mark === ") /") test.skip("later", check); use("/");
+commented-condition-js|src/iterator.test.js|added skip|if (mark /* ) /" */) test.skip("later", check); use("/");
+after-title-js|src/iterator.test.js|added skip|it(`a ${x} b`, check);\ntest.skip("later", check);\nit(`c`, check);
+nested-title-js|src/iterator.test.js|added skip|it(`a ${ids.map((id) => `${id}!`)} ${fmt({ a: { b: 1 } })}`, check);\nit.only("later", check);\nit(`c ${y}`, check);
+title-own-call-js|src/iterator.test.js|added skip|test.skip(`a ${x} b`, check);
+each-table-js|src/iterator.test.js|added skip|test.skip.each`\na\n${1}\n`("case $a", check);
+between-titles-js|src/iterator.test.js|added trivial assertion|it(`a ${x}`, () => expect(1).toBe(1));\nit(`b`, check);
+in-interpolation-js|src/iterator.test.js|added skip|it("a", () => use(`${it.only("b", check)}`));
+pattern-backtick-js|src/iterator.test.js|added skip|expect(text()).toMatch(/`/);\ntest.skip(`later ${x}`, check);
+unpaired-backtick-js|src/iterator.test.js|added skip|const node = <p>`</p>;\ntest.skip("later", check);\nit(`a ${x}`, check);
+message-shell|tests/iterator.test.sh|added trivial assertion|assert_true true "saves the record"
+message-separator-shell|tests/iterator.test.sh|added trivial assertion|assert 1 'saves; then reloads'
+message-variable-shell|tests/iterator.test.sh|added trivial assertion|assert true "$message" # note
+same-operands-shell|tests/iterator.test.sh|added trivial assertion|assert 1 -eq 1 "one record"
+literal-list-python|tests/test_iterator.py|added trivial assertion|assert [*read_rows(), 1]
+literal-dict-python|tests/test_iterator.py|added trivial assertion|assert {**read_counts(), "key": 1}
+after-quoted-shell|tests/iterator.test.sh|added skip|printf "usage; see docs"; exit 77; printf 'done'
+between-quoted-shell|tests/iterator.test.sh|added skip|run 'a;b' && skip "later"
+substitution-shell|tests/iterator.test.sh|added skip|value="$(load "a"; exit 77)"
+evaluated-shell|tests/iterator.test.sh|added skip|eval "load; exit 77"
+evaluated-after-prose-shell|tests/iterator.test.sh|added skip|run "docs mention eval; see" && eval "load; exit 77"
+evaluated-quoted-command-shell|tests/iterator.test.sh|added skip|"eval" "load; exit 77"
+evaluated-in-substitution-shell|tests/iterator.test.sh|added skip|value="mention $(eval "load; exit 77")"
+trapped-shell|tests/iterator.test.sh|added skip|trap "load; exit 77" EXIT
+multiline-shell|tests/iterator.test.sh|added skip|value='first\nlast'; exit 77; run 'b'
+literal-command-shell|tests/iterator.test.sh|added trivial assertion|test true # standalone check
+go-skip|src/iterator_test.go|added skip|package iterator\nfunc TestExample(t *testing.T) { t.Skip("fixture") }
+after-prose-go|src/iterator_test.go|added skip|package iterator\n// t.Skip is not needed\nfunc TestExample(t *testing.T) {\n\tt.SkipNow()\n}
+after-literals-go|src/iterator_test.go|added skip|package iterator\nfunc TestExample(t *testing.T) { use("https://a/*", '"', '`'); t.Skipf("fixture %d", 1) }
+after-raw-go|src/iterator_test.go|added skip|package iterator\nfunc TestExample(t *testing.T) { use(`"\\\\`); t.Skip() }
+commented-call-go|src/iterator_test.go|added skip|package iterator\nfunc TestExample(t *testing.T) { t./* note */Skip("fixture") }
+unterminated-go|src/iterator_test.go|added skip|package iterator\nfunc TestExample(t *testing.T) { t.Skip() }\n/* open
+unittest-skip|tests/test_iterator.py|added skip|from unittest import skipIf as skip_unavailable\n@skip_unavailable(False, "fixture")\ndef test_iterator():\n    assert selected() == expected()
+early-shell|tests/iterator.test.sh|added early-exit marker|exit 0\nassert_value
+CASES
+  pass "pinned tests permit benign stubs and refuse recognized skip, focus and trivial assertions"
+}
+
+test_acceptance_tamper() {
+  accept_reset
+  git -C "$A_REPO" rm -q tests/test_old.py || fail "cannot delete fixture test"
+  accept_candidate
+  accept_refused "existing test entry changed" "$SCRIPT" review-brief "$A_ID" "$A_URL" deletion
+
+  accept_reset
+  git -C "$A_REPO" mv tests/test_old.py tests/test_renamed.py || fail "cannot rename fixture test"
+  accept_candidate
+  accept_refused "existing test entry changed" "$SCRIPT" review-brief "$A_ID" "$A_URL" rename
+
+  accept_reset
+  printf 'def test_contract():\n    actual()\n' > "$A_REPO/tests/test_old.py"
+  accept_candidate
+  accept_refused "existing test entry changed" "$SCRIPT" review-brief "$A_ID" "$A_URL" assertion
+
+  accept_reset
+  printf '@pytest.mark.skip(reason="fixture")\ndef test_another():\n    assert value() == 2\n' > "$A_REPO/tests/test_new.py"
+  accept_candidate
+  accept_refused "added skip" "$SCRIPT" review-brief "$A_ID" "$A_URL" skip
+
+  accept_reset
+  printf 'def test_another():\n    assert True\n' > "$A_REPO/tests/test_new.py"
+  accept_candidate
+  accept_refused "added trivial assertion" "$SCRIPT" review-brief "$A_ID" "$A_URL" tautology
+
+  accept_reset
+  printf 'test_value() {\n  test 1 = 1\n}\n' > "$A_REPO/tests/value.test.sh"
+  accept_candidate
+  accept_refused "added trivial assertion" "$SCRIPT" review-brief "$A_ID" "$A_URL" shell-tautology
+
+  accept_reset
+  printf 'def helper():\n    assert actual() == 2\n' > "$A_REPO/tests/test_old.py"
+  accept_candidate
+  accept_refused "existing test entry changed" "$SCRIPT" review-brief "$A_ID" "$A_URL" test-removal
+
+  accept_reset
+  printf 'test_check() { expect_result; }\n' > "$A_REPO/tests/contract.test.sh"
+  accept_candidate
+  accept_refused "existing test entry changed: 'tests/contract.test.sh'" "$SCRIPT" review-brief "$A_ID" "$A_URL" shell-call
+
+  accept_reset
+  : > "$A_REPO/src/__tests__/state.test.ts"
+  accept_candidate
+  accept_refused "existing test entry changed: 'src/__tests__/state.test.ts'" "$SCRIPT" review-brief "$A_ID" "$A_URL" typescript
+
+  accept_reset
+  printf '__test__ = False\n' > "$A_REPO/tests/test_new.py"
+  accept_candidate
+  accept_refused "added collection override" "$SCRIPT" review-brief "$A_ID" "$A_URL" collection
+
+  accept_reset
+  printf 'def test_other():\n    return\n' > "$A_REPO/tests/test_new.py"
+  accept_candidate
+  accept_refused "added early-return marker" "$SCRIPT" review-brief "$A_ID" "$A_URL" early-return
+
+  accept_reset
+  printf 'it("state", () => expect(state()).toBe("ready"));\n' > "$A_REPO/src/__tests__/added.js"
+  accept_candidate
+  accept_refused "new test has no matching supervisor byte pin" "$SCRIPT" review-brief "$A_ID" "$A_URL" unapproved-test
+  (umask 077; jq --arg sum "$(fixture_sha256 "$A_REPO/src/__tests__/added.js")" \
+    '.new_tests={"src/__tests__/added.js":$sum}' "$A_POLICY" > "$A/policy")
+  mv "$A/policy" "$A_POLICY"
+  accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" approved-test >/dev/null ||
+    fail "trusted exact byte pin should allow a new test format"
+
+  accept_reset
+  printf 'it.skip("state", () => expect(state()).toBe("ready"));\n' > "$A_REPO/src/__tests__/added.js"
+  accept_candidate
+  accept_refused "added skip" "$SCRIPT" review-brief "$A_ID" "$A_URL" skipped-javascript
+
+  accept_reset
+  git -C "$A_REPO" mv app.py moved.py || fail "cannot rename fixture source"
+  accept_candidate
+  accept_refused "out-of-scope change" "$SCRIPT" review-brief "$A_ID" "$A_URL" path
+
+  accept_reset
+  printf 'anything goes\n' > "$A_REPO/acceptance-policy.json"
+  printf '## Files in scope\n- **\n' > "$A_HOME/data/$A_ID/brief.md"
+  accept_candidate
+  accept_refused "out-of-scope change" "$SCRIPT" review-brief "$A_ID" "$A_URL" policy
+
+  accept_reset
+  git -C "$A_REPO" add app.py || fail "cannot stage allowed edit"
+  git -C "$A_REPO" update-index --add --cacheinfo "160000,$A_BASE,vendor" || fail "cannot stage Git link"
+  accept_candidate staged
+  git -C "$A_REPO" config diff.ignoreSubmodules all
+  accept_refused "out-of-scope change: 'vendor'" "$SCRIPT" review-brief "$A_ID" "$A_URL" hidden-submodule
+  git -C "$A_REPO" config --unset diff.ignoreSubmodules
+  pass "exact diff rejects test and assertion deletion, skips, tautologies, renames and worker scope edits"
+}
+
+accept_add_regression() {
+  cat > "$A_REPO/tests/test_regression.py" <<PY
+import subprocess
+import sys
+import unittest
+
+class Regression(unittest.TestCase):
+    def test_value(self):
+        observed = subprocess.check_output(
+            [sys.executable, "-c", "from app import value; print(value)"], text=True
+        )
+        self.assertEqual(int(observed), $1)
+PY
+  chmod +x "$A_REPO/tests/test_regression.py"
+  accept_regression_policy
+}
+
+accept_regression_policy() {
+  local test_sha runner_sha
+  test_sha=$(fixture_sha256 "$A_REPO/tests/test_regression.py")
+  runner_sha=$(fixture_sha256 "$A_HOME/data/$A_ID/regression")
+  (umask 077; jq --arg test "$test_sha" --arg runner "$runner_sha" '
+    .kind = "bug" | .regression = {path:"tests/test_regression.py",test_sha256:$test,runner_sha256:$runner}
+  ' "$A_POLICY" > "$A/policy")
+  mv "$A/policy" "$A_POLICY"
+}
+
+fixture_sha256() {
+  python3 -c 'import hashlib, pathlib, sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' "$1"
+}
+
+test_acceptance_regression() {
+  local result
+  if [ "$(uname -s)" != Linux ] || ! command -v bwrap >/dev/null; then
+    printf '# regression execution requires Linux bubblewrap\n'
+    return
+  fi
+  if ! bwrap --unshare-all --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind-try /lib64 /lib64 \
+    -- /usr/bin/true >/dev/null 2>&1; then
+    printf '# regression execution requires available bubblewrap namespaces\n'
+    return
+  fi
+  accept_reset
+  (umask 077; cat > "$A_HOME/data/$A_ID/regression" <<'PY'
+#!/usr/bin/python3 -I
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+import unittest
+
+if Path("/home").exists() or os.environ.get("FM_HOME") or not os.access(sys.argv[1], os.X_OK):
+    sys.exit(13)
+spec = importlib.util.spec_from_file_location("regression", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+try:
+    spec.loader.exec_module(module)
+except (Exception, SystemExit):
+    sys.exit(12)
+suite = unittest.defaultTestLoader.loadTestsFromModule(module)
+if suite.countTestCases() != 1:
+    sys.exit(12)
+result = unittest.TestResult()
+suite.run(result)
+if result.testsRun != 1 or result.skipped or result.errors:
+    sys.exit(12)
+def report(outcome):
+    print(json.dumps({"test": sys.argv[1], "tests_run": result.testsRun, "result": outcome}))
+
+if len(result.failures) == 1 and result.failures[0][1].endswith("AssertionError: 1 != 2\n"):
+    report("expected-failure")
+    sys.exit(10)
+if result.wasSuccessful():
+    report("pass")
+    sys.exit(0)
+sys.exit(12)
+PY
+  )
+  accept_add_regression 2
+  accept_candidate
+  result=$(accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" bug-scout 2>&1) ||
+    fail "isolated base-red/head-green regression did not pass: $result"
+  assert_equals '10:0' "$(jq -r '.checks.regression | "\(.base_exit):\(.head_exit)"' "$A_STATE/bug-scout.refute.json")" \
+    "trusted runner must observe the expected failure before and success after"
+  assert_equals '1:expected-failure:1:pass' "$(jq -r '.checks.regression |
+    "\(.base_execution.tests_run):\(.base_execution.result):\(.head_execution.tests_run):\(.head_execution.result)"' \
+    "$A_STATE/bug-scout.refute.json")" "both legs must report the selected test ran"
+
+  accept_reset
+  printf '# Fixture module with a standard library module name.\n' > "$A_REPO/subprocess.py"
+  (umask 077; jq '.allow += ["subprocess.py"]' "$A_POLICY" > "$A/policy")
+  mv "$A/policy" "$A_POLICY"
+  accept_add_regression 2
+  git -C "$A_REPO" restore app.py
+  accept_candidate
+  accept_refused "head regression did not pass (exit 10)" \
+    "$SCRIPT" review-brief "$A_ID" "$A_URL" observer-import
+  printf 'value = 2\n' > "$A_REPO/app.py"
+  accept_candidate
+  accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" observer-import-fixed >/dev/null ||
+    fail "trusted observer imports should be independent of the candidate's module names"
+
+  accept_reset
+  accept_add_regression 1
+  accept_candidate
+  accept_refused "already passes" "$SCRIPT" review-brief "$A_ID" "$A_URL" existing-pass
+
+  accept_reset
+  accept_add_regression 2
+  rm "$A_REPO/tests/test_regression.py"
+  accept_candidate
+  accept_refused "regression test must be new" "$SCRIPT" review-brief "$A_ID" "$A_URL" missing-test
+
+  accept_reset
+  accept_add_regression 2
+  printf 'import missing_fixture_dependency\n' >> "$A_REPO/tests/test_regression.py"
+  accept_regression_policy
+  accept_candidate
+  accept_refused "base regression did not reach the expected failure (exit 12)" \
+    "$SCRIPT" review-brief "$A_ID" "$A_URL" base-collection-error
+
+  accept_reset
+  accept_add_regression 2
+  printf 'import missing_fixture_dependency\n' > "$A_REPO/app.py"
+  accept_candidate
+  accept_refused "head regression did not pass (exit 12)" "$SCRIPT" review-brief "$A_ID" "$A_URL" collection-error
+
+  accept_reset
+  accept_add_regression 2
+  printf 'import unittest\nraise unittest.SkipTest("fixture")\n' > "$A_REPO/app.py"
+  accept_candidate
+  accept_refused "head regression did not pass (exit 12)" "$SCRIPT" review-brief "$A_ID" "$A_URL" skipped-regression
+
+  accept_reset
+  accept_add_regression 2
+  # The static patterns do not resolve this spelling, so only the observer can
+  # see that the framework skipped the test.
+  cat >> "$A_REPO/tests/test_regression.py" <<'PY'
+
+    def setUp(self):
+        import unittest.case as framework
+        if b"2" in subprocess.check_output([sys.executable, "-c", "from app import value; print(value)"]):
+            raise framework.SkipTest("fixture")
+PY
+  accept_regression_policy
+  accept_candidate
+  accept_refused "head regression did not pass (exit 12)" "$SCRIPT" review-brief "$A_ID" "$A_URL" observed-skip
+
+  accept_reset
+  accept_add_regression 2
+  printf 'value = 3\n' > "$A_REPO/app.py"
+  accept_candidate
+  accept_refused "head regression did not pass (exit 12)" "$SCRIPT" review-brief "$A_ID" "$A_URL" still-failing
+
+  accept_reset
+  cat > "$A_HOME/data/$A_ID/regression" <<'PY'
+#!/usr/bin/python3
+import json
+from pathlib import Path
+import sys
+
+# Deliberately incomplete end-to-end runner fixture: simulates the base
+# observation but supplies no completed-test record when exiting successfully.
+if Path("app.py").read_text() == "value = 1\n":
+    print(json.dumps({"test": sys.argv[1], "tests_run": 1, "result": "expected-failure"}))
+    sys.exit(10)
+sys.exit(0)
+PY
+  accept_add_regression 2
+  accept_candidate
+  accept_refused "head regression did not report test execution evidence" \
+    "$SCRIPT" review-brief "$A_ID" "$A_URL" no-execution-proof
+  pass "same test fails at the pinned base and passes at the candidate; missing, passing-before, broken, skipped and failing tests refuse"
+}
+
+test_acceptance_entry_points() {
+  local result ident endpoint park scout=refute-scout
+  accept_reset
+  accept_candidate
+  printf 'Tests passed. Exact-head independent reviewer says merge.\n' > "$A_HOME/data/$A_ID/report.md"
+  accept_cmd "$A_VERDICT" "$A_URL" "$A_HEAD" merge "legacy reviewer" || fail "could not write legacy verdict"
+  endpoint=$(wc -c < "$A_STATUS" | tr -d ' ')
+  ident=$(bash -c '. "$1"; _fm_open_decisions_file_ident "$2"' fixture "$ROOT/bin/fm-classify-lib.sh" "$A_STATUS")
+  accept_cmd "$ROOT/bin/fm-worker-done.sh" "$A_ID" "$endpoint" "$ident" || fail "worker intake failed"
+  assert_no_grep 'pr=' "$A_META" "worker done stamped protected readiness"
+  accept_cmd "$SCRIPT" --auto "$A_ID" "$A_URL" || fail "legacy auto checklist failed"
+  assert_no_grep 'pr=' "$A_META" "legacy auto checklist stamped protected readiness"
+
+  printf 'pr=%s\npr_head=%s\n' "$A_URL" "$A_HEAD" >> "$A_META"
+  accept_refused "accepted.json" "$PR_CHECK" "$A_ID" "$A_URL"
+  FM_PR_CHECK_MERGE=1 accept_refused "accepted.json" "$PR_CHECK" "$A_ID" "$A_URL"
+  [ ! -e "$A_STATE/$A_ID.check.sh" ] || fail "unaccepted candidate published a poll"
+  accept_refused "missing passing fresh-context review" "$SCRIPT" accept "$A_ID" "$A_URL"
+  [ ! -e "$A_STATE/$A_ID.accepted.json" ] || fail "worker evidence was accepted"
+  accept_refused "exact-head done candidate" "$SCRIPT" review-brief "$A_ID" https://github.com/acme/widget/pull/7 other-pr
+
+  result=$(accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" "$scout" 2>&1) || fail "review brief refused: $result"
+  assert_grep " -C $A_STATE/$A_ID.acceptance-git diff " "$result" \
+    "review must use the supervisor's tree even when the worker reports both pins locally"
+  accept_refused "provider absent from the builder lineage" "$SCRIPT" spawn-review "$scout" scout 0 claude claude-sonnet-4-6 "$A_REPO" "$result"
+  accept_refused "fresh native scout" "$SCRIPT" spawn-review "$scout" scout 1 codex gpt-5.6-sol "$A_REPO" "$result"
+  accept_refused "project or brief does not match" "$SCRIPT" spawn-review "$scout" scout 0 codex gpt-5.6-sol "$A/pool" "$result"
+  accept_cmd "$SCRIPT" spawn-review "$scout" scout 0 codex gpt-5.6-sol "$A/repo-link" "$result" >/dev/null ||
+    fail "a symlink to the candidate's own project should name the same project"
+  accept_refused "$scout.meta" "$A_VERDICT" refute "$A_ID" "$scout" "$A_HEAD"
+
+  result=$(A_HEAD="$A_HEAD" A_BASE="$A_BASE" A_URL="$A_URL" FM_TEST_CONFIG="$A_CONFIG" \
+    fm_test_run_spawn "$A_HOME" "$A/pool" "$A_FAKE" "$scout" "$A_REPO" \
+    --scout --backend tmux --harness codex --model gpt-5.6-sol) || fail "native scout did not launch: $result"
+  write_report "$scout" merge 'Checked the criterion against app.py. No blocker.'
+  printf 'done: Refute %s %s merge\n' "$A_BASE" "$A_BASE" > "$A_STATE/$scout.status"
+  accept_refused "verdicts disagree" "$A_VERDICT" refute "$A_ID" "$scout" "$A_HEAD"
+  printf 'done: Refute %s %s merge\n' "$A_BASE" "$A_HEAD" > "$A_STATE/$scout.status"
+  accept_refused "did not sign off" "$A_VERDICT" refute "$A_ID" "$scout" "$A_BASE"
+  accept_refused "supervisor operations" env FM_TASK_ID="$scout" "$A_VERDICT" refute "$A_ID" "$scout" "$A_HEAD"
+  accept_cmd "$A_VERDICT" refute "$A_ID" "$scout" "$A_HEAD" || fail "supervisor could not record scout result"
+  assert_grep 'yolo=off' "$A_META" "recording a refute verdict changed merge authority"
+  accept_refused "accepted.json" "$PR_CHECK" "$A_ID" "$A_URL"
+
+  result=$(accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL") || fail "exact-head acceptance failed"
+  assert_equals "$A_HEAD" "$result" "acceptance wrote a different head"
+  accept_refused "valid fresh scout ID" "$SCRIPT" review-brief "$A_ID" "$A_URL"
+  A_FORGE_UNREADABLE=1 accept_cmd "$SCRIPT" passing "$A_ID" "$A_URL" "$A_HEAD" >/dev/null ||
+    fail "offline status read contacted the forge"
+  A_FORGE_UNREADABLE=1 accept_refused "done acceptance" "$PR_CHECK" "$A_ID" "$A_URL"
+  A_FORGE_UNREADABLE=1 accept_refused "temporary forge read unavailable" "$SCRIPT" assert "$A_ID" "$A_URL"
+  A_LIVE_HEAD=$A_BASE accept_refused "live GitHub head" "$PR_CHECK" "$A_ID" "$A_URL"
+  A_LIVE_BASE=$A_HEAD accept_refused "live GitHub target branch" "$PR_CHECK" "$A_ID" "$A_URL"
+  A_LIVE_BRANCH=fm/unrelated accept_refused "task branch" "$PR_CHECK" "$A_ID" "$A_URL"
+  A_LIVE_REPO=other/widget accept_refused "GitHub repository" "$PR_CHECK" "$A_ID" "$A_URL"
+  accept_cmd "$PR_CHECK" "$A_ID" "$A_URL" || fail "accepted candidate did not arm the ordinary PR check"
+  [ -f "$A_STATE/$A_ID.check.sh" ] || fail "accepted candidate has no PR poll"
+  assert_grep "pr_head=$A_HEAD" "$A_META" "registered the wrong PR head"
+
+  cp "$A_STATUS" "$A/candidate.status"
+  park="paused [at=101]: parked on review: PR $A_URL clean at ${A_HEAD:0:12}; agent stopped, relaunches on review activity"
+  printf '%s\n' "$park" >> "$A_STATUS"
+  accept_refused "no current exact-head done candidate" "$SCRIPT" assert "$A_ID" "$A_URL"
+  cat "$A/candidate.status" > "$A_STATUS"
+  FM_HOME="$A_HOME" FM_ROOT_OVERRIDE="$ROOT" bash -c '
+    . "$1"
+    rc=0
+    fm_wake_status_append_self_announced "$2" "$3" "$4" \
+      "blocked [key=paused-overdue-$5]: paused 120s, wait overdue - decide or release" \
+      "resolved [key=paused-overdue-$5]: worker pause changed" || rc=$?
+    [ "$rc" -le 1 ]
+  ' fixture "$ROOT/bin/fm-wake-lib.sh" "$A_STATE" "$A_STATUS" "$park" "$A_ID" ||
+    fail "could not append supervisor park and watcher annotations"
+  assert_present "$A_STATE/.$A_ID.home-appends" "home append provenance was not recorded"
+  accept_cmd "$SCRIPT" assert "$A_ID" "$A_URL" "$A_HEAD" >/dev/null ||
+    fail "supervisor operational annotations lost exact-head acceptance"
+  accept_cmd "$PR_CHECK" "$A_ID" "$A_URL" || fail "accepted parked candidate lost PR admission"
+  A_LIVE_BASE=$A_HEAD accept_refused "live GitHub target branch" "$SCRIPT" assert "$A_ID" "$A_URL"
+  cp "$A_META" "$A/candidate.meta"
+  sed 's/s100\.200\.300/s101.200.300/g' "$A/candidate.meta" > "$A_META"
+  accept_refused "accepted evidence no longer matches" "$SCRIPT" assert "$A_ID" "$A_URL"
+  cat "$A/candidate.meta" > "$A_META"
+  cp "$A_STATUS" "$A/parked.status"
+  printf 'working: reconsidering the fixture\n' >> "$A_STATUS"
+  accept_refused "no current exact-head done candidate" "$SCRIPT" assert "$A_ID" "$A_URL"
+  cat "$A/candidate.status" >> "$A_STATUS"
+  accept_refused "accepted evidence no longer matches" "$SCRIPT" assert "$A_ID" "$A_URL"
+  cat "$A/parked.status" > "$A_STATUS"
+
+  mv "$A_STATE/review-verdicts.jsonl" "$A_STATE/review-verdicts.saved"
+  ln -s "$A_STATE/review-verdicts.saved" "$A_STATE/review-verdicts.jsonl"
+  accept_refused "done acceptance" "$SCRIPT" passing "$A_ID" "$A_URL"
+  rm "$A_STATE/review-verdicts.jsonl"
+  mv "$A_STATE/review-verdicts.saved" "$A_STATE/review-verdicts.jsonl"
+
+  write_report "$scout" fix 'Found a blocker in app.py.'
+  printf 'done: Refute %s %s fix\n' "$A_BASE" "$A_HEAD" > "$A_STATE/$scout.status"
+  accept_cmd "$A_VERDICT" refute "$A_ID" "$scout" "$A_HEAD" || fail "could not record exact-head blocker"
+  accept_refused "missing passing fresh-context review" "$PR_CHECK" "$A_ID" "$A_URL"
+  if accept_cmd "$A_VERDICT" passing "$A_URL" "$A_HEAD"; then
+    fail "a refute fix must block the legacy verdict reader"
+  fi
+  printf 'value = 3\n' > "$A_REPO/app.py"
+  accept_candidate
+  accept_refused "accepted evidence no longer matches" "$PR_CHECK" "$A_ID" "$A_URL"
+  accept_refused "missing passing fresh-context review" "$SCRIPT" accept "$A_ID" "$A_URL"
+  rm "$A_POLICY"
+  accept_refused "$A_ID.json" "$PR_CHECK" "$A_ID" "$A_URL"
+  pass "ordinary PR registration requires a current exact candidate, native independent review and explicit supervisor acceptance"
+}
+
+# Synthetic review records only: the scout metadata, report and status are
+# ordinary files, and nothing is accepted, registered or launched.
+prepare_review_record() {  # <scout> <report> <merge|fix> [project]
+  local scout=$1
+  mkdir -p "$A_HOME/data/$scout"
+  accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" "$scout" >/dev/null || fail "could not prepare review $scout"
+  fm_write_meta "$A_STATE/$scout.meta" "kind=scout" "spawn_gen=s200.300.$RANDOM" "project=${4:-$A_REPO}" \
+    "harness=codex" "model=gpt-5.6-sol" "refute_context=$(fixture_sha256 "$A_STATE/$scout.refute.json")"
+  write_report "$scout" "$3" "$2"
+  report_review "$scout" "$3"
+}
+
+write_report() {  # <scout> <merge|fix> <findings>
+  printf 'Refute %s %s %s\n\n%s\n' "$A_BASE" "$A_HEAD" "$2" "$3" > "$A_HOME/data/$1/report.md"
+}
+
+report_review() {  # <scout> <merge|fix>
+  printf 'done [at=%s]: Refute %s %s %s\n' "$RANDOM" "$A_BASE" "$A_HEAD" "$2" >> "$A_STATE/$1.status"
+}
+
+record_review() {  # <scout>
+  accept_cmd "$A_VERDICT" refute "$A_ID" "$1" "$A_HEAD" 2> "$A/record.err" ||
+    fail "supervisor could not record review $1: $(cat "$A/record.err")"
+}
+
+# The journal's last row for this candidate, as <reviewer>:<verdict>.
+effective_review() { tail -n 1 "$A_STATE/review-verdicts.jsonl" | jq -r '"\(.reviewer):\(.verdict)"'; }
+
+# Retrying <scout> must leave every journal byte, so also each ordering time.
+assert_review_retry() {  # <scout> <label>
+  cp "$A_STATE/review-verdicts.jsonl" "$A/journal"
+  record_review "$1"
+  cmp -s "$A/journal" "$A_STATE/review-verdicts.jsonl" ||
+    fail "$2: a retry changed the journal"$'\n'"$(diff "$A/journal" "$A_STATE/review-verdicts.jsonl")"
+  assert_grep "already recorded" "$A/record.err" "$2: a retry should say the review was already recorded"
+}
+
+test_review_event_retry() {
+  local journal="$A_STATE/review-verdicts.jsonl" pid pids='' n
+  accept_reset
+  printf 'value = 31\n' > "$A_REPO/app.py"
+  accept_candidate
+  rm -f "$journal" "$A_STATE/$A_ID.accepted.json"
+
+  # The report's first line owns the verdict, and the scout's status must agree.
+  local verdict other
+  for verdict in merge fix; do
+    [ "$verdict" = merge ] && other=fix || other=merge
+    prepare_review_record "conflict-$verdict" 'Replaced after the status.' "$verdict"
+    write_report "conflict-$verdict" "$other" 'Replaced after the status.'
+    accept_refused "verdicts disagree" "$A_VERDICT" refute "$A_ID" "conflict-$verdict" "$A_HEAD"
+    write_report "conflict-$verdict" "$verdict" ''
+    accept_refused "lacks findings" "$A_VERDICT" refute "$A_ID" "conflict-$verdict" "$A_HEAD"
+    printf 'Summary first.\nRefute %s %s %s\n' "$A_BASE" "$A_HEAD" "$verdict" > "$A_HOME/data/conflict-$verdict/report.md"
+    accept_refused "lacks findings under a verdict" "$A_VERDICT" refute "$A_ID" "conflict-$verdict" "$A_HEAD"
+    printf 'Refute %s %s %s\nOther head.\n' "$A_BASE" "$A_BASE" "$verdict" > "$A_HOME/data/conflict-$verdict/report.md"
+    accept_refused "exact pinned base and head" "$A_VERDICT" refute "$A_ID" "conflict-$verdict" "$A_HEAD"
+    assert_absent "$journal" "a refused report must not be recorded"
+  done
+  for verdict in fix merge; do
+    prepare_review_record "agree-$verdict" 'Report and status agree.' "$verdict"
+    record_review "agree-$verdict"
+    assert_equals "agree-$verdict:$verdict" "$(effective_review)" "an agreeing report must be recorded"
+  done
+
+  prepare_review_record first 'Checked app.py. No blocker.' merge
+  record_review first
+  assert_review_retry first "latest review"
+
+  # A later ordinary fix stays the effective decision.
+  accept_cmd "$A_VERDICT" "$A_URL" "$A_HEAD" fix "second reviewer" || fail "could not record the later fix"
+  assert_review_retry first "before a later fix"
+  assert_equals "second reviewer:fix" "$(effective_review)" "a retry displaced a later fix"
+  report_review first merge
+  assert_review_retry first "a repeated merge report with no new evidence"
+  accept_refused "missing passing fresh-context review" "$SCRIPT" accept "$A_ID" "$A_URL"
+  assert_absent "$A_STATE/$A_ID.accepted.json" "a retried review must not accept the candidate"
+
+  # A fresh report from the same scout and a fresh scout are both new evidence.
+  write_report first merge 'Rechecked app.py after the fix verdict. No blocker.'
+  report_review first merge
+  record_review first
+  assert_equals first:merge "$(effective_review)" "a revised report is new evidence"
+  prepare_review_record second 'Found a blocker in app.py.' fix "$A/pool"
+  accept_refused "matching fresh native scout dispatch" "$A_VERDICT" refute "$A_ID" second "$A_HEAD"
+  sed "s|^project=.*|project=$A/repo-link|" "$A_STATE/second.meta" > "$A/second.meta"
+  mv "$A/second.meta" "$A_STATE/second.meta"
+  record_review second
+  assert_equals second:fix "$(effective_review)" "a fresh scout is new evidence"
+  assert_review_retry first "before a later refute fix"
+  assert_equals second:fix "$(effective_review)" "a retry displaced a later refute fix"
+
+  # A retried fix cannot displace a later merge, but a newly reported one can.
+  # Concurrent recordings of one review share the writer lock and append one row.
+  prepare_review_record third 'Blocker does not reproduce.' merge
+  for n in 1 2 3 4; do
+    accept_cmd "$A_VERDICT" refute "$A_ID" third "$A_HEAD" 2> "$A/concurrent.$n" &
+    pids="$pids $!"
+  done
+  for pid in $pids; do wait "$pid" || fail "a concurrent recording failed"; done
+  assert_equals 1 "$(grep -c '"reviewer":"third"' "$journal")" "concurrent recordings of one review must append one row"
+  assert_review_retry second "before a later merge"
+  assert_equals third:merge "$(effective_review)" "a retried fix displaced a later merge"
+  report_review second fix
+  record_review second
+  assert_equals second:fix "$(effective_review)" "a newly reported fix must block again"
+  assert_review_retry second "newly reported fix"
+
+  # Ordinary verdicts carry no event identity, so each one is still appended.
+  accept_cmd "$A_VERDICT" "$A_URL" "$A_HEAD" fix "second reviewer" || fail "could not record an ordinary fix again"
+  assert_equals "second reviewer:fix" "$(effective_review)" "an ordinary fix must still append"
+
+  # A refute row that names no event is unreadable to intake and acceptance alike.
+  cp "$journal" "$A/journal"
+  jq -c 'if .refute then del(.refute.event) else . end' "$A/journal" > "$journal"
+  accept_refused "refute review evidence is unreadable" "$A_VERDICT" refute "$A_ID" first "$A_HEAD"
+  accept_refused "refute review evidence is unreadable" "$SCRIPT" accept "$A_ID" "$A_URL"
+  cat "$A/journal" > "$journal"
+  assert_review_retry third "row with its event restored"
+  printf 'not a verdict\n' >> "$journal"
+  accept_refused "done acceptance" "$A_VERDICT" refute "$A_ID" first "$A_HEAD"
+  cat "$A/journal" > "$journal"
+  pass "retrying a recorded review appends nothing and a later decision on the same head stays effective"
+}
+
+# Every normal read and registration entry point, with the scout's newest report
+# not yet recorded by the supervisor.
+assert_accepted() {  # <label>
+  local result
+  result=$(accept_cmd "$SCRIPT" passing "$A_ID" "$A_URL" "$A_HEAD" 2>&1) || fail "$1: passing refused: $result"
+  result=$(accept_cmd "$SCRIPT" assert "$A_ID" "$A_URL" "$A_HEAD" 2>&1) || fail "$1: assert refused: $result"
+  result=$(accept_cmd "$PR_CHECK" "$A_ID" "$A_URL" 2>&1) || fail "$1: PR registration refused: $result"
+  result=$(ship_done_read) || fail "$1: current-state read refused: $result"
+}
+
+assert_displaced() {  # <label> <scout>
+  local reason="native review report from $2 is not the saved verdict"
+  accept_refused "$reason" "$SCRIPT" passing "$A_ID" "$A_URL" "$A_HEAD"
+  accept_refused "$reason" "$SCRIPT" assert "$A_ID" "$A_URL" "$A_HEAD"
+  accept_refused "$reason" "$SCRIPT" accept "$A_ID" "$A_URL"
+  accept_refused "$reason" "$PR_CHECK" "$A_ID" "$A_URL"
+  FM_PR_CHECK_MERGE=1 accept_refused "$reason" "$PR_CHECK" "$A_ID" "$A_URL"
+  ship_done_read >/dev/null && fail "$1: current-state read kept a displaced acceptance"
+}
+
+# The current-state, reconciliation and delivery readers share this library gate.
+ship_done_read() {
+  accept_cmd bash -c '. "$1"; fm_dod_accept_ship_done ship direct-PR "$2" "$2" "$3" "$4" "$5" "$6"' fixture \
+    "$ROOT/bin/fm-dod-lib.sh" "$A_REPO" "$(tail -n 1 "$A_STATUS")" "$A_STATE" "$A_ID" "$A_META"
+}
+
+test_native_report_displaces_acceptance() {
+  local report="$A_HOME/data/keeper/report.md" status="$A_STATE/keeper.status" scout
+  accept_reset
+  printf 'value = 37\n' > "$A_REPO/app.py"
+  accept_candidate
+  rm -f "$A_STATE/review-verdicts.jsonl" "$A_STATE/$A_ID.accepted.json"
+  prepare_review_record keeper 'Checked app.py. No blocker.' merge
+  record_review keeper
+  accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL" >/dev/null || fail "could not accept the recorded review"
+  assert_accepted "recorded review"
+  cp "$report" "$A/keeper.report"
+  cp "$status" "$A/keeper.status"
+
+  # The same scout's newer report, its status, or both, before it is recorded.
+  write_report keeper fix 'Found a blocker in app.py.'
+  assert_displaced "replaced report" keeper
+  cat "$A/keeper.report" > "$report"
+  assert_accepted "exact saved report"
+  report_review keeper fix
+  assert_displaced "newer status" keeper
+  cat "$A/keeper.status" > "$status"
+  write_report keeper merge 'Rechecked app.py. Still no blocker.'
+  report_review keeper merge
+  assert_displaced "revised merge report" keeper
+  cat "$A/keeper.report" > "$report"
+
+  # A retry of the saved merge is not a new report.
+  assert_review_retry keeper "repeated merge report"
+  assert_accepted "repeated merge report"
+  printf 'working: rechecking the fixture\n' >> "$status"
+  assert_displaced "withdrawn status" keeper
+  report_review keeper merge
+  assert_accepted "merge reported again"
+
+  # A fresh scout displaces the saved verdict when it reports, not when it is
+  # dispatched. A report it leaves behind without a status still blocks.
+  prepare_review_record rival 'Found a blocker in app.py.' fix
+  mv "$A_HOME/data/rival/report.md" "$A/rival.report"
+  mv "$A_STATE/rival.status" "$A/rival.status"
+  assert_accepted "dispatched scout without a report"
+  cp "$A/rival.report" "$A_HOME/data/rival/report.md"
+  assert_displaced "fresh scout report" rival
+  cp "$A/rival.status" "$A_STATE/rival.status"
+  assert_displaced "fresh scout verdict" rival
+  mkdir "$A/retired"
+  mv "$A_STATE/rival.meta" "$A_STATE/rival.status" "$A/retired/"
+  assert_displaced "retired scout with an unrecorded blocker" rival
+  mv "$A/retired/rival.meta" "$A/retired/rival.status" "$A_STATE/"
+  record_review rival
+  accept_refused "missing passing fresh-context review" "$SCRIPT" passing "$A_ID" "$A_URL" "$A_HEAD"
+
+  # A later recorded merge needs its own acceptance, and a blocker reported
+  # again displaces that one too.
+  prepare_review_record arbiter 'Blocker does not reproduce.' merge
+  accept_refused "missing passing fresh-context review" "$SCRIPT" accept "$A_ID" "$A_URL"
+  record_review arbiter
+  accept_refused "accepted evidence no longer matches" "$SCRIPT" passing "$A_ID" "$A_URL" "$A_HEAD"
+  accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL" >/dev/null || fail "could not accept the later review"
+  assert_accepted "later review"
+  cp "$A_STATE/rival.status" "$A/rival.status"
+  report_review rival fix
+  assert_displaced "blocker reported again" rival
+  cat "$A/rival.status" > "$A_STATE/rival.status"
+
+  # An interrupted retirement can leave a scout with only its status or only its
+  # task record. Saved evidence still counts and an unsaved blocker still holds.
+  mkdir "$A/partial"
+  mv "$A_STATE/keeper.meta" "$A_STATE/rival.meta" "$A_STATE/arbiter.meta" "$A/partial/"
+  assert_accepted "scouts without task records"
+  accept_refused "cannot be recorded without rival.meta" "$A_VERDICT" refute "$A_ID" rival "$A_HEAD"
+  report_review rival fix
+  assert_displaced "blocker reported again without a task record" rival
+  cat "$A/rival.status" > "$A_STATE/rival.status"
+  mv "$A/partial/"*.meta "$A_STATE/"
+  mv "$A_STATE/keeper.status" "$A_STATE/rival.status" "$A_STATE/arbiter.status" "$A/partial/"
+  assert_accepted "scouts without status"
+  accept_refused "cannot be recorded without arbiter.status" "$A_VERDICT" refute "$A_ID" arbiter "$A_HEAD"
+  mv "$A/partial/"*.status "$A_STATE/"
+  prepare_review_record spare 'Checked app.py. No blocker.' merge
+  assert_displaced "unsaved merge from a complete scout" spare
+  mv "$A_STATE/spare.meta" "$A/partial/"
+  assert_accepted "unsaved merge without a task record"
+  report_review spare fix
+  assert_displaced "unsaved blocker in a remaining status" spare
+  mv "$A/partial/spare.meta" "$A_STATE/"
+  rm "$A_STATE/spare.status"
+  assert_accepted "unsaved merge without a status"
+  write_report spare fix 'Found a blocker in app.py.'
+  assert_displaced "unsaved blocker without a status" spare
+  rm "$A_STATE/spare.meta" "$A_STATE/spare.refute.json"
+
+  # Retired scouts keep the saved verdict, and its report must stay exact.
+  for scout in keeper rival arbiter; do
+    rm "$A_STATE/$scout.meta" "$A_STATE/$scout.status"
+  done
+  assert_accepted "retired scouts"
+  write_report arbiter merge 'Rewritten after retirement.'
+  assert_displaced "rewritten report of a retired scout" arbiter
+  pass "a native review report displaces the saved verdict at every acceptance entry point before it is recorded"
+}
+
+# The real teardown of a review scout, with a fake terminal and pool.
+retire_scout() {  # <scout>
+  local fake="$A/retire-fakebin" tool
+  if [ ! -d "$fake" ]; then
+    mkdir "$fake"
+    for tool in tmux treehouse no-mistakes; do
+      printf '#!/usr/bin/env bash\nexit 0\n' > "$fake/$tool"
+      chmod +x "$fake/$tool"
+    done
+    cat > "$fake/tmux" <<'STUB'
+#!/usr/bin/env bash
+if [ -n "${A_LATE_REPORT:-}" ] && [ ! -e "$A_LATE_REPORT.sent" ]; then
+  : > "$A_LATE_REPORT.sent"
+  cat "$A_LATE_REPORT" >> "$A_LATE_STATUS"
+fi
+exit 0
+STUB
+  fi
+  if [ ! -d "$A/scratch-$1" ]; then
+    git clone --quiet --branch dev "$A/origin.git" "$A/scratch-$1" || fail "cannot create scratch copy for $1"
+    printf '%s\n' "window=firstmate:fm-$1" "endpoint_task_id=$1" "worktree=$A/scratch-$1" \
+      "mode=no-mistakes" "decisions_reviewed=1" >> "$A_STATE/$1.meta"
+  fi
+  accept_cmd env PATH="$fake:$A_FAKE:$PATH" "$ROOT/bin/fm-teardown.sh" "$1" > "$A/retire.out" 2>&1
+}
+
+assert_retirement_held() {  # <label> <scout>
+  retire_scout "$2"
+  assert_displaced "$1" "$2"
+  assert_grep "REFUSED: refute scout $2" "$A/retire.out" "$1: teardown should explain the hold"
+  assert_present "$A_STATE/$2.status" "$1: teardown removed the only evidence of the blocker"
+  assert_present "$A_STATE/$2.meta" "$1: teardown removed the scout record"
+}
+
+assert_retired() {  # <label> <scout>
+  retire_scout "$2" || fail "$1: teardown refused: $(cat "$A/retire.out")"
+  assert_absent "$A_STATE/$2.status" "$1: retired scout kept its status"
+  assert_absent "$A_STATE/$2.meta" "$1: retired scout kept its record"
+}
+
+# The ship's pending-close record, written by its owning library.
+write_ship_close() {  # <spawn-gen>
+  accept_cmd bash -c '. "$1"; fm_backlog_close_marker_write "$2" "$3" "$4" "$5"' fixture \
+    "$ROOT/bin/fm-backlog-transition-lib.sh" "$A_STATE" "$A_ID" "$A_HOME/data" "$1" ||
+    fail "could not write the ship's pending close"
+}
+
+test_scout_retirement_keeps_unrecorded_blocker() {
+  accept_reset
+  printf 'value = 41\n' > "$A_REPO/app.py"
+  accept_candidate
+  rm -f "$A_STATE/review-verdicts.jsonl" "$A_STATE/$A_ID.accepted.json"
+  prepare_review_record critic 'Found a blocker in app.py.' fix
+  record_review critic
+  prepare_review_record judge 'Blocker does not reproduce.' merge
+  record_review judge
+  accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL" >/dev/null || fail "could not accept the later review"
+  assert_accepted "later review"
+
+  # The same blocker reported again changes only the scout's status.
+  report_review critic fix
+  assert_retirement_held "blocker reported again" critic
+  record_review critic
+  assert_retired "recorded blocker" critic
+  accept_refused "missing passing fresh-context review" "$SCRIPT" passing "$A_ID" "$A_URL" "$A_HEAD"
+
+  # A blocker announced only in the status is held the same way.
+  prepare_review_record umpire 'Rechecked app.py. No blocker.' merge
+  record_review umpire
+  accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL" >/dev/null || fail "could not accept the newest review"
+  report_review judge fix
+  assert_retirement_held "blocker announced in the status" judge
+  report_review judge merge
+  assert_accepted "withdrawn announcement"
+
+  # A progress line neither withdraws an announced blocker nor lets retirement
+  # restore a withdrawn pass.
+  report_review judge fix
+  printf 'working: rechecking the fixture\n' >> "$A_STATE/judge.status"
+  assert_retirement_held "blocker followed by progress" judge
+  report_review judge merge
+  assert_accepted "replaced announcement"
+  printf 'working: rechecking the fixture\n' >> "$A_STATE/umpire.status"
+  assert_retirement_held "withdrawn merge" umpire
+  report_review umpire merge
+  assert_accepted "merge reported again"
+  printf 'working: the evidence is unavailable\n' >> "$A_STATE/umpire.status"
+  assert_retirement_held "latest reviewer withdraws again" umpire
+  prepare_review_record relief 'Rechecked app.py. No blocker.' merge
+  record_review relief
+  accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL" >/dev/null || fail "could not accept the replacement review"
+
+  # Scouts with only recorded or replaced evidence retire and the acceptance stands.
+  assert_retired "recorded merge" judge
+  assert_retired "replaced withdrawn merge" umpire
+  assert_retired "latest recorded merge" relief
+  assert_accepted "retired scouts"
+
+  # An unrecorded blocker for a superseded candidate holds nothing.
+  prepare_review_record late 'Found a blocker in app.py.' fix
+  assert_retirement_held "unrecorded blocker" late
+  cp "$A_POLICY" "$A/reviewed.policy"
+  (umask 077; jq '.criteria="The value is two or more."' "$A/reviewed.policy" > "$A_POLICY")
+  accept_refused "did not sign off" "$A_VERDICT" refute "$A_ID" late "$A_HEAD"
+  retire_scout late && fail "a policy re-pin released an unrecorded blocker"
+  assert_grep "unsaved blocker 'Refute $A_BASE $A_HEAD fix'" "$A/retire.out" "the hold should name the blocker"
+  assert_grep "publish and report a fresh exact candidate against the current approved base and policy" \
+    "$A/retire.out" "the hold should name a remedy that works after a policy re-pin"
+  cat "$A/reviewed.policy" > "$A_POLICY"
+
+  # A ship record left without its status releases a scout only through the
+  # pending close that owns that incarnation's retirement.
+  prepare_review_record orphan 'Found a blocker in app.py.' fix
+  mv "$A_STATUS" "$A/ship.status"
+  retire_scout orphan && fail "a missing ship status alone released an unrecorded blocker"
+  assert_grep "no pending close proves" "$A/retire.out" "the hold should name the missing proof"
+  write_ship_close s999.200.300
+  retire_scout orphan && fail "another incarnation's pending close released an unrecorded blocker"
+  write_ship_close s100.200.300
+  assert_retired "retiring ship" orphan
+  rm "$A_STATE/$A_ID.backlog-close"
+  mv "$A/ship.status" "$A_STATUS"
+  printf 'value = 42\n' > "$A_REPO/app.py"
+  accept_candidate
+  assert_retired "superseded candidate" late
+
+  # A blocker reported while teardown is already closing the scout is held too,
+  # and recording it lets the same teardown finish.
+  prepare_review_record tardy 'Rechecked app.py. Still no blocker.' merge
+  record_review tardy
+  accept_cmd "$SCRIPT" accept "$A_ID" "$A_URL" >/dev/null || fail "could not accept the tardy scout's review"
+  printf 'done [at=1]: Refute %s %s fix\n' "$A_BASE" "$A_HEAD" > "$A/late.report"
+  local backlog="$A_HOME/data/backlog.md" ledger="$A_STATE/fleet-ledger.jsonl"
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$backlog"
+  printf '%s\n' 'backend = "markdown"' '' '[markdown]' 'path = "data/backlog.md"' > "$A_HOME/.tasks.toml"
+  (cd "$A_HOME" && tasks-axi add tardy "Review tardy" --kind scout --file "$backlog" &&
+    tasks-axi start tardy --file "$backlog") >/dev/null || fail "could not seed the scout's backlog row"
+  : > "$A_CONFIG/fleet-ledger"
+  A_LATE_REPORT="$A/late.report" A_LATE_STATUS="$A_STATE/tardy.status" assert_retirement_held "late report" tardy
+  assert_present "$A/late.report.sent" "the fixture should report during teardown"
+  assert_absent "$A_STATE/tardy.backlog-close" "a refused retirement left a close for session start to replay"
+  assert_absent "$ledger" "the fleet ledger reported a refused cleanup"
+  write_report tardy fix 'Found a blocker while closing.'
+  record_review tardy
+  assert_retired "recorded late report" tardy
+  jq -se 'any(.[]; .event == "task.cleaned_up" and .task == "tardy")' "$ledger" >/dev/null ||
+    fail "the fleet ledger missed the completed cleanup"
+  assert_absent "$A_STATE/tardy.backlog-close" "the completed close left its pending record"
+  rm "$A_CONFIG/fleet-ledger" "$A_HOME/.tasks.toml" "$backlog"
+  pass "retiring a refute scout never removes the only evidence of a current blocker"
+}
+
+test_acceptance_inspects_pipeline_objects() {
+  local result cache="$A_STATE/$A_ID.acceptance-git"
+  accept_reset
+  printf 'value = 23\n' > "$A_REPO/app.py"
+  accept_candidate
+  if git -C "$A/pool" cat-file -e "$A_HEAD" 2>/dev/null; then
+    fail "test must start with the pipeline head absent from the worker copy"
+  fi
+  [ -d "$cache" ] || fail "test must start with an existing supervisor cache"
+  if git -C "$cache" cat-file -e "$A_HEAD" 2>/dev/null; then
+    fail "test must start with the pipeline head absent from the supervisor cache"
+  fi
+  sed "s|^worktree=.*|worktree=$A/pool|;s/^mode=.*/mode=no-mistakes/" "$A_META" > "$A/pipeline.meta"
+  mv "$A/pipeline.meta" "$A_META"
+  printf 'done: PR %s checks green head %s\n' "$A_URL" "$A_HEAD" > "$A_STATUS"
+  result=$(accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" fetched-scout 2>&1) ||
+    fail "could not prepare review of fetched pipeline objects: $result"
+  assert_grep " -C $cache diff " "$result" "review should use the exact fetched objects"
+  assert_equals commit "$(git -C "$cache" cat-file -t "$A_HEAD")" "review populated the supervisor cache"
+  if git -C "$A/pool" cat-file -e "$A_HEAD" 2>/dev/null; then
+    fail "fallback fetch wrote objects into the worker copy"
+  fi
+  pass "pipeline objects missing from the worker copy use a private pinned forge fetch"
+}
+
+test_acceptance_requires_complete_builder_lineage() {
+  local brief
+  accept_reset
+  accept_candidate
+  sed -e 's/^spawn_gen=.*/spawn_gen=s101.200.301/' -e 's/^harness=.*/harness=codex/' \
+    -e 's/^model=.*/model=gpt-5.6-sol/' -e 's/^builder_history=.*/&:INVALID/' "$A_META" > "$A/lineage.meta"
+  mv "$A/lineage.meta" "$A_META"
+  accept_refused "builder lineage" "$SCRIPT" review-brief "$A_ID" "$A_URL" incomplete-history
+  sed 's/:INVALID$/,s101.200.301:codex:gpt-5.6-sol/' "$A_META" > "$A/lineage.meta"
+  mv "$A/lineage.meta" "$A_META"
+  brief=$(accept_cmd "$SCRIPT" review-brief "$A_ID" "$A_URL" prior-model) || fail "known lineage should be readable"
+  accept_refused "provider absent from the builder lineage" "$SCRIPT" spawn-review prior-model scout 0 \
+    claude claude-sonnet-4-6 "$A_REPO" "$brief"
+  accept_refused "provider absent from the builder lineage" "$SCRIPT" spawn-review prior-model scout 0 \
+    codex gpt-5.6-sol "$A_REPO" "$brief"
+  pass "review dispatch excludes every recorded builder provider"
+}
+
+if [ "${1:-}" = --framework-paths ]; then
+  test_acceptance_test_locations
+  test_acceptance_framework_config
+  test_acceptance_pinned_test_signals
+  exit
+fi
+
+if [ "${1:-}" = --review-events ]; then
+  test_review_event_retry
+  test_native_report_displaces_acceptance
+  test_scout_retirement_keeps_unrecorded_blocker
+  exit
+fi
+
+test_acceptance_private_fetch
+test_acceptance_tamper
+test_acceptance_test_locations
+test_acceptance_framework_config
+test_acceptance_pinned_test_signals
+test_acceptance_regression
+test_acceptance_entry_points
+test_review_event_retry
+test_native_report_displaces_acceptance
+test_scout_retirement_keeps_unrecorded_blocker
+test_acceptance_inspects_pipeline_objects
+test_acceptance_requires_complete_builder_lineage

@@ -146,11 +146,23 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/backlog-management/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/bearings/SKILL.md",
       "audience": "agent-runtime"
     },
     {
       "path": ".agents/skills/bootstrap-diagnostics/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/brief-authoring/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/captain-communication/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -175,6 +187,14 @@
     },
     {
       "path": ".agents/skills/firstmate-self-repo/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/fleet-recovery/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/fleet-supervision/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -274,7 +294,15 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-dispatch/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/process-event-sources/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/project-knowledge-management/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -294,11 +322,19 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/session-start/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/stow/SKILL.md",
       "audience": "agent-runtime"
     },
     {
       "path": ".agents/skills/stuck-crewmate-recovery/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/task-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },
     {

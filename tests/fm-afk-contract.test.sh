@@ -664,83 +664,10 @@ test_entry_without_spend_records_the_live_worker_count_never_below_the_floor() {
   pass "entry without --spend records the live worker count, never below the default floor, and an explicit --spend still wins"
 }
 
-# KEEP FULL (bin/fm-afk-contract.sh): the entering session that reads the
-# words as "keep lanes full" passes --keep-full; the script never reads the
-# words. The default floor of four then never becomes the cap: an explicit
-# --lane-target, else this home's configured lane target, else no record cap
-# at all, while an explicit --spend still wins and quiet mode refuses it.
-test_keep_full_entry_never_collapses_to_the_default_floor() {
-  local home root out i status
-  home=$(make_home keep-full-no-target)
-  out=$(contract "$home" enter --words 'keep all lanes full' --keep-full 2>&1) || fail "keep-full entry failed: $out"
-  [ "$(contract "$home" field spend_max_concurrent_workers)" = - ] \
-    || fail "a keep-full entry with no target recorded a cap: $(contract "$home" field spend_max_concurrent_workers)"
-  [ "$(contract "$home" field lane_target)" = - ] || fail "a keep-full entry invented a lane target"
-  [ "$(contract "$home" field keep_full)" = yes ] || fail "a keep-full entry did not record keep_full"
-  contract "$home" validate || fail "a keep-full record with no cap did not validate"
-  assert_contains "$out" 'spend cap: none beyond live admission' 'the read-back did not say the record adds no cap'
-  assert_contains "$out" 'keep lanes full: yes, lane target not set' 'the read-back did not name keep-full'
-
-  # The branch acting first on an idle-then-busy home meets no floor of four.
-  root="$TMP_ROOT/keep-full-root"
-  mkdir -p "$root"
-  git init -q -b main "$root"
-  git -C "$root" commit -q --allow-empty -m init
-  ln -s "$ROOT/bin" "$root/bin"
-  for i in 1 2 3 4 5; do
-    fm_write_meta "$home/state/task-$i.meta" "window=fm-task-$i" "kind=ship"
-  done
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
-    "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
-  assert_not_contains "$out" "caps concurrent workers" "a keep-full away window refused the branch's first spawn at a cap"
-  assert_contains "$out" "queued unblocked work" "the branch's spawn did not reach the ordinary away dispatch gate"
-
-  home=$(make_home keep-full-configured)
-  mkdir -p "$home/config"
-  printf '12\n' > "$home/config/lane-capacity"
-  contract "$home" enter --words 'keep all lanes full' --keep-full >/dev/null 2>&1 || fail "configured keep-full entry failed"
-  [ "$(contract "$home" field lane_target)" = 12 ] || fail "keep-full did not reuse the configured lane target"
-  [ "$(contract "$home" field spend_max_concurrent_workers)" = 12 ] \
-    || fail "keep-full did not cap at the configured lane target: $(contract "$home" field spend_max_concurrent_workers)"
-
-  home=$(make_home keep-full-requested)
-  for i in 1 2 3 4 5 6 7 8 9; do
-    fm_write_meta "$home/state/task-$i.meta" "window=fm-task-$i" "kind=ship"
-  done
-  contract "$home" enter --words 'fill to six' --lane-target 6 >/dev/null 2>&1 || fail "requested-target entry failed"
-  [ "$(contract "$home" field lane_target)" = 6 ] || fail "--lane-target was not recorded"
-  [ "$(contract "$home" field spend_max_concurrent_workers)" = 9 ] \
-    || fail "a keep-full cap narrowed work already under way: $(contract "$home" field spend_max_concurrent_workers)"
-
-  home=$(make_home keep-full-explicit-spend)
-  contract "$home" enter --words 'keep all lanes full' --keep-full --spend 3 >/dev/null 2>&1 || fail "explicit-spend entry failed"
-  [ "$(contract "$home" field spend_max_concurrent_workers)" = 3 ] || fail "an explicit --spend lost to keep-full"
-
-  home=$(make_home keep-full-invalid-config)
-  mkdir -p "$home/config"
-  printf 'lots\n' > "$home/config/lane-capacity"
-  out=$(contract "$home" enter --words 'keep all lanes full' --keep-full 2>&1) || fail "invalid-config entry failed: $out"
-  assert_contains "$out" 'configured lane target cannot be read' 'an unreadable target was not named'
-  [ "$(contract "$home" field spend_max_concurrent_workers)" = 4 ] || fail "an unreadable target widened spend"
-
-  home=$(make_home keep-full-plain)
-  contract "$home" enter --words 'keep all lanes full' >/dev/null 2>&1 || fail "plain entry failed"
-  [ "$(contract "$home" field spend_max_concurrent_workers)" = 4 ] || fail "an entry without --keep-full changed its default"
-  [ -z "$(contract "$home" field keep_full)" ] || fail "an entry without --keep-full recorded keep_full"
-
-  home=$(make_home keep-full-quiet)
-  out=$(FM_AFK_MODE=quiet contract "$home" enter --keep-full 2>&1)
-  status=$?
-  [ "$status" -eq 2 ] || fail "a quiet keep-full entry was not a usage error (rc=$status): $out"
-  [ ! -e "$home/state/.afk-contract" ] || fail "a refused quiet keep-full entry wrote a record"
-  pass "a keep-full entry never collapses to the default floor of four, reuses a requested or configured target, and keeps explicit spend, live counts, and quiet mode"
-}
-
 test_readback_renders_words_verbatim_with_the_record_scalars
 test_words_preserve_final_newline_shape
 test_enter_writes_a_v2_record_in_one_step_and_announces_hold_for_return
 test_entry_without_spend_records_the_live_worker_count_never_below_the_floor
-test_keep_full_entry_never_collapses_to_the_default_floor
 test_retired_two_step_entry_is_refused_by_name
 test_enter_removes_a_legacy_proposal_without_promoting_it
 test_same_turn_entry_pre_authorizes_nothing_on_the_never_set

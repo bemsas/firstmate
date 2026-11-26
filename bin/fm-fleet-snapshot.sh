@@ -651,6 +651,35 @@ snapshot_capture_optional() {  # <source> <destination>
   return 1
 }
 
+# Copy a status history through one open descriptor and certify the copy
+# against that same descriptor: the pinned file's identity and size must be
+# equal before and after the copy, and the copy must hold exactly that many
+# bytes. Prints "<identity> TAB <size>" only when all hold, so a path rotated
+# or restored during the copy can never lend its identity to bytes from another
+# file. A copy that was made but not certified returns 2 and stays the capture,
+# keeping one point-in-time copy. The descriptor's identity is read through
+# /proc, so this certifies only on Linux; elsewhere, under an injected identity
+# or size reader, or when no copy was made it returns 1 and the caller copies
+# by path, uncertified.
+snapshot_capture_status_pinned() {  # <source> <destination>
+  [ "$_FM_CLASSIFY_UNAME_S" = Linux ] || return 1
+  [ -z "${FM_STATUS_IDENTITY_READER:-}${FM_STATUS_SIZE_READER:-}" ] || return 1
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  (
+    source=$1 destination=$2
+    exec 8< "$source" || exit 1
+    pinned="/proc/${BASHPID:?}/fd/8"
+    _fm_status_stat_fields "$pinned" --follow || exit 1
+    ident=$_FM_STAT_IDENTITY size=$_FM_STAT_SIZE
+    cp -p -- "$pinned" "$destination" || { rm -f -- "$destination"; exit 1; }
+    _fm_status_stat_fields "$pinned" --follow || exit 2
+    [ "$_FM_STAT_IDENTITY" = "$ident" ] && [ "$_FM_STAT_SIZE" = "$size" ] || exit 2
+    copied=$(LC_ALL=C wc -c < "$destination") || exit 2
+    [ "${copied//[[:space:]]/}" = "$size" ] || exit 2
+    printf '%s\t%s\n' "$ident" "$size"
+  ) 2>/dev/null
+}
+
 snapshot_mark_optional_present() {  # <source> <destination>
   local source=$1 destination=$2
   [ -f "$source" ] || return 0
@@ -678,6 +707,7 @@ prefetch_task_observations() {  # <meta> <id>
   local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' current_rc=0
   local status_log status_capture report_path report_capture open_file
   local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1
+  local extent_ident='' extent_size='' pinned_extent pinned_rc
   remote_host=$(meta_value "$meta" remote_host)
   current_file="$SNAPSHOT_TASK_DIR/$id.json"
   endpoint_file="$SNAPSHOT_TASK_DIR/$id.endpoint"
@@ -691,7 +721,15 @@ prefetch_task_observations() {  # <meta> <id>
 
   snapshot_task_generation_is_current "$meta" "$id" || generation_current=0
   if [ "$generation_current" = 1 ]; then
-    snapshot_capture_optional "$status_log" "$status_capture" || current_rc=1
+    # A certified capture names the exact file and byte extent it holds, so the
+    # fold below can reuse the wake drain's cursor only for exactly those bytes.
+    pinned_rc=0
+    pinned_extent=$(snapshot_capture_status_pinned "$status_log" "$status_capture") || pinned_rc=$?
+    case "$pinned_rc" in
+      0) extent_ident=${pinned_extent%%$'\t'*} extent_size=${pinned_extent#*$'\t'} ;;
+      2) ;;
+      *) snapshot_capture_optional "$status_log" "$status_capture" || current_rc=1 ;;
+    esac
     snapshot_mark_optional_present "$report_path" "$report_capture" || current_rc=1
   fi
 
@@ -722,8 +760,13 @@ prefetch_task_observations() {  # <meta> <id>
 
   # The whole-stream open-decision fold costs time proportional to the task's
   # status history, so it runs here while the bounded current-state read is
-  # still outstanding rather than after every read has finished.
-  status_open_decisions "$status_capture" "$kind" > "$open_file" || current_rc=1
+  # still outstanding rather than after every read has finished. The wake
+  # drain's cursor replaces it only when it covers exactly the captured extent;
+  # any other cursor, including a partial read, falls back to the full fold.
+  if [ -z "$extent_ident" ] \
+    || ! status_open_decisions_cursor_exact "$status_log" "$kind" "$extent_ident" "$extent_size" > "$open_file"; then
+    status_open_decisions "$status_capture" "$kind" > "$open_file" || current_rc=1
+  fi
   [ -z "$current_pid" ] || wait "$current_pid" || current_rc=1
   # All mutable observations must belong to the metadata generation captured in
   # the manifest. If teardown/relaunch raced any read, discard the whole sample.
@@ -746,8 +789,9 @@ prefetch_task_observations() {  # <meta> <id>
 # run in batches of up to FM_SNAPSHOT_LOCAL_READ_CONCURRENCY tasks and each batch
 # waits for its slowest task, so a fleet pays its slowest task once per batch
 # rather than every task's no-mistakes response window and status history in
-# series, while every command bound remains owned by fm-timeout-lib.sh. The fold
-# still scans each task's whole history, so a batch's cost grows with its longest
+# series, while every command bound remains owned by fm-timeout-lib.sh. Unless
+# the wake drain's cursor covers exactly the captured history, the fold still
+# scans each task's whole history, so a batch's cost grows with its longest
 # accumulated history.
 prefetch_task_current_states() {
   local meta captured_meta id active=0 index=0 rc=0

@@ -145,9 +145,11 @@
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
-#              A ship or scout relaunch first asks the host resource gate
-#              (bin/fm-capacity.sh --host-gate) and, while the host is
-#              overloaded, exits 75 before stopping anything.
+#              Asks bin/fm-capacity.sh --host-gate first: an overloaded host
+#              exits 75 with nothing checkpointed or stopped. The launch owner
+#              asks again after the stop; if load rose in between, that
+#              deferral also exits 75, and then the lane has no running agent
+#              (record and work kept, no automatic retry).
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
@@ -194,6 +196,12 @@
 #   - A composer that visibly holds pending text refuses before an exit command
 #     is typed, so existing text is preserved instead of being concatenated.
 #
+# FM_CONTROL_PARK_ATTEMPT names the review-park relaunch attempt bin/fm-park.sh
+# started this action for. Under the lifecycle lock, before anything else, the
+# action refuses unless the lane's park record still carries that attempt, so
+# one left starting after its park action was cut launches nothing once another
+# owner settled the attempt. Unset, nothing is checked.
+#
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
 #   FM_CONTROL_SETTLE_WAIT       adapter acknowledgement wait after interrupt (5)
@@ -233,6 +241,8 @@ fi
 }
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+PARK_ATTEMPT=${FM_CONTROL_PARK_ATTEMPT:-}
+unset FM_CONTROL_PARK_ATTEMPT
 [ -d "$STATE" ] || {
   echo "error: state dir '$STATE' is missing; fm-control cannot resolve tasks for FM_HOME '$FM_HOME'" >&2
   exit 1
@@ -414,6 +424,8 @@ CONTROL_LOCK_HELD=1
 # only once the lock is held: a process that loses the lock runs the same
 # trap, and would remove the file the lock holder is reading.
 FM_COMPOSER_DIALOG_SINK=$STATE/$ID.composer-dialog
+[ -z "$PARK_ATTEMPT" ] || [ "$(fm_meta_get "$STATE/$ID.review-park" resume_attempt)" = "$PARK_ATTEMPT" ] \
+  || die "the review-park relaunch attempt this was started for is no longer on task $ID's park record; nothing was changed"
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ]; then
   case "$RAW_ID" in
@@ -1386,6 +1398,9 @@ resolve_relaunch_profile() {
   if [ "$(fm_meta_get "$META" claude_sandbox)" = on ] && [ "$TARGET_HARNESS" != claude ]; then
     die "task $ID retains its Claude sandbox policy; switching to another harness is refused before stopping the running agent"
   fi
+  if [ -e "$STATE/$ID.refute.json" ] || [ -L "$STATE/$ID.refute.json" ]; then
+    die "task $ID is a refute review, which must run in one fresh dispatch; relaunching it is refused before stopping the running agent"
+  fi
   # A model or effort chosen for the previous harness does not transfer to a
   # different one, so an explicit harness change resets both axes unless the
   # caller names them too.
@@ -1565,23 +1580,24 @@ record_note() {
   esac
 }
 
-# The host resource gate (bin/fm-capacity.sh --host-gate) for a ship or scout
-# replacement, asked before anything is stopped, so an overloaded host leaves
-# the current worker as it is instead of exiting it and then failing to start
-# its successor; bin/fm-spawn.sh --relaunch skips its own gate under this
-# transaction's control lock for the same reason. A secondmate is exempt.
-relaunch_host_gate() {
-  local verdict rc=0
-  case "$KIND" in ship|scout) ;; *) return 0 ;; esac
-  verdict=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-capacity.sh" --host-gate 2>/dev/null) || rc=$?
-  [ "$rc" -eq 75 ] || return 0
-  echo "deferred: this host is overloaded ($verdict); task $ID was not relaunched and its current worker was left as it is - relaunch again once load and memory recover" >&2
-  exit 75
-}
-
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line host_gate_rc=0 spawn_rc
   local -a spawn_args
+
+  # A relaunch starts a new agent process, so it asks the host resource gate
+  # (bin/fm-capacity.sh --host-gate) before anything is checkpointed or
+  # stopped: an overloaded host defers with exit 75 and leaves the running
+  # agent and its record exactly as they were. exit, stop, and interrupt start
+  # nothing and are never gated.
+  "$SCRIPT_DIR/fm-capacity.sh" --host-gate </dev/null >/dev/null || host_gate_rc=$?
+  case "$host_gate_rc" in
+    0) ;;
+    75)
+      echo "deferred: $ID was not relaunched and its agent and record are unchanged - relaunch it again once this host's load and memory are back under the host gate's limits (bin/fm-capacity.sh --host-gate)" >&2
+      exit 75
+      ;;
+    *) die "the host resource gate could not run (bin/fm-capacity.sh --host-gate exited $host_gate_rc); task $ID was not relaunched" ;;
+  esac
 
   if [ "$BACKEND" = acp ]; then
     # This pilot path intentionally does not enable pane exit/stop capabilities
@@ -1593,7 +1609,6 @@ do_relaunch() {
       || die "ACP relaunch preserves the recorded model; profile changes are unsupported"
     [ "$EFFORT_SET" = 0 ] || [ "$NEW_EFFORT" = "$(fm_meta_get "$META" effort)" ] \
       || die "ACP relaunch preserves the recorded effort; profile changes are unsupported"
-    relaunch_host_gate
     safe_checkpoint
     fm_backend_source acp || die "ACP adapter unavailable"
     fm_backend_acp_harness resume "$ID" --worktree "$WT" --note "$NOTE" --restart \
@@ -1627,7 +1642,6 @@ do_relaunch() {
       ;;
   esac
 
-  relaunch_host_gate
   if [ -n "$NOTE" ]; then
     note_line="note_file=$NOTE_FILE"
   else
@@ -1653,8 +1667,10 @@ do_relaunch() {
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
   [ -z "$TARGET_ACCOUNT" ] || spawn_args+=(--account "$TARGET_ACCOUNT")
-  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
-      "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
+  spawn_rc=0
+  FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+    "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null || spawn_rc=$?
+  if [ "$spawn_rc" -eq 0 ]; then
     RELAUNCH_META_PUBLISHED=1
     # $T was resolved from the record before the launch. When the recorded
     # endpoint was gone, the launch owner created a fresh one and republished
@@ -1676,6 +1692,14 @@ do_relaunch() {
   else
     [ "$(fm_meta_get "$META" control_relaunch_tx)" != "$RELAUNCH_TX" ] \
       || RELAUNCH_META_PUBLISHED=1
+    # The launch owner asks the host gate again; load that rose after the
+    # preflight above defers the replacement after the old agent stopped. That
+    # is its own outcome, exit 75: the lane is left with no running agent, its
+    # record and work kept, and nothing retries it automatically.
+    if [ "$spawn_rc" -eq 75 ]; then
+      echo "deferred: $ID's agent was stopped, but this host became overloaded before its replacement launched; no agent is running, its record and work are kept, and nothing retries it automatically - relaunch it again once the host is back under the host gate's limits (bin/fm-capacity.sh --host-gate)" >&2
+      exit 75
+    fi
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
 

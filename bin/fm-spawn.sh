@@ -243,6 +243,28 @@
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
 #   contention refuses rather than waits.
+#   Host resources: every local launch - a fresh ship or scout, a local
+#   secondmate, and a --relaunch - asks `fm-capacity.sh --host-gate` (that
+#   script owns the probes, the fixed limits - 1-minute load above 1.5 x usable
+#   cores, or available memory under 20 percent - and why an unknown reading
+#   does not defer by itself) before backend selection, the per-task lock, any
+#   brief render, endpoint, worktree, record, inheritance or sync step, or
+#   backlog move; a deferral prints `deferred:` and exits 75 with everything
+#   exactly as it was. A remote secondmate is judged on its own host.
+#   Review capacity: a fresh publishing ship (no-mistakes or direct-PR) whose
+#   project publishes to a GitHub repository is deferred while that project
+#   already has its cap (config/review-capacity, default 3) of open fleet PRs
+#   without an approving review plus this machine's unpublished ship
+#   reservations, or while that queue cannot be counted;
+#   bin/fm-review-capacity-lib.sh owns which spawns are judged, what holds a
+#   place, the one bounded gh-axi observation, and its cross-host limit. It makes
+#   that call before the project, lane, and review admission locks (the
+#   task-set and per-task locks are already held), reaches its verdict after the brief and delivery
+#   checks, and counts reservations while holding the machine-wide review
+#   admission lock for the publication target (waiting up to 120 s for it)
+#   through metadata publication. A deferral prints `deferred:` and exits 75
+#   with the task exactly as queued; an unreadable declaration refuses with
+#   exit 1.
 #   Project capacity: when this machine declares how many workers a project
 #   admits at once (config/project-capacity; bin/fm-project-capacity-lib.sh owns
 #   the declaration, what holds a place, and the race argument), a fresh ship or
@@ -254,12 +276,6 @@
 #   every place held prints one `deferred:` line and exits 75 before any brief
 #   render, endpoint, worktree, record, or backlog move exists, so the task stays
 #   exactly as queued as it was; an unreadable declaration refuses with exit 1.
-#   Host resource gate: every ship or scout launch on this host, fresh or a
-#   relaunch, first asks bin/fm-capacity.sh --host-gate, before the task-set
-#   lock or any worktree, endpoint, or record, and a defer verdict prints one
-#   `deferred:` line and exits 75 with the backlog item exactly as queued; it
-#   needs no config, a secondmate is exempt, and an fm-control relaunch is
-#   gated by that transaction before it stops the old worker.
 #   Lane capacity: only when this home's config/lane-capacity declares
 #   admit-spawns (bin/fm-capacity.sh --spawn-gate-enabled answers; that script
 #   owns the declaration and the verdict), a fresh ship or
@@ -391,12 +407,12 @@
 #   primary's commit is read from the local object store, so nothing more is
 #   fetched, and every base this picks contains origin's tip, so the reset
 #   discards nothing the origin-only rule would have kept. When no origin
-#   configuration is detected, spawn skips that remote freshness check and
-#   launches from the clean worktree's current HEAD. Relaunch reuses the
-#   recorded worktree without fetching or resetting its base. An unreachable
-#   detected origin, unresolved default branch, or non-clean worktree refuses
-#   a fresh spawn rather than risking a PR based on stale history or
-#   discarding local work.
+#   configuration is detected, spawn fetches and resets nothing: it launches
+#   only a clean worktree already at the project's local default-branch tip.
+#   Relaunch reuses the recorded worktree without fetching or resetting its
+#   base. An unreachable detected origin, unresolved default branch, origin-less
+#   worktree at any other commit, or non-clean worktree refuses a fresh spawn
+#   rather than risking a PR based on stale history or discarding local work.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -1018,6 +1034,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-project-capacity-lib.sh
 . "$SCRIPT_DIR/fm-project-capacity-lib.sh"
+# shellcheck source=bin/fm-review-capacity-lib.sh
+. "$SCRIPT_DIR/fm-review-capacity-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # shellcheck source=bin/fm-omp-profile-lib.sh
@@ -1730,6 +1748,7 @@ T3CODE_LAUNCH_UNCONFIRMED=0
 T3CODE_PROJECT_ID=
 T3CODE_MODEL_SELECTION=
 HERDR_LEASED=0
+HERDR_SLOT_MAY_HOLD_WORK=0
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -1752,6 +1771,8 @@ SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_LANE_ADMISSION_LOCK=
 SPAWN_LANE_ADMISSION_LOCK_HELD=0
+SPAWN_REVIEW_LOCK=
+SPAWN_REVIEW_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
 SPAWN_FRESH_ENDPOINT_OPENED=0
 SPAWN_FRESH_WIRING_PENDING=0
@@ -2013,14 +2034,15 @@ spawn_abort_cleanup() {
   # A durable Herdr lease outlives the pane, unlike the process lease the
   # interactive command used to take, so an abort that leaves no record returns
   # it, whether or not the launch was sent. Only a pane Herdr reports gone and a
-  # copy with no uncommitted work prove nothing is left to inspect there; any
-  # other keeps the lease and names the command, as the pane used to hold the
-  # slot for the operator.
+  # copy with no uncommitted work, whose base was not refused as possibly holding
+  # work, prove nothing is left to inspect there; any other keeps the lease and
+  # names the command, as the pane used to hold the slot for the operator.
   if [ "$HERDR_LEASED" = 1 ] && [ "$status" -ne 0 ] && [ -n "${WT:-}" ] &&
     [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
     HERDR_LEASED=0
     local herdr_slot_status
-    if [ "$SPAWN_ENDPOINT_CLOSED" = 1 ] && fm_backend_herdr_endpoint_confirmed_gone "${T:-}" &&
+    if [ "$HERDR_SLOT_MAY_HOLD_WORK" = 0 ] &&
+      [ "$SPAWN_ENDPOINT_CLOSED" = 1 ] && fm_backend_herdr_endpoint_confirmed_gone "${T:-}" &&
       herdr_slot_status=$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null) &&
       [ -z "$herdr_slot_status" ] &&
       (cd "$PROJ_ABS" && treehouse return --force "$WT") >/dev/null 2>&1; then
@@ -2030,14 +2052,16 @@ spawn_abort_cleanup() {
     fi
   fi
   # A spawn that aborts after claiming its slot but before its record survives
-  # must not leave a claim naming a task no record describes. The release is a
+  # must not leave a claim naming a task no record describes, except on a Herdr
+  # slot refused as possibly holding work: its kept lease and claim are what that
+  # work is recovered by. The release is a
   # read-then-remove, so it runs only while the project lock that wrote the
   # claim is still held (aborts before metadata publication); a later abort has
   # already released that lock and leaves the claim for the next spawn's
   # atomic replacement rather than racing it. A polytoken spawn instead retakes
   # that lock once for a later failure whose record was rolled back. The
   # release itself never removes another task's claim.
-  if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ -n "${WT:-}" ] &&
+  if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ "$HERDR_SLOT_MAY_HOLD_WORK" = 0 ] && [ -n "${WT:-}" ] &&
     [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] &&
     fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
     SPAWN_SLOT_CLAIMED=0
@@ -2058,6 +2082,10 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_LANE_ADMISSION_LOCK_HELD" = 1 ]; then
     SPAWN_LANE_ADMISSION_LOCK_HELD=0
     fm_lock_release "$SPAWN_LANE_ADMISSION_LOCK" || true
+  fi
+  if [ "$SPAWN_REVIEW_LOCK_HELD" = 1 ]; then
+    SPAWN_REVIEW_LOCK_HELD=0
+    fm_lock_release "$SPAWN_REVIEW_LOCK" || true
   fi
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_SET_LOCK_HELD=0
@@ -2330,38 +2358,6 @@ spawn_require_relocated_queued_work() {
     exit 1
   fi
 }
-# Host resource gate (bin/fm-capacity.sh --host-gate owns the thresholds and
-# the probes): every ship or scout launch on this host - a fresh spawn, and a
-# relaunch not already gated by the fm-control transaction that owns its
-# control lock (that transaction gates before it stops the old worker, so a
-# deferral never leaves a task without one) - defers with exit 75 while the
-# host is overloaded, before the task-set lock, any worktree, endpoint, or
-# record exists and before this script takes any lock (the relaunch control
-# lock included), so the backlog item stays exactly as queued and replacements
-# cannot restart a pile-up. It applies even when no home opted into lane
-# capacity, and a secondmate, a persistent home rather than a lane, is exempt.
-spawn_defer_if_host_strained() {
-  local kind=$KIND verdict rc owner
-  if [ "$RELAUNCH" -eq 1 ]; then
-    # Read-only: the fm-control transaction that owns this task's control lock
-    # gated before stopping the old worker. Nothing is acquired here.
-    owner=$(cat "$STATE/.control-$ID.lock/pid" 2>/dev/null || true)
-    if [ "$owner" = "$PPID" ] && fm_pid_alive "$owner"; then return 0; fi
-    kind=$(sed -n 's/^kind=//p' "$STATE/$ID.meta" 2>/dev/null | tail -1)
-  fi
-  [ "$kind" != secondmate ] || return 0
-  rc=0
-  verdict=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
-    "$SCRIPT_DIR/fm-capacity.sh" --host-gate 2>/dev/null) || rc=$?
-  [ "$rc" -eq 75 ] || return 0
-  if [ "$RELAUNCH" -eq 1 ]; then
-    echo "deferred: this host is overloaded ($verdict); task $ID was not relaunched - relaunch it again once load and memory recover" >&2
-  else
-    echo "deferred: this host is overloaded ($verdict); task $ID was not launched and its backlog item stays queued - dispatch it again once load and memory recover" >&2
-  fi
-  exit 75
-}
-spawn_defer_if_host_strained
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
   control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
@@ -2465,6 +2461,31 @@ if [ "$KIND" = secondmate ]; then
   fi
   [ "$remote_spawn_rc" -eq 3 ] || exit "$remote_spawn_rc"
 fi
+# Host resource admission (bin/fm-capacity.sh --host-gate owns the probes, the
+# fixed limits, and how unknown readings are treated). Every local launch asks
+# it - a fresh ship or scout, a local secondmate, and a --relaunch - before
+# backend selection, the per-task lock, any brief render, endpoint, worktree,
+# record, inheritance or sync step, or backlog move exists, so an overloaded
+# host defers the launch with everything exactly as it was. A remote secondmate
+# was handed to its own host above, whose host-local leg of this script asks
+# the gate about that host.
+SPAWN_HOST_GATE_RC=0
+"$SCRIPT_DIR/fm-capacity.sh" --host-gate </dev/null >/dev/null || SPAWN_HOST_GATE_RC=$?
+case "$SPAWN_HOST_GATE_RC" in
+  0) ;;
+  75)
+    if [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; then
+      echo "deferred: $ID was not launched - launch it again once this host's load and memory are back under the host gate's limits (bin/fm-capacity.sh --host-gate)" >&2
+    else
+      echo "deferred: task $ID was not launched and its backlog item stays queued - dispatch it again once this host's load and memory are back under the host gate's limits (bin/fm-capacity.sh --host-gate)" >&2
+    fi
+    exit 75
+    ;;
+  *)
+    echo "error: spawn refused: the host resource gate could not run (bin/fm-capacity.sh --host-gate exited $SPAWN_HOST_GATE_RC)" >&2
+    exit 1
+    ;;
+esac
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
 # default tmux (fm_backend_name). fm_backend_validate_spawn refuses unknown or
@@ -4357,6 +4378,37 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   fi
   SPAWN_PROJECT_CAPACITY=$FM_PROJECT_CAPACITY
   SPAWN_PROJECT_CAPACITY_ANY=$FM_PROJECT_CAPACITY_ANY
+  SPAWN_PROJECT_CAPACITY_FILE=$FM_PROJECT_CAPACITY_FILE
+fi
+# Review capacity admission (bin/fm-review-capacity-lib.sh owns which spawns
+# are judged, the cap, what holds a place, the forge observation, and why an
+# unknown or incomplete observation defers). The one bounded forge call is made
+# here, before the project lock, so no lock is held across the network; the
+# verdict is reached after the brief and delivery-agreement checks below, so a
+# spawn those checks refuse keeps its refusal rather than being deferred, and
+# the local reservations are counted while that lock is held through metadata
+# publication. A spawn the offline self-repository publication gate
+# (bin/fm-role-lib.sh) will refuse is not observed at all.
+SPAWN_REVIEW_CAP=
+SPAWN_REVIEW_SELF_RC=0
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ] && [ "$MODE" != local-only ]; then
+  fm_role_gate_self_publish "$FM_HOME" "$CONFIG" "$PROJ_ABS" "$FM_ROOT" "$UPSTREAM_CONSENT" || SPAWN_REVIEW_SELF_RC=$?
+fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ] && [ "$MODE" != local-only ] &&
+  { [ "$SPAWN_REVIEW_SELF_RC" -eq 0 ] || [ "$SPAWN_REVIEW_SELF_RC" -eq 2 ]; } &&
+  SPAWN_REVIEW_FORGE=$("$FM_ROOT/bin/fm-project-mode.sh" --forge "$(basename "$PROJ_ABS")" 2>/dev/null) &&
+  [ "${SPAWN_REVIEW_FORGE:-none}" = none ] &&
+  fm_review_capacity_target "$PROJ_ABS" "$UPSTREAM_CONSENT"; then
+  if ! fm_project_capacity_lookup "$SPAWN_CAPACITY_CONFIG" "$(basename "$PROJ_ABS")" review-capacity; then
+    echo "error: spawn refused: the review capacity declaration is unreadable ($FM_PROJECT_CAPACITY_ERROR); fix it so the captain's review-queue limits are known (docs/configuration.md \"Review capacity\")" >&2
+    exit 1
+  fi
+  SPAWN_REVIEW_CAP=${FM_PROJECT_CAPACITY:-$FM_REVIEW_CAPACITY_DEFAULT}
+  SPAWN_REVIEW_CAP_FILE=$FM_PROJECT_CAPACITY_FILE
+  SPAWN_REVIEW_PREFIXES="$BRANCH_PREFIX $("$FM_ROOT/bin/fm-project-mode.sh" --branch-prefix "$(basename "$PROJ_ABS")" 2>/dev/null || true) fm/"
+  SPAWN_REVIEW_OBSERVED=0
+  fm_review_capacity_observe "$FM_REVIEW_TARGET_HOST" "$FM_REVIEW_TARGET_OWNER" "$FM_REVIEW_TARGET_REPO" ||
+    SPAWN_REVIEW_OBSERVED=1
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
   { [ "$BACKEND" != orca ] || [ -n "$SPAWN_PROJECT_CAPACITY_ANY" ]; }; then
@@ -4380,7 +4432,7 @@ if [ -n "$SPAWN_PROJECT_CAPACITY" ]; then
     exit 1
   fi
   if [ "$FM_PROJECT_CAPACITY_OCCUPANTS" -ge "$SPAWN_PROJECT_CAPACITY" ]; then
-    echo "deferred: project $(basename "$PROJ_ABS") admits $SPAWN_PROJECT_CAPACITY worker(s) at once on this machine ($FM_PROJECT_CAPACITY_FILE) and $FM_PROJECT_CAPACITY_OCCUPANTS already hold a place ($FM_PROJECT_CAPACITY_OCCUPANT_IDS); task $ID was not launched and its backlog item stays queued - dispatch it again once one of them records its ready PR or is cleaned up" >&2
+    echo "deferred: project $(basename "$PROJ_ABS") admits $SPAWN_PROJECT_CAPACITY worker(s) at once on this machine ($SPAWN_PROJECT_CAPACITY_FILE) and $FM_PROJECT_CAPACITY_OCCUPANTS already hold a place ($FM_PROJECT_CAPACITY_OCCUPANT_IDS); task $ID was not launched and its backlog item stays queued - dispatch it again once one of them records its ready PR or is cleaned up" >&2
     exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
   fi
 fi
@@ -4481,7 +4533,17 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   # Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.
   SOURCE_BRIEF=$BRIEF
+  SPAWN_REFUTE_CONTEXT=
+  if [ -e "$STATE/$ID.refute.json" ] || [ -L "$STATE/$ID.refute.json" ]; then
+    [ "$RAW_LAUNCH" = 0 ] || { echo 'error: refute review requires a native harness launch' >&2; exit 1; }
+    SPAWN_REFUTE_CONTEXT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      FM_CONFIG_OVERRIDE="$CONFIG" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-done-check.sh" spawn-review "$ID" "$KIND" "$RELAUNCH" \
+      "$HARNESS" "$MODEL" "$PROJ_ABS" "$SOURCE_BRIEF") || exit 1
+  fi
   BRIEF="$DATA/$ID/launch-brief.md"
+  SPAWN_LAUNCH_BRIEF_PREEXISTED=0
+  [ ! -e "$BRIEF" ] || SPAWN_LAUNCH_BRIEF_PREEXISTED=1
   BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
   # A brief without the scaffold's `# Task` and `# Definition of done` sections
   # cannot be compacted, so it is delivered whole, as before capsules existed.
@@ -4492,8 +4554,11 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     [ -n "$LAUNCH_TASK_TEXT" ] &&
       fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT" &&
       printf '\n%s\n' "$LAUNCH_TASK_TEXT" &&
-      if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+      { if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"
+      fi; } &&
+      if [ "$KIND" = ship ]; then
+        fm_dod_candidate_note "$CONFIG" "$MODE"
       fi
   } >"$BRIEF_TMP" || {
     rm -f -- "$BRIEF_TMP"
@@ -4682,6 +4747,48 @@ if [ "$KIND" = ship ]; then
   if [ "$BRANCH" != "$STANDING_BRANCH$ID" ]; then
     echo "notice: $ID ships branch=$BRANCH while $PROJ_NAME registers the ship-branch prefix '$STANDING_BRANCH' (branch $STANDING_BRANCH$ID) - the task's branch and PR will read as firstmate-authored; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
   fi
+fi
+
+# Review capacity verdict. The observation was made before the admission locks; the
+# reservations are counted while holding this machine's review-admission lock
+# for the publication target (fm_review_capacity_lock_path), kept through
+# metadata publication, so clones with different origins that publish to one
+# repository can never both admit from one count. Every check before this point
+# only validates, so the one artifact a deferral could leave is the launch
+# brief this spawn rendered; it is removed unless an earlier run had already
+# left one.
+spawn_review_defer_cleanup() {
+  [ "${SPAWN_LAUNCH_BRIEF_PREEXISTED:-1}" = 1 ] || rm -f -- "$DATA/$ID/launch-brief.md"
+}
+if [ -n "$SPAWN_REVIEW_CAP" ]; then
+  SPAWN_REVIEW_LOCK=$(fm_review_capacity_lock_path "$FM_HOME" "$FM_REVIEW_TARGET_HOST" "$FM_REVIEW_TARGET_OWNER" "$FM_REVIEW_TARGET_REPO") || {
+    echo "error: could not resolve the root Firstmate home that holds the review admission lock for $FM_HOME" >&2
+    exit 1
+  }
+  if ! fm_lock_acquire_wait_max "$SPAWN_REVIEW_LOCK" 120; then
+    spawn_review_defer_cleanup
+    echo "deferred: another spawn on this machine held the review admission lock for $FM_REVIEW_TARGET_HOST/$FM_REVIEW_TARGET_OWNER/$FM_REVIEW_TARGET_REPO for 120 s; task $ID was not launched and its backlog item stays queued - dispatch it again" >&2
+    exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
+  fi
+  SPAWN_REVIEW_LOCK_HELD=1
+  SPAWN_REVIEW_TARGET=$(printf '%s/%s/%s' "$FM_REVIEW_TARGET_HOST" "$FM_REVIEW_TARGET_OWNER" "$FM_REVIEW_TARGET_REPO" | tr '[:upper:]' '[:lower:]')
+  if ! fm_review_capacity_judge "$SPAWN_REVIEW_CAP" "$SPAWN_REVIEW_OBSERVED" "$SPAWN_REVIEW_TARGET" \
+    "$SPAWN_REVIEW_PREFIXES" "$STATE" "$ID"; then
+    echo "error: spawn refused: project $(basename "$PROJ_ABS") has a review-queue cap of $SPAWN_REVIEW_CAP, but this machine's task records cannot all be read to count it ($FM_REVIEW_ERROR)" >&2
+    exit 1
+  fi
+  case "$FM_REVIEW_VERDICT" in
+    full)
+      spawn_review_defer_cleanup
+      echo "deferred: project $(basename "$PROJ_ABS") admits $SPAWN_REVIEW_CAP open unreviewed fleet PR(s) in $FM_REVIEW_TARGET_HOST/$FM_REVIEW_TARGET_OWNER/$FM_REVIEW_TARGET_REPO and its review queue is full: $FM_REVIEW_WHY; task $ID was not launched and its backlog item stays queued - dispatch it again once one of them is approved, merged, or closed (cap from ${SPAWN_REVIEW_CAP_FILE} or the default of $FM_REVIEW_CAPACITY_DEFAULT)" >&2
+      exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
+      ;;
+    unknown)
+      spawn_review_defer_cleanup
+      echo "deferred: project $(basename "$PROJ_ABS")'s review queue in $FM_REVIEW_TARGET_HOST/$FM_REVIEW_TARGET_OWNER/$FM_REVIEW_TARGET_REPO cannot be counted: $FM_REVIEW_WHY; task $ID was not launched and its backlog item stays queued - dispatch it again once the open pull requests can be read" >&2
+      exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
+      ;;
+  esac
 fi
 
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
@@ -4888,7 +4995,7 @@ spawn_base_from_primary_checkout() { # <worktree> <project> <default> <origin-re
   return 1
 }
 
-freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 when the worktree is not clean
+freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 when the worktree is not clean, or an origin-less one is not proven to hold only commits its base has
   local worktree=$1 base=${2:-} project=${3:-} mode=${4:-} default target expected reset_ref actual status
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
@@ -4907,7 +5014,17 @@ freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 w
       echo "error: pooled worktree '$worktree' has no origin, so it cannot start from base branch '$base'" >&2
       return 1
     }
-    return 0
+    # No remote can refresh this slot, so its base is only proven, never reset:
+    # it must already be at the project's own default-branch tip.
+    expected=$(primary_head_commit "${project:-$worktree}") || {
+      echo "error: could not resolve the local default branch tip for origin-less pooled worktree '$worktree'; refusing to launch from an unproven base" >&2
+      return 2
+    }
+    actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+    [ "$actual" != "$expected" ] || return 0
+    echo "error: origin-less pooled worktree '$worktree' is at '${actual:-unknown}', not the project's local default branch tip ('$expected'); refusing to launch and leaving it untouched" >&2
+    git -C "$worktree" merge-base --is-ancestor "$actual" "$expected" 2>/dev/null || return 2
+    return 1
   fi
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
@@ -5099,7 +5216,15 @@ spawn_acp_scout() {
     fi
     SPAWN_SLOT_CLAIMED=1
   fi
-  freshen_spawn_worktree_base "$WT" || { spawn_acp_return_slot; exit 1; }
+  freshen_spawn_worktree_base "$WT" || {
+    # A refused slot that may hold work keeps its lease; a forced return discards.
+    if [ "$?" -eq 2 ]; then
+      echo "error: $WT stays leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS" >&2
+    else
+      spawn_acp_return_slot
+    fi
+    exit 1
+  }
   python3 "$FM_ROOT/bin/fm-worker-guardrails.py" opencode "$WT" "$STATE" "$ID" || {
     spawn_acp_return_slot
     exit 1
@@ -6396,7 +6521,13 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != t3code ]; then
-  freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || exit 1
+  freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || {
+    # A refused slot that may hold work keeps its durable lease; a forced return discards.
+    if [ "$?" -eq 2 ] && [ "$HERDR_LEASED" = 1 ]; then
+      HERDR_SLOT_MAY_HOLD_WORK=1
+    fi
+    exit 1
+  }
 fi
 
 # Re-assert the durable task copy after either treehouse acquisition or endpoint
@@ -7636,7 +7767,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp claude_sandbox base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential launch_context_bytes launch_context_source_bytes", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp claude_sandbox base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen builder_history refute_context approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential launch_context_bytes launch_context_source_bytes", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7683,6 +7814,16 @@ preserve_relaunch_meta() {
   [ "$HARNESS" != hermes ] || { echo "hermes_profile=$HERMES_PROFILE"; echo "hermes_home=$HERMES_PROFILE_HOME"; }
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+    previous_builders=
+    if [ "$RELAUNCH" -eq 1 ]; then
+      previous_builders=$(fm_backend_meta_exact_value "$RELAUNCH_META" builder_history) || previous_builders=unknown
+      [ -n "$previous_builders" ] || previous_builders=unknown
+    fi
+    printf 'builder_history=%s%s\n' "${previous_builders:+$previous_builders,}" \
+      "$(fm_dod_builder_entry "$SPAWN_GEN" "$HARNESS" "$MODEL" "$RAW_LAUNCH")"
+  fi
+  [ -z "${SPAWN_REFUTE_CONTEXT:-}" ] || echo "refute_context=$SPAWN_REFUTE_CONTEXT"
   [ -z "${LAUNCH_CONTEXT_BYTES:-}" ] || echo "launch_context_bytes=$LAUNCH_CONTEXT_BYTES"
   [ -z "${LAUNCH_CONTEXT_SOURCE_BYTES:-}" ] || echo "launch_context_source_bytes=$LAUNCH_CONTEXT_SOURCE_BYTES"
   # Default-off writes no traceparent= line.
@@ -7834,6 +7975,10 @@ fi
 if [ "$SPAWN_LANE_ADMISSION_LOCK_HELD" = 1 ]; then
   SPAWN_LANE_ADMISSION_LOCK_HELD=0
   fm_lock_release "$SPAWN_LANE_ADMISSION_LOCK" || true
+fi
+if [ "$SPAWN_REVIEW_LOCK_HELD" = 1 ]; then
+  SPAWN_REVIEW_LOCK_HELD=0
+  fm_lock_release "$SPAWN_REVIEW_LOCK" || true
 fi
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown

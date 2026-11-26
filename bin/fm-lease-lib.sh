@@ -43,6 +43,14 @@
 #     generation-activation cleanup; the supervision host also releases them
 #     after every engine turn), which also recovers a lease held by the live
 #     session but an abandoned branch conversation.
+#   - Lifetime: a claim is durable and outlives every guarded script run under
+#     it; a guard releases only its own command lock. The claiming actor ends
+#     its own claim with fm-lease.sh release when the handling it claimed for
+#     ends, whether that succeeded or failed. Claiming a lease the actor already
+#     holds only refreshes it, so an actor claiming for one step, such as a
+#     steer, runs fm-lease.sh check first: a live lease it already holds belongs
+#     to wider handling and stays until that handling ends. Release never drops
+#     the other actor's lease.
 #
 # THREAT MODEL (deliberate, captain-decided): these guards are
 # CONFUSED-AGENT-GRADE, the same grade bin/fm-gate-refuse-lib.sh documents

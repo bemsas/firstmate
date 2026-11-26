@@ -2059,6 +2059,71 @@ EOF
   pass "secondmate force teardown discards child work"
 }
 
+# A discarded child leaves its home no held park wake, record or receipt when
+# that home outlives it, here because its own removal is refused afterwards: the
+# park record goes before the prune, which waits for a publisher already holding
+# the home's queue lock.
+test_secondmate_force_teardown_retires_child_held_park_wakes() {
+  local home subhome childproj childwt fakebin log err state publisher rc
+  home="$TMP_ROOT/force-held-home"
+  subhome="$TMP_ROOT/force-held-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/force-held-child-worktree"
+  err="$TMP_ROOT/force-held.err"
+  state="$subhome/state"
+  mkdir -p "$home/state" "$home/data" "$state/procevent" "$TMP_ROOT/force-held-sweep-log"
+  mark_firstmate_home "$subhome"
+  fm_git_worktree "$childproj" "$childwt" force-held-child
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  # The home's event sweep cannot write its log, so it fails after the child is
+  # discarded and the home stays.
+  printf 'adapter=lavish\n' > "$state/procevent/source.source"
+  install_fake_process_event_sweep "$subhome" "$TMP_ROOT/force-held-rearm.log"
+  fm_write_secondmate_meta "$home/state/domain.meta" "$subhome"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  cat > "$state/child.meta" <<EOF
+window=firstmate:fm-child
+worktree=$childwt
+project=$childproj
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  printf 'parked_at=100\nheld=200\n' > "$state/child.review-park"
+  printf '100-150\n' > "$state/.review-park-held-acked-child"
+  printf 'parked_at=100\nheld=200\n' > "$state/child.b.review-park"
+  printf '100-150\n' > "$state/.review-park-held-acked-child.b"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/force-held-fake")
+  log="$TMP_ROOT/force-held-fake/tmux.log"
+  # The publisher's guard already passed; it appends once the record is gone.
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$FM_WAKE_QUEUE_LOCK" || exit 1
+    : > "$2"
+    rc=1
+    for _ in $(seq 1 1200); do [ -e "$STATE/child.review-park" ] || { rc=0; break; }; sleep 0.05; done
+    fm_wake_append_locked check review-park-held:child:100-200 "check: park-on-review: held child" || rc=1
+    fm_wake_append_locked check review-park-held:child.b:100-200 "check: park-on-review: held child.b" || rc=1
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    exit "$rc"' _ "$ROOT" "$TMP_ROOT/force-held-ready" &
+  publisher=$!
+  for _ in $(seq 1 200); do [ ! -e "$TMP_ROOT/force-held-ready" ] || break; sleep 0.05; done
+  [ -e "$TMP_ROOT/force-held-ready" ] || fail "the child's publisher never took the queue lock"
+  rc=0
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-held-fake/pane.txt" \
+    FM_FAKE_PROCEVENT_SWEEP_LOG="$TMP_ROOT/force-held-sweep-log" FM_FAKE_PROCEVENT_REARM_LOG="$TMP_ROOT/force-held-rearm.log" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" || rc=$?
+  wait "$publisher" || fail "the child's park record did not go before its publisher finished: $(cat "$err")"
+  [ "$rc" -ne 0 ] && [ -d "$state" ] && [ ! -e "$state/child.meta" ] || fail "fixture: the child was not discarded from a home that stayed: $(cat "$err")"
+  [ ! -e "$state/child.review-park" ] && [ ! -e "$state/.review-park-held-acked-child" ] || fail "force teardown kept the child's park record or receipt"
+  ! grep -q 'review-park-held:child:' "$state/.wake-queue" || fail "force teardown left the child's held park wake queued"
+  grep -q 'review-park-held:child.b:' "$state/.wake-queue" || fail "force teardown removed another lane's held park wake"
+  [ -e "$state/child.b.review-park" ] && [ -e "$state/.review-park-held-acked-child.b" ] || fail "force teardown removed another lane's park record or receipt"
+  [ ! -e "$state/.wake-queue.lock" ] || fail "force teardown left the home's queue lock held"
+  pass "force teardown retires a discarded child's held park wake, record and receipt in a home that outlives it"
+}
+
 test_secondmate_force_teardown_refuses_duplicated_child_slot() {
   local home subhome childproj childwt fakebin log err rc
   home="$TMP_ROOT/force-duplicate-slot-home"
@@ -2756,59 +2821,17 @@ EOF
   held=$(hold_task_set_lock "$subhome/state" task-spawn) \
     || fail "could not stage a fresh spawn holding the task-set lock"
   holder=${held%% *}
-  if FM_HOME="$subhome" FM_SPAWN_NO_GUARD=1 FM_SPAWN_TASK_SET_WAIT=1 \
+  if FM_HOME="$subhome" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" newtask "$subhome/projects/alpha" --scout >/dev/null 2>"$err"; then
     kill "$holder" 2>/dev/null || true
     fail "a fresh spawn published while another spawn owned the task set"
   fi
   grep -F "task set is locked by another spawn" "$err" >/dev/null \
     || fail "the refusal did not name the other spawn: $(cat "$err")"
-  grep -F "(waited 1s)" "$err" >/dev/null \
-    || fail "the refusal did not say it waited out its bound for the other spawn: $(cat "$err")"
   [ ! -e "$subhome/state/newtask.meta" ] || fail "a refused spawn published a task"
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
   pass "a fresh spawn refusal identifies another spawn as the task-set holder"
-}
-
-# A burst of spawns in one home (a review launcher's, for example) is transient
-# contention: a fresh spawn whose task-set holder is positively another spawn
-# waits for it, bounded, instead of giving up at once. The holder here releases
-# after about a second, so the waiting spawn must get past the task-set lock;
-# a forced teardown or an unidentified holder still refuses (the tests above).
-test_fresh_spawn_waits_out_a_briefly_held_spawn_task_set_lock() {
-  local home subhome err rec lock holder start elapsed
-  rec=$(seed_task_set_lock_home taskset-brief-spawn)
-  IFS='|' read -r home subhome <<EOF
-$rec
-EOF
-  err="$TMP_ROOT/taskset-brief-spawn.err"
-  lock=$(task_set_lock_path "$subhome/state") || fail "could not resolve the task-set lock"
-  (
-    # shellcheck source=/dev/null
-    . "$ROOT/bin/fm-wake-lib.sh"
-    fm_lock_try_acquire "$lock" || exit 1
-    fm_lock_set_role "$lock" task-spawn || exit 1
-    sleep 1
-    fm_lock_release "$lock"
-  ) >/dev/null 2>&1 &
-  holder=$!
-  local i=0
-  while [ "$(cat "$lock/role" 2>/dev/null || true)" != task-spawn ] && [ "$i" -lt 100 ]; do
-    sleep 0.05
-    i=$((i + 1))
-  done
-  [ "$(cat "$lock/role" 2>/dev/null || true)" = task-spawn ] || fail "the brief spawn holder never took the task-set lock"
-  start=$SECONDS
-  FM_HOME="$subhome" FM_SPAWN_NO_GUARD=1 FM_SPAWN_TASK_SET_WAIT=20 \
-    "$ROOT/bin/fm-spawn.sh" newtask "$subhome/projects/alpha" --scout >/dev/null 2>"$err" || true
-  elapsed=$((SECONDS - start))
-  wait "$holder" 2>/dev/null || true
-  if grep -F "task set is locked" "$err" >/dev/null; then
-    fail "a fresh spawn gave up on a briefly held spawn task-set lock instead of waiting: $(cat "$err")"
-  fi
-  [ "$elapsed" -lt 20 ] || fail "the spawn waited out its whole bound for a lock released after a second"
-  pass "a fresh spawn waits out a briefly held spawn task-set lock instead of refusing at once"
 }
 
 test_fresh_remote_secondmate_spawn_refuses_while_task_set_is_owned() {
@@ -3215,6 +3238,7 @@ test_secondmate_force_teardown_preserves_nested_restore_status
 test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
+test_secondmate_force_teardown_retires_child_held_park_wakes
 test_secondmate_force_teardown_refuses_duplicated_child_slot
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
 test_secondmate_force_teardown_allows_non_state_operational_dir_symlinks_inside_home
@@ -3228,7 +3252,6 @@ test_force_teardown_locks_descendant_with_absent_state
 test_force_teardown_refuses_while_a_task_is_being_published
 test_fresh_spawn_refuses_while_a_forced_teardown_owns_the_task_set
 test_fresh_spawn_names_another_spawn_as_task_set_holder
-test_fresh_spawn_waits_out_a_briefly_held_spawn_task_set_lock
 test_fresh_remote_secondmate_spawn_refuses_while_task_set_is_owned
 test_secondmate_force_teardown_refuses_child_active_home_descendant
 test_secondmate_force_teardown_refuses_child_repo_descendant

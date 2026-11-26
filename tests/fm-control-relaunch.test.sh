@@ -81,6 +81,7 @@ case "${1:-}" in
       case "$payload" in
         /exit|/quit)
           printf 'zsh' > "$D/command"
+          [ ! -f "$D/on-exit.sh" ] || sh "$D/on-exit.sh"
           [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP:-}" ] || exit 1
           ;;
         *'encode launch-brief'* | *'Firstmate operational input waiting: read'*)
@@ -422,6 +423,221 @@ SH
   pass "fm-control relaunch: a recorded PR stays valid to the armed merge poll"
 }
 
+# An overloaded host defers every launch path with exit 75 before anything
+# changes: fm-control relaunch before the old agent is checkpointed or stopped,
+# a direct fm-spawn --relaunch before its record is touched, and a fresh local
+# secondmate spawn before its home is validated, synced, or inherited. A fixture
+# /proc carries the load (the host gate's Linux probe), so this runs on Linux.
+test_overloaded_host_defers_relaunch_and_secondmate_launch_before_any_change() {
+  local dir out rc meta_before proc
+  if [ "$(uname -s)" != Linux ]; then
+    pass "host gate relaunch and secondmate deferral (skipped: the fixture replaces the Linux /proc probes; the verdict is covered portably by tests/fm-capacity.test.sh)"
+    return 0
+  fi
+  dir=$(new_case host-gate rl91)
+  add_ship_task "$dir" rl91 claude
+  proc="$dir/proc"
+  mkdir -p "$proc"
+  printf '100000.00 0.00 0.00 1/1 1\n' > "$proc/loadavg"
+  printf 'MemTotal: 1000000 kB\nMemAvailable: 600000 kB\n' > "$proc/meminfo"
+  meta_before=$(cat "$dir/home/state/rl91.meta")
+
+  out=$(FM_PROC_ROOT_OVERRIDE=$proc run_control "$dir" rl91 relaunch --note "retry after the host settles"); rc=$?
+  expect_code 75 "$rc" "fm-control relaunch on an overloaded host must defer: $out"
+  assert_contains "$out" "deferred: rl91 was not relaunched and its agent and record are unchanged" "the relaunch deferral did not say nothing changed"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a deferred relaunch stopped the old agent"
+  assert_no_grep "/exit" "$dir/fake/literal" "a deferred relaunch typed an exit command"
+  assert_equals "$meta_before" "$(cat "$dir/home/state/rl91.meta")" "a deferred relaunch changed the task record"
+
+  out=$(FM_PROC_ROOT_OVERRIDE=$proc run_spawn "$dir" rl91 --relaunch); rc=$?
+  expect_code 75 "$rc" "a direct fm-spawn --relaunch on an overloaded host must defer: $out"
+  assert_contains "$out" "deferred: rl91 was not launched" "the direct relaunch deferral was not reported"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a deferred direct relaunch replaced the agent"
+  assert_equals "$meta_before" "$(cat "$dir/home/state/rl91.meta")" "a deferred direct relaunch changed the task record"
+
+  mkdir -p "$dir/mate-home"
+  out=$(FM_PROC_ROOT_OVERRIDE=$proc run_spawn "$dir" mate91 "$dir/mate-home" --secondmate); rc=$?
+  expect_code 75 "$rc" "a fresh secondmate spawn on an overloaded host must defer: $out"
+  assert_contains "$out" "deferred: mate91 was not launched" "the secondmate deferral was not reported"
+  [ ! -e "$dir/home/state/mate91.meta" ] || fail "a deferred secondmate spawn published a record"
+  [ -z "$(ls -A "$dir/mate-home")" ] || fail "a deferred secondmate spawn wrote into its home: $(ls -A "$dir/mate-home")"
+  # Load that rises after fm-control's own check defers the replacement after
+  # the stop: still exit 75, said plainly, with the prior record and the work
+  # kept, no agent running, and no automatic retry.
+  dir=$(new_case host-gate-late rl92)
+  add_ship_task "$dir" rl92 claude
+  proc="$dir/proc"
+  mkdir -p "$proc"
+  printf '0.00 0.00 0.00 1/1 1\n' > "$proc/loadavg"
+  printf 'MemTotal: 1000000 kB\nMemAvailable: 600000 kB\n' > "$proc/meminfo"
+  printf "printf '100000.00 0.00 0.00 1/1 1\\n' > '%s'\n" "$proc/loadavg" > "$dir/fake/on-exit.sh"
+  meta_before=$(cat "$dir/home/state/rl92.meta")
+  printf 'unlanded work\n' > "$dir/wt/unlanded.txt"
+  out=$(FM_PROC_ROOT_OVERRIDE=$proc run_control "$dir" rl92 relaunch --note "recheck load during relaunch"); rc=$?
+  expect_code 75 "$rc" "a replacement deferred after the stop must still exit 75: $out"
+  assert_contains "$out" "deferred: rl92's agent was stopped, but this host became overloaded before its replacement launched; no agent is running, its record and work are kept, and nothing retries it automatically" \
+    "the late deferral did not say the lane is left without an agent"
+  [ "$(cat "$dir/fake/command")" = zsh ] || fail "the late-deferral fixture did not stop the old agent"
+  assert_equals "$meta_before" "$(cat "$dir/home/state/rl92.meta")" "a late deferral changed the prior task record"
+  assert_equals "unlanded work" "$(cat "$dir/wt/unlanded.txt")" "a late deferral lost uncommitted work"
+  grep -rqF "recheck load during relaunch" "$dir/home/data/rl92" "$dir/home/state" || fail "a late deferral lost the progress note"
+  # Nothing relaunched by itself; a deliberate relaunch on the recovered host
+  # brings the same task back in the same copy.
+  [ "$(cat "$dir/fake/command")" = zsh ] || fail "a late deferral restarted an agent by itself"
+  rm -f "$dir/fake/on-exit.sh"
+  printf '0.00 0.00 0.00 1/1 1\n' > "$proc/loadavg"
+  out=$(FM_PROC_ROOT_OVERRIDE=$proc run_control "$dir" rl92 relaunch --note "host recovered"); rc=$?
+  expect_code 0 "$rc" "a deliberate relaunch after a late deferral must recover the lane: $out"
+  assert_contains "$out" "relaunched rl92" "the recovery relaunch was not reported"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the recovery relaunch did not bring the agent back"
+  assert_equals "$dir/wt" "$(meta_field "$dir" rl92 worktree)" "the recovery relaunch moved to another copy"
+  assert_equals "unlanded work" "$(cat "$dir/wt/unlanded.txt")" "the recovery relaunch lost uncommitted work"
+  pass "an overloaded host defers fm-control relaunch before the stop, fm-spawn --relaunch before the record, and a fresh secondmate before its home is touched; load rising after the check defers after the stop with exit 75 and the lane left without an agent"
+}
+
+# --- review-park resume startup ---------------------------------------------
+
+# park_startup_case <name> <id>: a parked ship lane whose agent is stopped, with
+# the lease-command lock held, so the fm-control a resume starts waits in lease
+# arbitration, before its own lifecycle lock, until $dir/release exists.
+park_startup_case() {
+  local dir
+  dir=$(new_case "$1" "$2")
+  add_ship_task "$dir" "$2" claude
+  printf 'zsh' > "$dir/fake/command"
+  echo 'pr=https://github.com/example/repo/pull/7' >> "$dir/home/state/$2.meta"
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' \
+    'head=0123456789012345678901234567890123456789' 'parked_at=1' 'slot_leased=no' \
+    > "$dir/home/state/$2.review-park"
+  : > "$dir/control.rcs"
+  # The real fm-control; its output and exit stay readable once its park died.
+  cat > "$dir/control" <<SH
+#!/usr/bin/env bash
+rc=0
+"$CONTROL" "\$@" > "$dir/control.\$\$.out" 2>&1 || rc=\$?
+cat "$dir/control.\$\$.out"
+printf '%s\n' "\$rc" >> "$dir/control.rcs"
+exit "\$rc"
+SH
+  printf '#!/bin/sh\nexit 0\n' > "$dir/host-gate"
+  chmod +x "$dir/control" "$dir/host-gate"
+  # shellcheck disable=SC2016 # expanded by the holder's own shell
+  FM_HOME="$dir/home" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$2/home/state/.fm-lease-command.lock" || exit 1
+    : > "$2/held"
+    while [ ! -e "$2/release" ]; do /bin/sleep 0.05; done
+    fm_lock_release "$2/home/state/.fm-lease-command.lock"
+  ' _ "$ROOT" "$dir" >/dev/null 2>&1 &
+  wait_path "$dir/held" "the lease-command lock was never held"
+  printf '%s\n' "$dir"
+}
+
+wait_path() {  # <path> <failure>
+  local _
+  for _ in $(seq 1 400); do [ ! -e "$1" ] || return 0; /bin/sleep 0.05; done
+  fail "$2"
+}
+
+# Waits until <count> fm-control runs ended, however their parks did.
+wait_controls() {  # <case-dir> <count>
+  local _
+  for _ in $(seq 1 600); do
+    [ "$(wc -l < "$1/control.rcs")" -lt "$2" ] || return 0
+    /bin/sleep 0.05
+  done
+  fail "$1: fewer than $2 lifecycle actions ended"
+}
+
+run_park_lane() {  # <case-dir> <args...>: replaces this shell
+  local dir=$1; shift
+  mkdir -p "$dir/user-home"
+  exec env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u PI_CODING_AGENT \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' FM_SUPERVISION_ACTOR=main \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_LOCK_WAITING="${FM_FAKE_LOCK_WAITING:-}" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    FM_PARK_CONTROL_BIN="$dir/control" FM_PARK_HOST_GATE_BIN="$dir/host-gate" \
+    "$ROOT/bin/fm-park.sh" "$@"
+}
+
+launches() { grep -cE 'encode launch-brief|Firstmate operational input waiting: read' "$1/fake/literal" || true; }
+
+# Starts a resume and kills it while the fm-control it started still waits in
+# lease arbitration, before that control's own lifecycle lock.
+cut_resume_in_startup() {  # <case-dir> <id>
+  local pid rc=0
+  ( FM_FAKE_LOCK_WAITING="$1/waiting" run_park_lane "$1" resume "$2" --trigger "first try" ) > "$1/cut.out" 2>&1 &
+  pid=$!
+  wait_path "$1/waiting" "the relaunch never reached lease arbitration"
+  kill -KILL "$pid"
+  wait "$pid" 2>/dev/null || rc=$?
+  expect_code 137 "$rc" "the resume was not killed: $(cat "$1/cut.out")"
+  grep -q '^resume_attempt=[0-9]' "$1/home/state/$2.review-park" || fail "the cut resume left no attempt"
+  [ ! -e "$1/home/state/.control-$2.lock" ] || fail "the relaunch was already past lease arbitration"
+}
+
+# A resume cut while its relaunch is still starting leaves one attempt. Settling
+# it holds the lane, and the relaunch it left behind launches nothing after that;
+# a deliberate resume then relaunches exactly once.
+test_resume_cut_during_relaunch_startup_never_launches_behind_a_hold() {
+  local dir out rc=0 state
+  dir=$(park_startup_case park-cut-hold pk1)
+  state="$dir/home/state"
+  cut_resume_in_startup "$dir" pk1
+  out=$( (run_park_lane "$dir" tick) 2>&1 )
+  assert_contains "$out" "held pk1: " "the cut attempt was not settled as a hold: $out"
+  : > "$dir/release"
+  wait_controls "$dir" 1
+  assert_equals 0 "$(launches "$dir")" "a relaunch left behind launched after its lane was held"
+  [ "$(cat "$dir/fake/command")" = zsh ] || fail "a held lane has a running agent"
+  grep -q '^held=' "$state/pk1.review-park" || fail "the hold was lost: $(cat "$state/pk1.review-park")"
+  assert_contains "$(cat "$dir"/control.*.out)" "is no longer on task pk1's park record; nothing was changed" \
+    "the relaunch left behind did not name its settled attempt"
+
+  out=$( (run_park_lane "$dir" resume pk1 --trigger "operator retry") 2>&1 ) || rc=$?
+  expect_code 0 "$rc" "a deliberate resume of the held lane must recover it: $out"
+  assert_contains "$out" "relaunched pk1: " "the recovery was not reported"
+  assert_equals 1 "$(launches "$dir")" "the recovery did not launch exactly once"
+  [ "$(cat "$dir/fake/command")" = claude ] && [ ! -e "$state/pk1.review-park" ] || fail "the recovered lane is still parked"
+  pass "a relaunch whose resume was cut in startup launches nothing once its lane is held, and a deliberate resume recovers it once"
+}
+
+# A deliberate resume replaces an attempt whose relaunch is still starting: that
+# relaunch launches nothing and the new one launches once. Uncut, a relaunch held
+# up in startup launches once and no tick settles it meanwhile.
+test_only_the_recorded_resume_attempt_launches() {
+  local dir out rc pid
+  dir=$(park_startup_case park-replaced pk2)
+  cut_resume_in_startup "$dir" pk2
+  rm -f "$dir/waiting"
+  ( FM_FAKE_LOCK_WAITING="$dir/waiting" run_park_lane "$dir" resume pk2 --trigger "operator retry" ) > "$dir/second.out" 2>&1 &
+  pid=$!
+  wait_path "$dir/waiting" "the second relaunch never reached lease arbitration"
+  for _ in $(seq 1 200); do ! grep -q 'resume_trigger=operator retry' "$dir/home/state/pk2.review-park" || break; /bin/sleep 0.05; done
+  : > "$dir/release"
+  rc=0; wait "$pid" || rc=$?
+  wait_controls "$dir" 2
+  expect_code 0 "$rc" "the deliberate resume did not succeed: $(cat "$dir/second.out")"
+  assert_equals 1 "$(launches "$dir")" "the replaced attempt's relaunch launched too"
+  assert_no_grep "/exit" "$dir/fake/literal" "a relaunch stopped the replacement another attempt started"
+  [ "$(cat "$dir/fake/command")" = claude ] && [ ! -e "$dir/home/state/pk2.review-park" ] || fail "the resumed lane is still parked"
+
+  dir=$(park_startup_case park-uncut pk3)
+  ( FM_FAKE_LOCK_WAITING="$dir/waiting" run_park_lane "$dir" resume pk3 --trigger "operator retry" ) > "$dir/only.out" 2>&1 &
+  pid=$!
+  wait_path "$dir/waiting" "the relaunch never reached lease arbitration"
+  out=$( (run_park_lane "$dir" tick) 2>&1 )
+  [ -z "$out" ] || fail "an attempt under way was settled: $out"
+  : > "$dir/release"
+  rc=0; wait "$pid" || rc=$?
+  expect_code 0 "$rc" "an uncut resume did not succeed: $(cat "$dir/only.out")"
+  assert_equals 1 "$(launches "$dir")" "an uncut resume did not launch exactly once"
+  [ ! -e "$dir/home/state/pk3.review-park" ] || fail "an uncut resume left the lane parked"
+  pass "only the relaunch of the recorded resume attempt launches, once"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -438,37 +654,6 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   assert_no_grep "/exit" "$dir/fake/literal" \
     "the exit command must not be concatenated onto pending composer text"
   pass "fm-control relaunch: pending composer text refuses before the exit command is typed"
-}
-
-# The host resource gate (bin/fm-capacity.sh --host-gate) is asked before the
-# old agent is stopped, so an overloaded host leaves the current worker as it is
-# instead of exiting it and then failing to start a replacement; a direct
-# fm-spawn --relaunch defers before it takes the task's control lock. The fake
-# /proc drives the Linux probes, so this case runs where they are the probes.
-test_overloaded_host_refuses_relaunch_before_stopping_the_worker() {
-  local dir out rc proc meta_before
-  if [ "$(uname -s)" != Linux ]; then
-    pass "fm-control relaunch: host gate case skipped off Linux (its fake /proc drives Linux probes only)"
-    return 0
-  fi
-  dir=$(new_case host-gate rl90)
-  add_ship_task "$dir" rl90 claude
-  proc="$dir/proc"
-  mkdir -p "$proc"
-  printf '9999.00 1.00 1.00 1/1 1\n' > "$proc/loadavg"
-  printf 'MemTotal: 1000 kB\nMemAvailable: 10 kB\n' > "$proc/meminfo"
-  meta_before=$(cat "$dir/home/state/rl90.meta")
-  out=$(FM_PROC_ROOT_OVERRIDE="$proc" run_control "$dir" rl90 relaunch --note "host is overloaded"); rc=$?
-  expect_code 75 "$rc" "an overloaded host must defer the relaunch"$'\n'"$out"
-  assert_contains "$out" "this host is overloaded" "the deferral must name the host"
-  assert_not_contains "$out" "capacity" "a hard health deferral must not read like retriable capacity contention"
-  assert_no_grep "/exit" "$dir/fake/literal" "a deferred relaunch must not stop the current worker"
-  [ "$(cat "$dir/fake/command")" = claude ] || fail "a deferred relaunch must leave the old agent running"
-  [ "$(cat "$dir/home/state/rl90.meta")" = "$meta_before" ] || fail "a deferred relaunch changed the task record"
-  out=$(FM_PROC_ROOT_OVERRIDE="$proc" run_spawn "$dir" rl90 --relaunch --harness claude); rc=$?
-  expect_code 75 "$rc" "a direct relaunch on an overloaded host must defer"$'\n'"$out"
-  assert_absent "$dir/home/state/.control-rl90.lock" "a deferred direct relaunch must not take or leave the control lock"
-  pass "fm-control relaunch: an overloaded host defers the relaunch before stopping the worker or taking a lock"
 }
 
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven() {
@@ -821,14 +1006,17 @@ test_relaunch_requires_a_note_for_a_ship_task() {
 # --- 2. harness switch -------------------------------------------------------
 
 test_harness_switch_moves_the_record_and_clears_prior_wiring() {
-  local dir out rc
+  local dir out rc meta
   dir=$(new_case switch rl4)
   add_ship_task "$dir" rl4 claude
+  meta="$dir/home/state/rl4.meta"
+  printf '%s\n' 'spawn_gen=s10.20.30' 'builder_history=s10.20.30:claude:claude-sonnet-4-6' \
+    'tern_tab_id=retired-endpoint' >> "$meta"
   # Wiring the previous claude incarnation left in the worktree.
   mkdir -p "$dir/wt/.claude"
   printf '{"hooks":{}}\n' > "$dir/wt/.claude/settings.local.json"
   printf 'codex' > "$dir/fake/becomes"
-  out=$(run_control "$dir" rl4 relaunch --harness codex --note "switching runtime"); rc=$?
+  out=$(run_control "$dir" rl4 relaunch --harness codex --model gpt-5.6-sol --note "switching runtime"); rc=$?
   expect_code 0 "$rc" "a harness switch should succeed"$'\n'"$out"
   assert_contains "$out" "harness=codex from=claude" "the outcome should name both harnesses"
   [ "$(meta_field "$dir" rl4 harness)" = codex ] || fail "the record should follow the switch"
@@ -837,6 +1025,10 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   assert_grep "codex" "$dir/fake/literal" "the replacement launch should be the new harness"
   [ "$(journal_field "$dir" rl4 from_harness)" = claude ] || fail "the journal should record the origin harness"
   [ "$(journal_field "$dir" rl4 to_harness)" = codex ] || fail "the journal should record the target harness"
+  assert_equals "s10.20.30:claude:claude-sonnet-4-6,$(meta_field "$dir" rl4 spawn_gen):codex:gpt-5.6-sol" \
+    "$(meta_field "$dir" rl4 builder_history)" "harness switch must keep every builder identity"
+  assert_equals 1 "$(grep -c '^builder_history=' "$meta")" "relaunch duplicated builder lineage"
+  assert_no_grep 'tern_tab_id=' "$meta" "relaunch carried a retired backend's tab ID"
   pass "fm-control relaunch: switching harness is one ordinary relaunch, and the old wiring goes with the old agent"
 }
 
@@ -1904,6 +2096,23 @@ test_sandbox_relaunch_retains_policy_and_refuses_switch_before_stop() {
   [ "${#temp}" -le 30 ] || fail 'replacement temp root too long'
   assert_contains "$(cat "$dir/fake/literal")" 'CLAUDE_CODE_TMPDIR=' 'replacement receives temp override'
   pass 'fm-control relaunch: sandbox policy survives replacement and refuses a harness switch before stop'
+}
+
+test_refute_review_relaunch_refuses_before_stop() {
+  local dir out rc
+  dir=$(new_case refute rl45)
+  add_ship_task "$dir" rl45 claude
+  sed -i.bak '/^mode=/d; s/^kind=.*/kind=scout/' "$dir/home/state/rl45.meta"
+  printf '{}\n' > "$dir/home/state/rl45.refute.json"
+  out=$(run_control "$dir" rl45 relaunch --note 'resume review'); rc=$?
+  expect_code 1 "$rc" "a refute review must not be relaunched"
+  assert_equals claude "$(cat "$dir/fake/command")" "a refused review relaunch must not stop the reviewer"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused review relaunch must send nothing"
+  assert_contains "$out" "one fresh dispatch" "the refusal should say a review is never relaunched"
+  rm "$dir/home/state/rl45.refute.json"
+  out=$(run_control "$dir" rl45 relaunch --note 'ordinary scout'); rc=$?
+  expect_code 0 "$rc" "an ordinary scout still relaunches"$'\n'"$out"
+  pass "fm-control relaunch: a refute review refuses before its reviewer is stopped"
 }
 
 test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
@@ -3327,7 +3536,6 @@ test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_keeps_a_recorded_pr_valid_for_the_merge_poll
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
-test_overloaded_host_refuses_relaunch_before_stopping_the_worker
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_accepts_a_standalone_clone_worktree
@@ -3376,6 +3584,7 @@ test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_spawn_relaunch_of_promoted_scout_uses_the_recorded_branch
 test_sandbox_relaunch_retains_policy_and_refuses_switch_before_stop
+test_refute_review_relaunch_refuses_before_stop
 test_promoted_scout_relaunch_receives_the_current_delivery_contract
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
@@ -3418,6 +3627,9 @@ test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server
 test_herdr_rebind_stays_in_the_recorded_session
 test_herdr_reclaim_refuses_an_agent_that_came_back
 test_herdr_reclaim_keeps_the_task_whole
+test_overloaded_host_defers_relaunch_and_secondmate_launch_before_any_change
+test_resume_cut_during_relaunch_startup_never_launches_behind_a_hold
+test_only_the_recorded_resume_attempt_launches
 test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it

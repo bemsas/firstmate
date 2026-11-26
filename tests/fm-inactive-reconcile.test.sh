@@ -117,7 +117,7 @@ write_mate_meta() {
 run_reconcile() { # <home> [--startup]
   local home=$1 option=${2:-}
   PATH="$WORLD/fakebin:$PATH" FM_ROOT_OVERRIDE="$WORLD/root" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="${FM_TEST_CONFIG:-$home/config}" \
     FM_INACTIVE_RECONCILE_SECS=60 FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" \
     FM_FORGE_LOG="$WORLD/forge.log" "$RECON" scan ${option:+"$option"}
 }
@@ -127,7 +127,7 @@ run_reconcile() { # <home> [--startup]
 run_report() { # <home> <child>
   local home=$1 child=$2
   PATH="$WORLD/fakebin:$PATH" FM_ROOT_OVERRIDE="$WORLD/root" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="${FM_TEST_CONFIG:-$home/config}" \
     FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" \
     FM_FORGE_LOG="$WORLD/forge.log" "$RECON" report "$child"
 }
@@ -529,6 +529,7 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
   pass "ledger delivery carries the report pointer, the failed verb, and each new terminal line"
 }
 
+CANDIDATE_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 # Children whose ready lines differ only in what config/pr-register-scan opts
 # into: a ready line after one naming the recorded PR, a ready line beside a
 # recorded PR the log never named, a GitLab ready line after one naming the
@@ -538,6 +539,7 @@ write_replacement_children() {
   write_child "$MATE" kept 'done: PR https://example.test/owner/repo/pull/23 checks green'
   write_child "$MATE" gitlab $'done: PR https://example.test/owner/repo/pull/1 checks green\ndone: PR https://gitlab.example/group/sub/project/-/merge_requests/8 checks green'
   write_child "$MATE" unrecorded 'done: PR https://gitlab.example/group/sub/project/-/merge_requests/9 checks green'
+  write_child "$MATE" candidate "done: PR https://github.com/o/r/pull/8 checks green head $CANDIDATE_HEAD"
   awk '$0 !~ /^pr=/' "$MATE/state/unrecorded.meta" > "$MATE/state/unrecorded.meta.tmp"
   mv "$MATE/state/unrecorded.meta.tmp" "$MATE/state/unrecorded.meta"
 }
@@ -567,6 +569,8 @@ test_ledger_report_names_a_replacement_pr() {
     "the report kept the recorded PR instead of the GitLab replacement"
   assert_child_report unrecorded "child unrecorded done: PR https://gitlab.example/group/sub/project/-/merge_requests/9 checks green pr=https://gitlab.example/group/sub/project/-/merge_requests/9 mode=no-mistakes yolo=off" \
     "the report dropped an unrecorded GitLab ready PR"
+  assert_child_report candidate "child candidate done: PR https://github.com/o/r/pull/8 checks green head $CANDIDATE_HEAD pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
+    "an unverified candidate replaced a recorded PR the log never named"
   pass "with the scan opt-in, a child report names a replacement or forge PR and keeps a recorded PR the log never named"
 }
 
@@ -585,6 +589,8 @@ test_ledger_report_without_scan_opt_in_keeps_recorded_pr() {
     "a GitLab ready line replaced the recorded PR without the opt-in"
   assert_child_report unrecorded "child unrecorded done: PR https://gitlab.example/group/sub/project/-/merge_requests/9 checks green mode=no-mistakes yolo=off" \
     "a GitLab ready line carried a PR without the opt-in"
+  assert_child_report candidate "child candidate done: PR https://github.com/o/r/pull/8 checks green head $CANDIDATE_HEAD pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
+    "an unverified candidate replaced the recorded PR with acceptance off"
   pass "without the scan opt-in, a child report keeps the recorded PR and accepts only a GitHub-shaped ready line"
 }
 
@@ -759,6 +765,66 @@ test_pending_ledger_done_is_delivered_after_worktree_removal() {
   sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fq "done [key=$key]: child child done: PR https://example.test/owner/repo/pull/2 checks green" \
     || fail "report did not deliver the pending done after the worktree was removed"
   pass "a pending ship done: is delivered by report after teardown removed the worktree"
+}
+
+test_pending_legacy_ship_candidate_waits_for_acceptance() {
+  make_world pending-unaccepted; bind_secondmate local
+  write_child "$MATE" child 'done: implementation complete'
+  cp "$MATE/.fm-secondmate-parent" "$WORLD/parent-binding"
+  printf 'schema=fm-secondmate-parent.v1\nroute=invalid\n' > "$MATE/.fm-secondmate-parent"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ "$(outcome_count "$MATE" pending)" = 1 ] || fail "legacy event did not leave a pending delivery"
+
+  local FM_TEST_CONFIG="$MATE/injected"
+  mkdir -p "$FM_TEST_CONFIG/done-acceptance"
+  cp "$WORLD/parent-binding" "$MATE/.fm-secondmate-parent"
+  run_report "$MATE" child || fail "reporting an unaccepted candidate should leave it pending"
+  [ "$(outcome_count "$MATE" reported)" = 0 ] || fail "legacy pending event bypassed acceptance"
+  [ "$(outcome_count "$MATE" pending)" = 1 ] || fail "unaccepted candidate disappeared from the ledger"
+  [ ! -s "$MAIN/state/mate.status" ] || fail "parent received an unaccepted candidate as done"
+  pass "pending legacy ship completion waits for acceptance before parent delivery"
+}
+
+# A protected worker done is only a candidate: neither the scan nor the report
+# entry point publishes it until the supervisor's receipt names its exact head.
+# fm-done-check.test.sh covers the receipt; here the offline lookup stands in for it.
+test_ledger_done_waits_for_supervisor_acceptance() {
+  local head other accepted real_python
+  make_world unaccepted-candidate; bind_secondmate local
+  write_child "$MATE" child 'working: validating'
+  head=$(git -C "$MATE/projects/child" rev-parse HEAD)
+  other=$(printf 'another head\n' | git hash-object --stdin)
+  sed 's|^pr=.*|pr=https://github.com/o/r/pull/2|; /^pr_head=/d' "$MATE/state/child.meta" > "$WORLD/meta"
+  mv "$WORLD/meta" "$MATE/state/child.meta"
+  printf 'done: PR https://github.com/o/r/pull/1 checks green head %s\n' "$head" > "$MATE/state/child.status"
+  local FM_TEST_CONFIG="$MATE/injected"
+  mkdir -p "$FM_TEST_CONFIG/done-acceptance"
+  real_python=$(command -v python3)
+  cat > "$WORLD/fakebin/python3" <<SH
+#!/usr/bin/env bash
+if [[ "\${1:-}" == */fm-done-acceptance.py ]]; then
+  [ "\$2" = passing ] && [ "\$5" = "\$(cat '$WORLD/accepted' 2>/dev/null)" ]
+  exit
+fi
+exec '$real_python' "\$@"
+SH
+  chmod +x "$WORLD/fakebin/python3"
+
+  for accepted in '' "$other"; do
+    printf '%s\n' "$accepted" > "$WORLD/accepted"
+    FM_FAKE_CREW_STATE='done' run_reconcile "$MATE"
+    run_report "$MATE" child || fail "reporting an unaccepted candidate owes the parent nothing"
+    [ ! -s "$MAIN/state/mate.status" ] || fail "parent received an unaccepted candidate as done"
+    [ "$(outcome_count "$MATE" reported)$(outcome_count "$MATE" pending)" = 00 ] \
+      || fail "an unaccepted candidate left a delivery record"
+  done
+
+  printf '%s\n' "$head" > "$WORLD/accepted"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ "$(outcome_count "$MATE" reported)" = 1 ] || fail "an accepted candidate was not delivered"
+  grep -Fq "checks green head $head pr=https://github.com/o/r/pull/1" "$MAIN/state/mate.status" \
+    || fail "the accepted delivery lost its exact candidate or PR: $(cat "$MAIN/state/mate.status")"
+  pass "a worker done reaches the parent only after supervisor acceptance of its exact head"
 }
 
 # `report <child>` is the teardown-side delivery: it delivers or says nothing
@@ -1502,6 +1568,8 @@ test_secondmate_partial_ledger_line_waits_for_newline
 test_secondmate_remote_route_ledger_delivery
 test_report_subcommand_delivers_and_refuses
 test_pending_ledger_done_is_delivered_after_worktree_removal
+test_pending_legacy_ship_candidate_waits_for_acceptance
+test_ledger_done_waits_for_supervisor_acceptance
 test_report_avoids_scan_meta_lock_inversion
 test_local_secondmate_rejects_relative_parent_home
 test_invalid_secondmate_marker_blocks_routing

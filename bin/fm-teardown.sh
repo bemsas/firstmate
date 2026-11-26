@@ -88,6 +88,8 @@
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
+# An attached refute scout (docs/configuration.md "Done acceptance") also waits
+# while its report or status holds unresolved review evidence.
 # A scratch copy (kind=scout) and a --force run discard untracked content.
 # Treehouse's return resets with `git clean -fd`, which never deletes a nested
 # git repository, so the pool slot stays dirty and later checkouts skip it.
@@ -3678,6 +3680,8 @@ cleanup_firstmate_home_children() {
     fi
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
     teardown_retire_status "$sub_state" "$child_id" "$archive_parent/children/$child_id" || return 1
+    # Same order as the direct teardown below: the home can outlive this child.
+    rm -f "$sub_state/$child_id.review-park"
     fm_wake_queue_prune_task "$sub_state" "$child_id" "$child_t" 2>/dev/null || true
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
     rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.progress" \
@@ -3688,6 +3692,7 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
       "$sub_state/$child_id.claude-settings.json" "$sub_state/$child_id.devin-config.json" \
       "$sub_state/$child_id.polytoken-busy.sh" "$sub_state/$child_id.polytoken-guardrails.sh" \
+      "$sub_state/.review-park-held-acked-$child_id" \
       "$sub_state/.$child_id.branch-outcome-index"
     rm -rf "$sub_state/$child_id.kiro-home"
     chmod u+w "$sub_state/$child_id.git-hooks" 2>/dev/null || true
@@ -3777,6 +3782,22 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
     exit 1
   fi
 fi
+
+# A refute scout's status can be the only evidence of an unrecorded blocker or a
+# withdrawn pass.
+# bin/fm-done-acceptance.py owns the rule. It is asked again once the endpoint is
+# gone and before the status is retired, so a late report cannot slip between.
+teardown_refute_review_settled() {
+  [ "$FORCE" != "--force" ] || return 0
+  [ -e "$STATE/$ID.refute.json" ] || [ -L "$STATE/$ID.refute.json" ] || return 0
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-done-check.sh" retire-review "$ID" && return 0
+  echo "REFUSED: refute scout $ID still holds an unsettled review; its status is kept." >&2
+  fm_backlog_close_marker_clear "$STATE" "$ID" \
+    || echo "error: $ID's pending backlog close could not be cleared ($FM_BACKLOG_TRANSITION_ERROR); clear it before the next session start replays it" >&2
+  return 1
+}
+teardown_refute_review_settled || exit 1
 
 # A public commitment is not kept until its final reply lands in the ORIGINAL
 # thread, and this cleanup removes the task records that make the promise
@@ -4235,10 +4256,14 @@ if [ -n "$LAUNCH_HOME_TOKEN" ]; then
 fi
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+teardown_refute_review_settled || exit 1
 # Opt-in fleet activity ledger (docs/fleet-ledger.md), before the status log is
 # retired so its last lines are captured; off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
 teardown_retire_status "$STATE" "$ID" || exit 1
+# The park record goes first: without it no park tick can queue another held
+# wake after the prune, and no acknowledgement can recreate its receipt.
+rm -f "$STATE/$ID.review-park"
 fm_wake_queue_prune_task "$STATE" "$ID" "$T" 2>/dev/null || true
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" \
@@ -4250,7 +4275,8 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
   "$STATE/$ID.claude-settings.json" "$STATE/$ID.devin-config.json" \
   "$STATE/$ID.polytoken-busy.sh" "$STATE/$ID.polytoken-guardrails.sh" \
-  "$STATE/$ID.pr-register-refused" "$STATE/$ID.review-park" "$STATE/.review-park-closed-$ID" \
+  "$STATE/$ID.pr-register-refused" "$STATE/.review-park-closed-$ID" \
+  "$STATE/.review-park-held-acked-$ID" \
   "$STATE/$ID.pr-register-timed-out" \
   "$STATE/.$ID.branch-outcome-index" "$STATE/$ID.done-check" \
   "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID" \

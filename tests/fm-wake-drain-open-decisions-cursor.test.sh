@@ -408,6 +408,182 @@ test_kind_changes_invalidate_folded_decisions() {
   pass "folded decisions are rebuilt when task-kind evidence changes"
 }
 
+# The persisted open-decision cursor's first three lines are its version,
+# offset and identity; print one of them.
+cursor_field() {  # <cursor> <field>
+  sed -n "1,3s/^$2=//p" "$1"
+}
+
+# Run one classifier function in a fresh process, with optional leading
+# VAR=value assignments before the function name.
+classify() {  # [VAR=value...] <function> [args...]
+  local -a assigns=()
+  while case "${1:-}" in *=*) true ;; *) false ;; esac; do
+    assigns+=("$1")
+    shift
+  done
+  # shellcheck disable=SC2016 # Expanded by the fresh shell.
+  env ${assigns[@]+"${assigns[@]}"} bash -c '. "$1"; shift; "$@"' _ "$ROOT/bin/fm-classify-lib.sh" "$@"
+}
+
+assert_folds_agree() {  # <message> <status-file> [VAR=value...]
+  local message=$1 f=$2
+  shift 2
+  assert_equals "$(classify "$@" status_open_decisions "$f")" \
+    "$(classify "$@" status_open_decisions_incremental "$f")" "$message"
+}
+
+test_partial_append_is_reported_but_never_persisted() {
+  local dir state status cursor complete
+  dir=$(make_case cursor-partial-append)
+  state="$dir/state"; status="$state/task8.status"; cursor="$state/.task8.open-decisions-cursor"
+  printf 'kind=secondmate\n' > "$state/task8.meta"
+  printf 'needs-decision [key=first]: choose the first path\n' > "$status"
+  complete=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
+  printf 'needs-decision [key=later]: half' >> "$status"
+  assert_folds_agree "a trailing fragment must fold like the whole file" "$status"
+  assert_equals "$complete" "$(cursor_field "$cursor" offset)" "the cursor must end at the last complete record"
+  assert_not_contains "$(cat "$cursor")" later "an unterminated record must never be persisted"
+
+  printf ' of the choice\n' >> "$status"
+  assert_contains "$(classify status_open_decisions_incremental "$status")" \
+    $'later\tneeds-decision\thalf of the choice' "the completed record must fold whole"
+  assert_equals "$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')" "$(cursor_field "$cursor" offset)" \
+    "a completed record must advance the cursor"
+
+  # A resolution split across two appends must still close its key.
+  printf 'resol' >> "$status"
+  assert_folds_agree "a resolution fragment must fold like the whole file" "$status"
+  assert_contains "$(cat "$cursor")" first "an unterminated resolution must not be persisted as a close"
+  printf 'ved [key=first]: done\n' >> "$status"
+  assert_folds_agree "a resolution split across appends must fold like the whole file" "$status"
+  assert_not_contains "$(cat "$cursor")" first "the completed resolution must close its key"
+
+  # A fragment alone, with no complete record, leaves the cursor at byte 0.
+  status="$state/task9.status"; cursor="$state/.task9.open-decisions-cursor"
+  printf 'blocked [key=only]: no newline yet' > "$status"
+  assert_folds_agree "a fragment-only log must fold like the whole file" "$status"
+  assert_equals 0 "$(cursor_field "$cursor" offset)" "a fragment-only log must leave the cursor at byte 0"
+  pass "a partial append is reported like the whole-file fold but never persisted, so its completion folds whole"
+}
+
+# Put a stat on PATH that sources $FM_TEST_RACE/before-<n> ahead of its nth real
+# call and $FM_TEST_RACE/after-<n> behind it. GNU stat only: the Darwin reader
+# names /usr/bin/stat absolutely.
+make_racing_stat() {  # <shim-dir>
+  local real
+  real=$(command -v stat)
+  mkdir -p "$1"
+  cat > "$1/stat" <<SH
+#!/usr/bin/env bash
+n=\$(( \$(cat "\$FM_TEST_RACE/calls" 2>/dev/null || echo 0) + 1 ))
+printf '%s\n' "\$n" > "\$FM_TEST_RACE/calls"
+[ ! -f "\$FM_TEST_RACE/before-\$n" ] || . "\$FM_TEST_RACE/before-\$n"
+out=\$("$real" "\$@"); rc=\$?
+[ ! -f "\$FM_TEST_RACE/after-\$n" ] || . "\$FM_TEST_RACE/after-\$n"
+printf '%s\n' "\$out"
+exit "\$rc"
+SH
+  chmod +x "$1/stat"
+}
+
+test_cursor_never_certifies_bytes_from_another_file() {
+  local dir state status cursor race shim out case_name before swap
+  [ "$(uname -s)" = Linux ] || { pass "SKIP: racing the path identity read needs GNU stat on PATH"; return 0; }
+  for case_name in rotated-before-open restored-after-open truncated-before-open inode-reused; do
+    dir=$(make_case "cursor-race-$case_name")
+    state="$dir/state"; status="$state/task.status"; cursor="$state/.task.open-decisions-cursor"
+    race="$dir/race"; shim="$dir/shim"
+    mkdir -p "$race"
+    make_racing_stat "$shim"
+    printf 'needs-decision [key=old]: from the identified file\n' > "$status"
+    classify status_open_decisions_incremental "$status" >/dev/null || fail "$case_name: bootstrap fold failed"
+    printf 'needs-decision [key=appended]: still from the identified file\n' >> "$status"
+    {
+      cat "$status"
+      printf 'needs-decision [key=foreign]: from another file entirely\n'
+    } > "$dir/foreign"
+    before=$(cat "$cursor")
+    swap="mv '$status' '$dir/aside'; mv '$dir/foreign' '$status'"
+    # Call 1 reads the identity the cursor would persist; call 2 re-checks it.
+    case "$case_name" in
+      rotated-before-open) printf '%s\n' "$swap" > "$race/after-1" ;;
+      restored-after-open)
+        # The path names the identified file again when it is re-checked, so
+        # only the held descriptor can tell that the bytes are foreign.
+        printf '%s\n' "$swap" > "$race/after-1"
+        printf '%s\n' "mv '$status' '$dir/foreign'; mv '$dir/aside' '$status'" > "$race/before-2"
+        ;;
+      truncated-before-open) printf '%s\n' ": > '$status'" > "$race/after-1" ;;
+      # A new file on the freed inode differs only in its birth time.
+      inode-reused) printf '%s\n' 'out+=9' > "$race/after-2" ;;
+    esac
+    out=$(classify "FM_TEST_RACE=$race" "PATH=$shim:$PATH" status_open_decisions_incremental "$status") \
+      || fail "$case_name: a refused read must stay survivable"
+    [ "$(cat "$race/calls")" -ge 2 ] || fail "$case_name: the identity re-check never ran"
+    assert_not_contains "$out" foreign "$case_name: foreign rows must not be reported under the identified file"
+    assert_not_contains "$out" appended "$case_name: an uncertified read must not be folded"
+    assert_contains "$out" old "$case_name: the already trusted set must survive a refused read"
+    assert_equals "$before" "$(cat "$cursor")" "$case_name: a refused read must not move the cursor"
+    assert_folds_agree "$case_name: the next call must converge on the path's current file" "$status"
+  done
+  pass "a replaced, restored or truncated log never lends its identity to another file's bytes"
+}
+
+test_exact_cursor_reuse_refuses_every_mismatch() {
+  local dir state status cursor ident size
+  dir=$(make_case cursor-exact)
+  state="$dir/state"; status="$state/task.status"; cursor="$state/.task.open-decisions-cursor"
+  printf 'kind=ship\n' > "$state/task.meta"
+  printf 'needs-decision [key=route]: pick a route\nblocked [key=access]: waiting\n' > "$status"
+  classify status_open_decisions_incremental "$status" >/dev/null || fail "bootstrap fold failed"
+  ident=$(cursor_field "$cursor" ident); size=$(cursor_field "$cursor" offset)
+  exact() {  # [VAR=value...] <kind> <ident> <size>
+    local -a assigns=()
+    while case "${1:-}" in *=*) true ;; *) false ;; esac; do assigns+=("$1"); shift; done
+    classify ${assigns[@]+"${assigns[@]}"} status_open_decisions_cursor_exact "$status" "$@"
+  }
+  assert_equals "$(classify status_open_decisions "$status")" "$(exact ship "$ident" "$size")" \
+    "an exact cursor must equal the whole-file fold"
+  exact ship "$ident" "$size" >/dev/null || fail "an exact cursor was refused"
+  exact secondmate "$ident" "$size" >/dev/null && fail "a cursor folded for another kind was reused"
+  exact ship "$ident-other" "$size" >/dev/null && fail "a cursor for another file was reused"
+  exact ship '' "$size" >/dev/null && fail "a cursor was reused without an identity"
+  exact ship "$ident" "$((size - 1))" >/dev/null && fail "a cursor past the captured extent was reused"
+  exact ship "$ident" "$((size + 1))" >/dev/null && fail "a cursor short of the captured extent was reused"
+  exact ship "$ident" '' >/dev/null && fail "a cursor was reused without an extent"
+  exact FM_CLASSIFY_RESOLVE_VERB=answered ship "$ident" "$size" >/dev/null \
+    && fail "a default cursor was reused under a classification override"
+  cp "$cursor" "$cursor.real"
+  sed '1s/=.*:/=10:/' "$cursor.real" > "$cursor"
+  exact ship "$ident" "$size" >/dev/null && fail "a cursor from the previous fold version was reused"
+  ln -sf "$cursor.real" "$cursor"
+  exact ship "$ident" "$size" >/dev/null && fail "a symlinked cursor was reused"
+  mv "$cursor" "$cursor.link"
+  exact ship "$ident" "$size" >/dev/null && fail "a missing cursor was reused"
+  [ ! -e "$cursor" ] || fail "the read-only reuse wrote a cursor"
+  pass "exact cursor reuse equals the whole-file fold and refuses every mismatch without writing"
+}
+
+test_classification_override_owns_its_own_cursor() {
+  local dir state status size
+  dir=$(make_case cursor-override)
+  state="$dir/state"; status="$state/task.status"
+  printf 'needs-decision [key=route]: pick a route\nanswered [key=route]: went left\n' > "$status"
+  size=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
+  assert_folds_agree "the override bootstrap must match its whole-file fold" "$status" FM_CLASSIFY_RESOLVE_VERB=answered
+  # The writer and the offset reader must name the same version.
+  assert_equals "$size" "$(classify FM_CLASSIFY_RESOLVE_VERB=answered status_open_decisions_cursor_offset "$status")" \
+    "an override cursor must stay readable under the same override"
+  assert_equals 0 "$(classify status_open_decisions_cursor_offset "$status")" \
+    "an override cursor must not be trusted without that override"
+  assert_folds_agree "a default fold must not trust an override cursor" "$status"
+  assert_equals 0 "$(classify FM_CLASSIFY_RESOLVE_VERB=answered status_open_decisions_cursor_offset "$status")" \
+    "a default cursor must not be trusted under an override"
+  assert_folds_agree "an override fold must not trust a default cursor" "$status" FM_CLASSIFY_RESOLVE_VERB=answered
+  pass "a cursor folded under a classification override is trusted only under that same override"
+}
+
 test_terminal_supersession_reaches_cached_drains
 test_kind_changes_invalidate_folded_decisions
 test_truncated_log_falls_back_to_a_full_refold_not_a_dropped_decision
@@ -417,3 +593,7 @@ test_cursor_cache_read_failure_refolds_without_replaying_unread_status
 test_pre_fix_cursor_refolds_corr_tagged_decision
 test_previous_fold_cache_is_refolded_under_current_semantics
 test_buried_decision_survives_many_growing_drains_and_resolution_clears_it
+test_partial_append_is_reported_but_never_persisted
+test_cursor_never_certifies_bytes_from_another_file
+test_exact_cursor_reuse_refuses_every_mismatch
+test_classification_override_owns_its_own_cursor

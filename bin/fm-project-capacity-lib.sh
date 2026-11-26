@@ -9,8 +9,9 @@
 # bin/fm-spawn.sh defers a fresh worker beyond that number instead of launching
 # it only to spend full-context turns retrying the resource. A deferred task
 # keeps its queued backlog item and is dispatched again when a place frees.
-# Without a declaration nothing changes and dispatch stays uncapped
-# (AGENTS.md section 7).
+# Without a declaration no machine-local limit applies; the review-queue cap
+# (bin/fm-review-capacity-lib.sh) and the host resource gate
+# (bin/fm-capacity.sh --host-gate) are separate admissions.
 #
 # This file is the single owner of the declaration format, of what holds a
 # place, and of the admission verdict. docs/configuration.md "Project capacity"
@@ -96,9 +97,12 @@ fm_project_capacity_config_dir() {  # <spawning-home> <spawning-config-dir>
 # to the project's capacity, or to empty when the project declares none, and
 # FM_PROJECT_CAPACITY_ANY to 1 when the declaration caps any project at all.
 # Returns 1 with FM_PROJECT_CAPACITY_ERROR when the declaration is unreadable.
-fm_project_capacity_lookup() {  # <config-dir> <project-name>
+# <file-name> defaults to project-capacity; bin/fm-review-capacity-lib.sh reads
+# its own config/review-capacity through this same parser, so both
+# declarations share one format.
+fm_project_capacity_lookup() {  # <config-dir> <project-name> [<file-name>]
   local name=$2 line lineno=0 pname pcap seen='|'
-  FM_PROJECT_CAPACITY_FILE="$1/project-capacity"
+  FM_PROJECT_CAPACITY_FILE="$1/${3:-project-capacity}"
   FM_PROJECT_CAPACITY=
   FM_PROJECT_CAPACITY_ANY=
   FM_PROJECT_CAPACITY_ERROR=

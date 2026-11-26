@@ -139,7 +139,7 @@ run_lease_spawn() {  # <case-dir> <id> [extra spawn args...]
   env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
     -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
     PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
-    FM_FAKE_SLOT="$dir/slot" HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
+    FM_FAKE_SLOT="${LEASE_SLOT:-$dir/slot}" HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 \
     "$SPAWN" "$id" "$dir/project" --backend herdr --mode no-mistakes --yolo off "$@" 2>&1
 }
@@ -252,6 +252,59 @@ test_abort_keeps_the_lease_while_the_pane_is_present() {
   pass "an abort whose pane is still present keeps the lease and names it"
 }
 
+# abort_originless_spawn <id> <ahead|behind>: a polytoken spawn is refused on a
+# clean Treehouse pool slot with no origin that is off the project's local tip,
+# and Herdr closes its pane, so only the slot's own history says whether the
+# lease may go back. The fake treehouse only records a return.
+abort_originless_spawn() {
+  local id=$1 how=$2 dir slot tip git_id=(-c user.name=Test -c user.email=test@example.test)
+  dir=$(make_lease_case "$id" polytoken)
+  slot="$dir/pool/1/project"
+  mkdir -p "$dir/pool/1"
+  printf '{}\n' > "$dir/pool/treehouse-state.json"
+  rm -rf "$dir/project"
+  fm_git_worktree "$dir/project" "$slot" "slot-$id"
+  git -C "$dir/project" remote remove origin
+  git -C "$slot" checkout -q --detach
+  case "$how" in
+    ahead) git -C "$slot" "${git_id[@]}" commit -q --allow-empty -m unlanded ;;
+    behind) git -C "$dir/project" "${git_id[@]}" commit -q --allow-empty -m advance ;;
+  esac
+  tip=$(git -C "$slot" rev-parse HEAD)
+  : > "$dir/fake/session-lockable"
+  LEASE_OUT=$(LEASE_SLOT=$slot run_lease_spawn "$dir" "$id" --model zai/glm-5.3-flash --effort low)
+  LEASE_STATUS=$?
+  LEASE_DIR=$dir
+  [ "$LEASE_STATUS" -ne 0 ] || fail "spawn launched into an origin-less slot $how the project tip"$'\n'"$LEASE_OUT"
+  assert_contains "$LEASE_OUT" "not the project's local default branch tip" "the refusal did not name the base"
+  [ ! -e "$dir/home/state/$id.meta" ] || fail "refused spawn published task metadata"
+  [ -e "$dir/fake/pane-gone" ] || fail "the abort did not close its pane"$'\n'"$LEASE_OUT"
+  [ -z "$(git -C "$slot" status --porcelain --untracked-files=all)" ] || fail "fixture slot is not clean"
+  [ "$(git -C "$slot" rev-parse HEAD)" = "$tip" ] || fail "the abort moved the refused slot"
+}
+
+test_abort_keeps_a_lease_holding_an_unlanded_commit() {
+  local id=lease-unlanded claim
+  abort_originless_spawn "$id" ahead
+  claim="$LEASE_DIR/pool/1/.fm-slot-owner"
+  assert_no_grep 'return' "$LEASE_DIR/fake/treehouse-log" "the abort requested the return of a slot holding an unlanded commit"
+  assert_contains "$LEASE_OUT" "stays leased to $id" "the abort did not name the lease it keeps"
+  [ -f "$claim" ] || fail "the abort dropped the claim that says whose slot it is"
+  assert_grep "task=$id" "$claim" "the kept claim does not name the spawned task"
+  assert_grep "home=$LEASE_DIR/home" "$claim" "the kept claim does not name the spawning home"
+  pass "an abort whose pane is gone keeps the lease and claim of a clean slot holding an unlanded commit"
+}
+
+test_abort_returns_a_lease_that_only_lags() {
+  local id=lease-lagging
+  abort_originless_spawn "$id" behind
+  assert_grep "return --force $LEASE_DIR/pool/1/project" "$LEASE_DIR/fake/treehouse-log" \
+    "the abort kept a clean slot that only lags the project tip"
+  assert_not_contains "$LEASE_OUT" "stays leased" "the abort called a returned lease kept"
+  [ ! -e "$LEASE_DIR/pool/1/.fm-slot-owner" ] || fail "the abort left a claim on a returned slot"
+  pass "an abort whose pane is gone returns a clean slot that only lags, with its claim"
+}
+
 test_delayed_worktree_entry() {
   local id=lease-delayed-cd dir out status
   dir=$(make_lease_case "$id")
@@ -300,5 +353,7 @@ test_rolled_back_spawn_after_launch_names_the_lease_it_keeps
 test_abort_returns_a_clean_lease_once_the_pane_is_gone
 test_abort_keeps_a_dirty_lease_once_the_pane_is_gone
 test_abort_keeps_the_lease_while_the_pane_is_present
+test_abort_returns_a_lease_that_only_lags
+test_abort_keeps_a_lease_holding_an_unlanded_commit
 
 echo "# all fm-spawn-herdr-lease tests passed"
