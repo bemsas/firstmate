@@ -16,7 +16,8 @@
 #
 # Order of decisions for each line (every step may only ESCALATE, never answer):
 #   1. parse the line and synthesize a card (a recommendation, or none);
-#   2. captain holds or no recommendation -> escalate, no guessing;
+#   2. captain holds (from the key or explicit wording in the preamble or
+#      recommended action) or no recommendation -> escalate, no guessing;
 #   3. the guard rules below (the gaps the backtest found) -> escalate;
 #   4. judge.py --opinion-only (its own hard rules plus the second opinion);
 #      in `on` mode a missing or disagreeing second opinion escalates;
@@ -250,7 +251,7 @@ def guard_rules(synth):
 
 # ---- captain holds: the judge never answers one ---------------------------------
 
-CAPTAIN_CALL = re.compile(r'^(?:captain[- ](?:call|only|hold|held)|held for the captain)\b', re.I)
+CAPTAIN_CALL = re.compile(r'\b(?:captain[- ](?:call|only|hold|held)|held\s+for\s+the\s+captain)\b', re.I)
 
 
 def is_captain_hold(secondmate, key):
@@ -449,8 +450,12 @@ def ingest(secondmate, lines):
             continue
         keys = [i['parsed']['key'] for i in cluster if i['parsed']['key']]
         keys = list(dict.fromkeys(keys))
-        if any(CAPTAIN_CALL.match(i['parsed']['body']) for i in cluster) or any(
-                is_captain_hold(secondmate, k) for k in keys):
+        if any(
+            CAPTAIN_CALL.match(i['parsed']['body'])
+            or CAPTAIN_CALL.search(i['synth']['preamble'])
+            or CAPTAIN_CALL.search(i['synth']['selected'])
+            for i in cluster
+        ) or any(is_captain_hold(secondmate, k) for k in keys):
             verdicts = [held_verdict() for _ in cluster]
         else:
             verdicts = [judge_one(i['synth'], current == 'on', started) for i in cluster]
