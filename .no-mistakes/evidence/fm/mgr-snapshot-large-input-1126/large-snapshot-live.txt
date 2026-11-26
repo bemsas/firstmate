@@ -1,0 +1,7 @@
+Live command: FM_HOME=<disposable-home> bin/fm-fleet-snapshot.sh --json
+schema=fm-fleet-snapshot.v1
+task=large-ledger
+open_decisions=180
+first_key=decision-0
+last_key=decision-179
+first_row_fields=key,summary,verb
