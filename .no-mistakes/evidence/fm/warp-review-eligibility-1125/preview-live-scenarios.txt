@@ -1,0 +1,4 @@
+Live CLI: bin/fm-review-eligibility-preview.sh acme/widget
+newer ready report without exact head: PR 119 -> verify-fix; fix_evidence=None
+unreadable owner and scout status scoped: PR 111=unknown, PR 114=unknown, unrelated PR 112=owned, PR 110=verify-fix
+separate synthetic home redaction: JSON and text contain none of the five synthetic private markers or its local path; PR 112 owner=[{'present': True}], hold=None

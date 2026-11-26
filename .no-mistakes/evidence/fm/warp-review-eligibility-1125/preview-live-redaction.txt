@@ -1,0 +1,49 @@
+review eligibility preview: github.com/acme/widget observed 2026-11-26T19:17:05Z (5 shown, 5 open)
+
+https://github.com/acme/widget/pull/110  verify-fix
+  head: 5e796e48332af4142b10ca0f86e65d9bfdb05884
+  observed: 2026-11-26T19:17:05Z
+  verdicts: fix 244a6245ebf61744bd848028abbfb3617fb62cb9
+  fix evidence: none
+  owner: unknown
+  hold: unknown
+  reason: the head changed with no published fix evidence; verify the fix before re-review
+
+https://github.com/acme/widget/pull/111  unknown
+  head: 6216f8a75fd5bb3d5f22b6f9958cdede3fc086c2
+  observed: 2026-11-26T19:17:05Z
+  verdicts: fix b3629b7db0667e91f14748032501e816741f2027
+  fix evidence: unknown
+  owner: present
+  hold: unknown
+  reason: unreadable input: local evidence unavailable
+
+https://github.com/acme/widget/pull/112  owned
+  head: 601ca99d55f00a2e8e736676b606a4d31d374fdd
+  observed: 2026-11-26T19:17:05Z
+  verdicts: fix 57a6c668773726e7f6ad156cbe470f5c0c87b534
+  fix evidence: none
+  owner: present
+  hold: unknown
+  reason: a local task is active
+
+https://github.com/acme/widget/pull/114  unknown
+  head: ecb7937db58ec9dea0c47db88463d85e81143032
+  observed: 2026-11-26T19:17:05Z
+  verdicts: fix 0baaa856d6d56e7cf005bf95779513f233d84706
+  fix evidence: unknown
+  owner: present
+  hold: unknown
+  reason: unreadable input: local evidence unavailable
+
+https://github.com/acme/widget/pull/119  verify-fix
+  head: a2e33d344f272e100d4a8efeabc7ae8a60a8ba7a
+  observed: 2026-11-26T19:17:05Z
+  verdicts: fix c6fe26674fec130e2c8d8f67de3f2325e26f313b
+  fix evidence: none
+  owner: present
+  hold: unknown
+  reason: the head changed with no published fix evidence; verify the fix before re-review
+
+counts: owned 1, unknown 2, verify-fix 2
+Advice only, bound to the observed head and time. Other-home owner and hold evidence is unknown; the dispatch owner rechecks the live head, holds, owners, capacity, proof and model.
