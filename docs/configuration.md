@@ -2261,7 +2261,7 @@ Each row names the exact head and the time it was observed, recorded verdicts, w
 `fix-evidenced` means an eligible earlier verdict exists, the head changed, and the owning task reported that exact head ready; it is a candidate for re-review, not proof that the findings are fixed.
 `verify-fix` means the head changed without such a report, so check the fix before re-reviewing it.
 `reviewed-head`, `draft`, `held`, `owned`, and `review-dispatched` rows propose no new review.
-`unknown` means an input could not be read or joined, which includes a pull request with no recorded eligible verdict; `none` beside an input is reported only when every read of it succeeded.
+`unknown` means relevant evidence could not be read or joined, or the pull request has no recorded eligible verdict; owner, hold, and fix-evidence presence is shown as `unknown` when no matching local evidence is available.
 It reads task records, verdict journals, refute dispatch records, and held backlog tasks from the selected home only.
 Other-home owner and hold evidence stays unknown.
 Output omits task identifiers, local paths, hold details, and ready report text.
