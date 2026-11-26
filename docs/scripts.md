@@ -169,7 +169,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-check-unregister.sh` | Retire a custom watcher check and its trust binding by validated task id            |
 | `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
 | `fm-tool-update-check.sh` | Report watched tooling with an update available, and updates installed but left inert by PATH order |
-| `fm-merge-route.sh`      | Resolve which home owns a task's pull request before any merge, and hand a second mate's child PR to that mate once per head |
+| `fm-merge-route.sh`      | Resolve which home owns a task's pull request before any merge, hand a second mate's child PR to that mate, and let the receiving mate verify that delivery against its parent's records before it merges pinned to the verified head and base |
 | `fm-merge-on-validated.sh` | Opt-in, dry-run-first hook that merges a validated dev pull request through `fm-pr-merge.sh` once the standing dev-merge test holds |
 | `fm-review-verdict.sh` | Record a second-model merge/fix review for one exact pull request head |
 | `fm-startup-growth-check.sh` | Daily metadata-only growth check for startup memory and tracked startup/instruction surfaces |

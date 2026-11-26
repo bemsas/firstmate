@@ -14,7 +14,7 @@
 #
 # Usage:
 #   fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--update-branch]
-#     [--expected-head <full-sha>]
+#     [--expected-head <full-sha>] [--expected-base <branch>]
 #     [--allow-red <check>] [--allow-missing <check>] [--allow-no-pipeline]
 #     [-- <forge merge flags>]
 #   fm-pr-merge.sh -h | --help
@@ -67,6 +67,17 @@
 # supplied value on GitHub, GitLab, and Forgejo. A later preflight in this run
 # does not replace it with a newly read head. Omitting the flag keeps the
 # previous behavior: the live head read at verification is the matched value.
+# An optional --expected-base <branch> pins the target branch the caller
+# already verified, beside the head pin: every forge preflight (GitHub's
+# baseRefName, GitLab's target_branch, Forgejo's base.ref) must read exactly
+# that branch or the merge is refused, and when the flag is given the base is
+# read again immediately before the forge merge command, after the away-record
+# lock is taken, and a missing or different branch refuses there too. No forge
+# API matches the base atomically with the head the way --match-head-commit,
+# --sha, and head_commit_id match the head, so a retarget that lands between
+# that final read and the forge's own merge is not caught here; the window is
+# one forge read plus the merge call. Omitting the flag keeps the previous
+# behavior. bin/fm-merge-route.sh passes the base its handoff verified.
 # Reading that state needs gh and jq, and either one absent stops the merge before any
 # state is recorded. An attended --allow-red <check-name> may be passed once,
 # with the name as a separate argument; it waives only checks with that exact
@@ -228,7 +239,7 @@
 # explicit captain instruction and never skips the live green check, the
 # away-record read, or a captain hold.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--update-branch] [--expected-head <full-sha>] [--allow-red <check-name>] [--allow-missing <check-name>] [--allow-no-pipeline] [-- <extra forge merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--update-branch] [--expected-head <full-sha>] [--expected-base <branch>] [--allow-red <check-name>] [--allow-missing <check-name>] [--allow-no-pipeline] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
@@ -311,6 +322,8 @@ ALLOW_NO_PIPELINE=false
 ALLOW_RED=()
 ALLOW_MISSING=()
 EXPECTED_HEAD=
+EXPECTED_BASE=
+EXPECTED_BASE_GIVEN=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --attended-override)
@@ -373,6 +386,25 @@ while [ "$#" -gt 0 ]; do
       ;;
     --expected-head=*)
       echo "error: --expected-head requires a separate full commit sha argument" >&2
+      exit 2
+      ;;
+    --expected-base)
+      if [ "$EXPECTED_BASE_GIVEN" = true ]; then
+        echo "error: --expected-base may be specified only once" >&2
+        exit 2
+      fi
+      case "${2:-}" in
+        ''|-*|*[[:space:]]*)
+          echo "error: --expected-base requires a branch name" >&2
+          exit 2
+          ;;
+      esac
+      EXPECTED_BASE=$2
+      EXPECTED_BASE_GIVEN=true
+      shift 2
+      ;;
+    --expected-base=*)
+      echo "error: --expected-base requires a separate branch name argument" >&2
       exit 2
       ;;
     --) shift; break ;;
@@ -751,6 +783,41 @@ fi
 FM_PR_MERGE_HEAD=
 FM_PR_GITLAB_ASYNC_CONFIGURED=false
 FM_PR_EXPECTED_HEAD_REFUSAL=
+FM_PR_EXPECTED_BASE_REFUSAL=
+
+# note_expected_base <live-base>: with --expected-base, set the refusal line
+# when the live base is missing or differs; empty otherwise.
+note_expected_base() {
+  if [ "$EXPECTED_BASE_GIVEN" = true ] && [ "$1" != "$EXPECTED_BASE" ]; then
+    FM_PR_EXPECTED_BASE_REFUSAL="  - the live base is \"${1:-unreadable}\", not the expected base $EXPECTED_BASE"
+  else
+    FM_PR_EXPECTED_BASE_REFUSAL=
+  fi
+}
+
+# recheck_expected_base: with --expected-base, read the base once more right
+# before the forge merge command and refuse when it is missing or differs. The
+# forge cannot match the base atomically with the head, so a retarget between
+# this read and the merge itself remains possible (the header's
+# --expected-base paragraph).
+recheck_expected_base() {
+  local base=
+  [ "$EXPECTED_BASE_GIVEN" = true ] || return 0
+  case "$PROVIDER" in
+    github)
+      base=$(gh pr view "$URL" --json baseRefName 2>/dev/null | jq -r '.baseRefName // empty' 2>/dev/null) || base= ;;
+    gitlab)
+      base=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" -R "$PROJECT_URL" -F json 2>/dev/null |
+        jq -r '.target_branch // empty' 2>/dev/null) || base= ;;
+    forgejo)
+      base=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
+        "/repos/{owner}/{repo}/pulls/$PR_NUMBER" 2>/dev/null | jq -r '.base.ref // empty' 2>/dev/null) || base= ;;
+  esac
+  [ "$base" = "$EXPECTED_BASE" ] && return 0
+  printf 'error: refusing to merge %s\n  - the live base just before the merge is "%s", not the expected base %s\n' \
+    "$URL" "${base:-unreadable}" "$EXPECTED_BASE" >&2
+  return 1
+}
 
 note_expected_head() {
   if [ -n "$EXPECTED_HEAD" ] && [ "$1" != "$EXPECTED_HEAD" ]; then
@@ -764,7 +831,7 @@ gitlab_verify_mergeable() {
   local json fields line pipeline_waived
   local total=0 named=0 refusals=''
   local state='' detail='' conflicts='' discussions=''
-  local live_head='' pipeline_sha='' pipeline_status='' pipeline_absent='' async_configured=''
+  local live_head='' pipeline_sha='' pipeline_status='' pipeline_absent='' async_configured='' base=''
 
   # GITLAB_HOST is set to the same host the project URL already carries, so the
   # instance is taken from the parsed URL by both signals and never from the
@@ -788,7 +855,8 @@ gitlab_verify_mergeable() {
         "pipeline_sha=" + ((.head_pipeline.sha // "") | tostring),
         "pipeline_status=" + ((.head_pipeline.status // "") | tostring),
         "pipeline_absent=" + (if has("head_pipeline") and .head_pipeline == null then "true" else "false" end),
-        "async_configured=" + (if .merge_when_pipeline_succeeds == true or (.merge_after != null) then "true" else "false" end)
+        "async_configured=" + (if .merge_when_pipeline_succeeds == true or (.merge_after != null) then "true" else "false" end),
+        "base=" + ((.target_branch // "") | tostring)
       else
         error("merge request payload is not an object")
       end' 2>/dev/null); then
@@ -807,6 +875,7 @@ gitlab_verify_mergeable() {
       pipeline_status=*) pipeline_status=${line#pipeline_status=} ;;
       pipeline_absent=*) pipeline_absent=${line#pipeline_absent=} ;;
       async_configured=*) async_configured=${line#async_configured=} ;;
+      base=*) base=${line#base=} ;;
       *) continue ;;
     esac
     named=$((named + 1))
@@ -816,7 +885,7 @@ FIELDS
   # Every field named exactly once and no unnamed line: a value carrying a
   # newline would split into a line no name matches, so it is refused here
   # rather than silently truncated into a value a check could accept.
-  if [ "$named" -ne 9 ] || [ "$total" -ne 9 ]; then
+  if [ "$named" -ne 10 ] || [ "$total" -ne 10 ]; then
     echo "error: could not read the GitLab merge request state before merging" >&2
     return 1
   fi
@@ -863,6 +932,11 @@ FIELDS
     refusals="$refusals$FM_PR_EXPECTED_HEAD_REFUSAL
 "
   fi
+  note_expected_base "$base"
+  if [ -n "$FM_PR_EXPECTED_BASE_REFUSAL" ]; then
+    refusals="$refusals$FM_PR_EXPECTED_BASE_REFUSAL
+"
+  fi
 
   if [ -n "$refusals" ]; then
     printf 'error: refusing to merge %s\n' "$URL" >&2
@@ -894,7 +968,7 @@ FIELDS
 forgejo_verify_mergeable() {
   local pr_json status_json fields line
   local total=0 named=0 refusals=''
-  local state='' mergeable='' draft='' live_head='' ci_state='' page_state='' page_count='' page=1
+  local state='' mergeable='' draft='' live_head='' ci_state='' page_state='' page_count='' page=1 base=''
 
   if ! pr_json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
       "/repos/{owner}/{repo}/pulls/$PR_NUMBER" 2>/dev/null) || [ -z "$pr_json" ]; then
@@ -906,7 +980,8 @@ forgejo_verify_mergeable() {
         "state=" + ((.state // "") | tostring),
         "mergeable=" + (.mergeable | tostring),
         "draft=" + (.draft | tostring),
-        "head=" + ((.head.sha // "") | tostring)
+        "head=" + ((.head.sha // "") | tostring),
+        "base=" + ((.base.ref // "") | tostring)
       else
         error("pull request payload is not an object")
       end' 2>/dev/null); then
@@ -920,13 +995,14 @@ forgejo_verify_mergeable() {
       mergeable=*) mergeable=${line#mergeable=} ;;
       draft=*) draft=${line#draft=} ;;
       head=*) live_head=${line#head=} ;;
+      base=*) base=${line#base=} ;;
       *) continue ;;
     esac
     named=$((named + 1))
   done <<FIELDS
 $fields
 FIELDS
-  if [ "$named" -ne 4 ] || [ "$total" -ne 4 ]; then
+  if [ "$named" -ne 5 ] || [ "$total" -ne 5 ]; then
     echo "error: could not read the Forgejo pull request state before merging" >&2
     return 1
   fi
@@ -1003,6 +1079,11 @@ FIELDS
   note_expected_head "$live_head"
   if [ -n "$FM_PR_EXPECTED_HEAD_REFUSAL" ]; then
     refusals="$refusals$FM_PR_EXPECTED_HEAD_REFUSAL
+"
+  fi
+  note_expected_base "$base"
+  if [ -n "$FM_PR_EXPECTED_BASE_REFUSAL" ]; then
+    refusals="$refusals$FM_PR_EXPECTED_BASE_REFUSAL
 "
   fi
 
@@ -1387,6 +1468,12 @@ EOF
   if [ -n "$FM_PR_EXPECTED_HEAD_REFUSAL" ]; then
     FM_PR_GITHUB_OTHER_REFUSAL=true
     refusals="$refusals$FM_PR_EXPECTED_HEAD_REFUSAL
+"
+  fi
+  note_expected_base "$base"
+  if [ -n "$FM_PR_EXPECTED_BASE_REFUSAL" ]; then
+    FM_PR_GITHUB_OTHER_REFUSAL=true
+    refusals="$refusals$FM_PR_EXPECTED_BASE_REFUSAL
 "
   fi
 
@@ -2010,6 +2097,7 @@ case "$PROVIDER" in
       FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
         "$SCRIPT_DIR/fm-done-check.sh" assert "$ID" "$URL" "$FM_PR_MERGE_HEAD" >/dev/null || exit 1
     fi
+    recheck_expected_base || exit 1
     merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       --match-head-commit "$FM_PR_MERGE_HEAD" \
       "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1) || merge_status=$?
@@ -2068,6 +2156,7 @@ case "$PROVIDER" in
     if [ "$FM_PR_AWAY_POSTURE" = true ]; then
       gitlab_merge_args=(--auto-merge=false)
     fi
+    recheck_expected_base || exit 1
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
       --sha "$FM_PR_MERGE_HEAD" --yes "$@" "${gitlab_merge_args[@]+"${gitlab_merge_args[@]}"}" || merge_status=$?
     if [ "$merge_status" -ne 0 ]; then
@@ -2100,6 +2189,7 @@ case "$PROVIDER" in
     # against a real instance), matching --match-head-commit/--sha above. tea
     # exposes no such flag on its own merge subcommand, so the API is called
     # directly through "tea api" instead.
+    recheck_expected_base || exit 1
     merge_output=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
       -X POST "/repos/{owner}/{repo}/pulls/$PR_NUMBER/merge" \
       -f "Do=$forgejo_method" -f "head_commit_id=$FM_PR_MERGE_HEAD" 2>&1) || true
