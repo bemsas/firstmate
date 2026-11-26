@@ -2262,7 +2262,8 @@ Each row names the exact head and the time it was observed, recorded verdicts, w
 `verify-fix` means the head changed without such a report, so check the fix before re-reviewing it.
 `reviewed-head`, `draft`, `held`, `owned`, and `review-dispatched` rows propose no new review.
 `unknown` means relevant evidence could not be read or joined, or the pull request has no recorded eligible verdict; owner, hold, and fix-evidence presence is shown as `unknown` when no matching local evidence is available.
-It reads task records, verdict journals, refute dispatch records, and held backlog tasks from the selected home only.
+It reads task records, verdict journals, refute dispatch records, and held backlog tasks from the selected home only, and refuses state or data that resolve outside it.
+A held task applies when it is the owning task or its `--require-review` line names the pull request; a pull request address in a title, reason, link, or other body text is not a hold.
 Other-home owner and hold evidence stays unknown.
 Output omits task identifiers, local paths, hold details, and ready report text.
 Every row is advice, and the dispatch owner still rechecks the live head, holds, owners, capacity, proof, and model.

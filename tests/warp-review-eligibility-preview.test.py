@@ -31,6 +31,7 @@ REAL_TASKS = os.environ.get("FM_PREVIEW_TASKS_AXI") == "real"
 
 FAKE_GH = """#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$FM_FAKE_GH_LOG"
+printf '%s\\n' "${GH_HOST-}" >> "$FM_FAKE_GH_LOG.host"
 [ "${FM_FAKE_GH_RC:-0}" = 0 ] || exit "$FM_FAKE_GH_RC"
 expr=
 while [ "$#" -gt 0 ]; do
@@ -74,7 +75,7 @@ EXPECTED = {
     102: "reviewed-head",      # merge recorded for the observed head
     103: "reviewed-head",      # only a refute merge for the observed head
     104: "draft",
-    105: "held",               # hold names the pull request
+    105: "held",               # hold requires a review of the observed head
     106: "held",               # hold sits on the owning task
     107: "held",               # hold requires a review of an older head
     108: "owned",              # pr= owner still working
@@ -194,7 +195,7 @@ class PreviewTest(unittest.TestCase):
         self.verdict(101, sha(101), "fix")
         self.verdict(102, sha(102), "merge")
         self.verdict(103, sha(103), "merge", refute={"event": "x"})
-        self.hold("h105", f"Decide {url(105)}")
+        self.hold("h105", "Decide the review", review=(url(105), sha(105)))
         self.record("t106", f"pr={url(106)}", status=["done: ready"])
         self.hold("t106", "Decide the owning task")
         self.hold("h107", "Decide after review", review=(url(107), sha("old-107")))
@@ -209,13 +210,13 @@ class PreviewTest(unittest.TestCase):
         self.ticket(115, "scout115")
         self.verdict(116, sha("a-116"), "fix")
         self.verdict(116, sha("b-116"), "merge", home=self.mate)
-        self.hold("h117", f"Decide {url(117)}", home=self.mate)
+        self.hold("h117", "Decide elsewhere", review=(url(117), sha(117)), home=self.mate)
         self.pulls([self.node(number, draft=number == 104,
                               head_repo="fork/widget" if number == 118 else REPO) for number in EXPECTED])
         self.record("t118", "branch=fm/task+118", status=["working: other repository"])
         self.record("t119", f"pr={url(119)}", status=[
             self.ready(119, sha(119)), self.ready(119, sha("old-119"))])
-        self.hold("h120", f"Decide https://github.com/{REPO}/pull/1200")
+        self.hold("h120", "Decide another", review=(f"https://github.com/{REPO}/pull/1200", sha(120)))
 
     def run_preview(self, *args, code=0, **env):
         done = subprocess.run([PREVIEW, REPO, *args], env={**self.env, **env}, text=True,
@@ -342,6 +343,67 @@ class PreviewTest(unittest.TestCase):
         self.assertIsNone(rows[112]["holds"])
         self.assertEqual(rows[117]["status"], "verify-fix")
         self.assertIsNone(rows[117]["holds"])
+
+    def test_linked_status_cannot_borrow_another_homes_evidence(self):
+        self.seed()
+        self.record("local", f"pr={url(112)}")
+        self.record("foreign", f"pr={url(112)}", status=[self.ready(112, sha(112))], home=self.mate)
+        (self.home / "state" / "local.status").symlink_to(self.mate / "state" / "foreign.status")
+        row = self.rows("--pr", "112")[112]
+        self.assertEqual(row["status"], "unknown")
+        self.assertIsNone(row["fix_evidence"])
+
+    def test_state_and_data_outside_the_selected_home_are_refused_without_paths(self):
+        self.seed()
+        for override in ({"FM_STATE_OVERRIDE": str(self.mate / "state")},
+                         {"FM_DATA_OVERRIDE": str(self.mate / "data")},
+                         {"FM_DATA_OVERRIDE": str(self.tmp / "absent")},
+                         {"FM_STATE_OVERRIDE": str(self.tmp / "absent")}):
+            for flags in ((), ("--json",)):
+                done = self.run_preview(*flags, code=2, **override)
+                self.assertEqual(done.stdout, "")
+                self.assertNotIn(str(self.tmp), done.stderr)
+        (self.home / "data").rename(self.home / "data.own")
+        (self.home / "data").symlink_to(self.mate / "data")
+        self.assertNotIn(str(self.tmp), self.run_preview(code=2).stderr)
+
+    def test_pull_request_addresses_in_prose_are_not_holds(self):
+        self.seed()
+        self.hold("copied", f"Copied URL {url(112)}-unrelated")
+        self.hold("prose", f"This task is unrelated to {url(112)}")
+        row = self.rows("--pr", "112")[112]
+        self.assertEqual(row["status"], "verify-fix")
+        self.assertIsNone(row["holds"])
+
+    def test_forge_request_is_pinned_to_the_labelled_host(self):
+        self.seed()
+        self.rows("--pr", "112", GH_HOST="github.enterprise.test")
+        self.assertEqual((self.tmp / "gh.log.host").read_text().splitlines(), ["github.com"])
+
+    def test_missing_or_invalid_heads_leave_only_that_pull_request_unknown(self):
+        self.seed()
+        for invalid in (None, "not-a-head", 'a b,"c'):
+            nodes = [self.node(111), self.node(112)]
+            nodes[1]["headRefOid"] = invalid
+            self.pulls(nodes)
+            rows = self.rows()
+            self.assertEqual({n: r["status"] for n, r in rows.items()}, {111: "verify-fix", 112: "unknown"})
+            self.assertIsNone(rows[112]["head"])
+        self.pulls([self.node(112), self.node(114)])
+        for invalid in ("not-a-head", None):
+            (self.home / "state" / "scout114.refute.json").write_text(json.dumps(
+                {"candidate": {"pr": url(114), "head": invalid}, "reviewer": "scout114"}))
+            rows = self.rows()
+            self.assertEqual({n: r["status"] for n, r in rows.items()}, {112: "verify-fix", 114: "unknown"})
+
+    def test_unrelated_enterprise_receipt_does_not_block_a_sign_off(self):
+        self.verdict(1, sha(1), "merge")
+        with (self.home / "state" / "review-verdicts.jsonl").open("a") as stream:
+            stream.write(json.dumps({"pr": "https://github.enterprise.test/acme/widget/pull/1",
+                                     "head": sha(1), "verdict": "merge", "reviewer": "old"}) + "\n")
+        passing = subprocess.run([VERDICT, "passing", url(1), sha(1)], env=self.env,
+                                 text=True, capture_output=True)
+        self.assertEqual(passing.returncode, 0, passing.stderr)
 
     def test_selection_and_forge_failure(self):
         self.seed()

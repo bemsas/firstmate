@@ -18,19 +18,21 @@
 #   forge      bin/fm-review-capacity-lib.sh: target parsing, bounded gh-axi read,
 #              and local task record matching
 #   verdicts   bin/fm-review-verdict.sh history
-#   holds      bin/fm-tasks-axi.sh list --state held, then show <id> --full
+#   holds      bin/fm-tasks-axi.sh list --state held, then show <id> --full; a hold
+#              joins by its owning task or its required-review line, never prose
 #   owners     task records and status logs; fm_dod_candidate_fields in
 #              bin/fm-dod-lib.sh reads a ready report's exact head
 #   reviews    state/<scout>.refute.json dispatch records
-# They come only from this Firstmate home. Other-home owner and hold evidence is
-# unknown. FM_HOME, FM_STATE_OVERRIDE, and
-# FM_DATA_OVERRIDE select this home as usual; its state directory must exist.
+# They come only from the one home FM_HOME selects. Other-home owner and hold
+# evidence is unknown. Its state/ must exist, and state/ and data/ must resolve to
+# directories of that home, so FM_STATE_OVERRIDE and FM_DATA_OVERRIDE cannot point
+# elsewhere. A linked status log is unreadable. Error messages name no local path.
 #
 # bin/fm-review-eligibility-preview.py owns how a row is judged and printed.
 #
 # Exit: 0 report printed, 1 the forge could not be observed (a report still
-# prints, with the requested rows unknown), 2 invalid arguments or no state
-# directory.
+# prints, with the requested rows unknown), 2 invalid arguments, no state
+# directory, or state or data outside the selected home.
 # The single-quoted programs below use jq and GraphQL variables.
 # shellcheck disable=SC2016
 set -u
@@ -61,7 +63,7 @@ while [ "$#" -gt 0 ]; do
       if [ "$1" = --limit ]; then LIMIT=$2; else PRS+=("$2"); fi
       shift
       ;;
-    -*) die "unknown option $1" ;;
+    -*) die "unknown option" ;;
     *)
       [ -z "$TARGET" ] || die "name exactly one repository"
       TARGET=$1
@@ -72,7 +74,16 @@ done
 [ -n "$TARGET" ] || die "usage: fm-review-eligibility-preview.sh <[host/]owner/repo> [--limit <n>] [--pr <n>]... [--json]"
 case "$TARGET" in */*/*) ;; *) TARGET="github.com/$TARGET" ;; esac
 # Checked before any library is sourced: bin/fm-wake-lib.sh would create it.
-[ -d "$STATE" ] || die "state directory $STATE does not exist"
+[ -d "$STATE" ] || die "state directory does not exist"
+resolved() { (CDPATH='' cd -- "$1" 2>/dev/null && pwd -P); }
+HOME_REAL=$(resolved "$FM_HOME") || die "the selected home cannot be resolved"
+[ "$(resolved "$STATE")" = "$HOME_REAL/state" ] || die "state directory is outside the selected home"
+if [ -e "$DATA" ] || [ -L "$DATA" ]; then
+  [ "$(resolved "$DATA")" = "$HOME_REAL/data" ] || die "data directory is outside the selected home"
+else
+  [ "$DATA" = "$FM_HOME/data" ] || die "data directory is outside the selected home"
+fi
+STATE="$HOME_REAL/state" DATA="$HOME_REAL/data"
 for tool in jq python3; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
 done
@@ -96,7 +107,8 @@ done
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 
-fm_review_capacity_target "$FM_ROOT" "$TARGET" || die "$FM_REVIEW_TARGET_WHY"
+fm_review_capacity_target "$FM_ROOT" "$TARGET" ||
+  die "the repository is not a GitHub owner/repository on a host this home uses"
 HOST=$FM_REVIEW_TARGET_HOST OWNER=$FM_REVIEW_TARGET_OWNER REPO=$FM_REVIEW_TARGET_REPO
 WANT=$(printf '%s/%s/%s' "$HOST" "$OWNER" "$REPO" | tr '[:upper:]' '[:lower:]')
 
@@ -124,8 +136,11 @@ HEAD_BRANCH_PR=' '
 collect_forge() {
   local query jq_expr body entry num draft head hrepo base branch selected=' ' wanted p count=0
   query='query($owner:String!,$name:String!){repository(owner:$owner,name:$name){pullRequests(states:OPEN,first:'"$FM_REVIEW_CAPACITY_PAGE"',orderBy:{field:UPDATED_AT,direction:DESC}){totalCount nodes{number isDraft baseRefName headRefName headRefOid headRepository{nameWithOwner}}}}}'
-  jq_expr='.data.repository.pullRequests as $p | ([$p.nodes[] | "\(.number),\(if .isDraft then 1 else 0 end),\(.headRefOid),\((.headRepository.nameWithOwner // "") | ascii_downcase | @uri),\(.baseRefName | @uri),\(.headRefName | @uri)"] | "fm-review-preview total=\($p.totalCount) \(join(" "))")'
+  jq_expr='.data.repository.pullRequests as $p | ([$p.nodes[] | "\(.number),\(if .isDraft then 1 else 0 end),\(.headRefOid // "" | tostring | @uri),\((.headRepository.nameWithOwner // "") | ascii_downcase | @uri),\(.baseRefName | @uri),\(.headRefName | @uri)"] | "fm-review-preview total=\($p.totalCount) \(join(" "))")'
   OBSERVED_AT=$(date +%s)
+  # The shared query keeps an ambient GH_HOST for github.com; every row here is
+  # labelled with $HOST, so the request is pinned to it.
+  export GH_HOST="$HOST"
   if ! fm_review_capacity_query "$HOST" "$OWNER" "$REPO" "$query" "$jq_expr" \
     fm-review-preview "an open pull request list"; then
     FORGE_ERROR=$FM_REVIEW_QUERY_ERROR
@@ -196,7 +211,7 @@ collect_record() {  # <state> <meta>
   [ "$branch_match" -eq 1 ] || branch=''
   status="$state/$id.status"
   if [ -e "$status" ] || [ -L "$status" ]; then
-    if [ -f "$status" ] && [ -r "$status" ]; then
+    if [ -f "$status" ] && [ ! -L "$status" ] && [ -r "$status" ]; then
       scan=$(_fm_crew_status_event_scan < "$status") || :
       last=${scan##*$'\n'}
       [ -z "$last" ] || status_line_verb "$last" verb
@@ -228,7 +243,8 @@ collect_tickets() {  # <state>
     [ -e "$ticket" ] || [ -L "$ticket" ] || continue
     if [ ! -f "$ticket" ] || [ -L "$ticket" ] || ! row=$(jq -ce '
       {pr: .candidate.pr, head: .candidate.head, reviewer: .reviewer}
-      | if all(.[]; type == "string" and length > 0) then . else error("incomplete") end' "$ticket" 2>/dev/null); then
+      | if all(.pr, .reviewer; type == "string" and length > 0) then . else error("incomplete") end
+      | .head |= (if type == "string" then . else "" end)' "$ticket" 2>/dev/null); then
       unreadable reviews "review dispatch record $ticket cannot be read"
       continue
     fi
@@ -240,7 +256,7 @@ collect_tickets() {  # <state>
       verb=''
       status="$state/$reviewer.status"
       if [ -e "$status" ] || [ -L "$status" ]; then
-        if [ -f "$status" ] && [ -r "$status" ]; then
+        if [ -f "$status" ] && [ ! -L "$status" ] && [ -r "$status" ]; then
           scan=$(_fm_crew_status_event_scan < "$status") || :
           last=${scan##*$'\n'}
           [ -z "$last" ] || status_line_verb "$last" verb
@@ -321,4 +337,5 @@ collect() {
 FORMAT=()
 [ "$JSON" -eq 0 ] || FORMAT+=(--json)
 set -o pipefail
-collect | python3 -I "$SCRIPT_DIR/fm-review-eligibility-preview.py" ${FORMAT[@]+"${FORMAT[@]}"}
+# Collector diagnostics can name local paths, so none are shown.
+collect 2>/dev/null | python3 -I "$SCRIPT_DIR/fm-review-eligibility-preview.py" ${FORMAT[@]+"${FORMAT[@]}"}

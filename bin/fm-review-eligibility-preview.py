@@ -6,10 +6,10 @@ Usage: fm-review-eligibility-preview.py [--json] < facts.jsonl
 Reads one JSON object per line from stdin and writes only to stdout and stderr.
 This file owns each row's disposition; the first that applies wins:
 
-  unknown            the pull request was not observed
+  unknown            the pull request or its exact head was not observed
   draft              it is a draft
   reviewed-head      a verdict is already recorded for the observed head
-  held               a held task names it, or is its owner's task
+  held               a held task requires its review, or is its owner's task
   owned              an owner's last status event is neither done nor failed
   review-dispatched  a live refute scout was dispatched for the observed head
   unknown            an input could not be read, a refute dispatch for this head
@@ -30,6 +30,11 @@ import time
 NOTE = ("Advice only, bound to the observed head and time. Other-home owner and hold evidence is "
         "unknown; the dispatch owner rechecks the live head, holds, owners, capacity, proof and model.")
 FINISHED = ("done", "failed")
+HEAD = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+# The header bin/fm-captain-hold.sh writes at the start of a held task's body.
+# Anything else naming a pull request is prose, including derived task links.
+REQUIRED_REVIEW = re.compile(
+    r"Captain hold set: \S+\nCaptain hold review: (\S+) (?:[0-9a-f]{40}|[0-9a-f]{64})(?:\n|\Z)")
 
 
 def shown(show, field):
@@ -58,12 +63,12 @@ def owners_of(url, pr, records):
 
 
 def holds_of(url, owners, holds):
-    named = re.compile(re.escape(url) + r"(?![0-9])", re.I)
     tasks = {(owner["state"], owner["id"]) for owner in owners}
     found = []
     for hold in holds:
-        text = "\n".join(shown(hold["show"], field) for field in ("title", "hold_reason", "links", "body"))
-        if (hold["state"], hold["id"]) in tasks or named.search(text):
+        review = REQUIRED_REVIEW.match(shown(hold["show"], "body"))
+        required = bool(review) and review[1].lower() == url.lower()
+        if (hold["state"], hold["id"]) in tasks or required:
             found.append({"id": hold["id"], "state": hold["state"]})
     return found
 
@@ -91,7 +96,9 @@ def judge(url, pr, facts):
         reports = [report for report in owner["done"] if report["url"].lower() == url.lower()]
         if reports and reports[-1]["head"] == pr["head"]:
             evidence.append({"head": reports[-1]["head"]})
-    tickets = [row for row in facts["ticket"] if row["pr"].lower() == url.lower() and row["head"] == pr["head"]]
+    dispatched = [row for row in facts["ticket"] if row["pr"].lower() == url.lower()]
+    tickets = [row for row in dispatched if row["head"] == pr["head"]]
+    invalid_ticket = any(not HEAD.fullmatch(row["head"]) for row in dispatched)
     recorded = list(current.values()) or [row for row in refute_merges if row["head"] == pr["head"]]
     live = [row for row in tickets if row["live"]]
     owner_status_unreadable = any(owner["verb"] == "unreadable" for owner in owners)
@@ -100,7 +107,7 @@ def judge(url, pr, facts):
     relevant_unreadable = [row for row in facts["unreadable"]
                            if "prs" not in row or pr["number"] in row["prs"]]
     unreadable = ["local evidence unavailable"] if (
-        relevant_unreadable or owner_status_unreadable or ticket_status_unreadable) else []
+        relevant_unreadable or owner_status_unreadable or ticket_status_unreadable or invalid_ticket) else []
 
     if pr["draft"]:
         status, reason = "draft", "the pull request is a draft"
@@ -142,6 +149,12 @@ def judge(url, pr, facts):
     }
 
 
+def unobserved(why):
+    return {"status": "unknown", "reason": why, "head": None, "current_verdicts": [],
+            "prior_verdicts": [], "refute_merges": [], "fix_evidence": [], "owners": [],
+            "holds": [], "unreadable": [why]}
+
+
 def report(lines):
     facts = {kind: [] for kind in ("observation", "pr", "record", "ticket", "verdict", "hold", "unreadable")}
     for line in lines:
@@ -161,11 +174,10 @@ def report(lines):
         if pr is None:
             why = ("the forge could not be observed" if seen["error"]
                    else "not among the observed open pull requests (closed, merged, absent, or past one page)")
-            row = {"status": "unknown", "reason": why, "head": None, "current_verdicts": [],
-                   "prior_verdicts": [], "refute_merges": [], "fix_evidence": [], "owners": [],
-                   "holds": [], "unreadable": [why]}
+            row = unobserved(why)
         else:
-            row = judge(url, pr, facts)
+            row = judge(url, pr, facts) if HEAD.fullmatch(pr["head"]) else unobserved(
+                "the forge reported no valid head for this pull request")
         rows.append({"pr": url, "observed_at": observed, **row})
     return {"repository": repo, "observed_at": observed, "open_total": None if seen["error"] else seen["total"],
             "error": "forge could not be observed" if seen["error"] else None, "rows": rows, "note": NOTE}

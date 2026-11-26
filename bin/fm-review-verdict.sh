@@ -32,7 +32,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 FILE="$STATE/review-verdicts.jsonl"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
-# The one definition of a readable receipt and of which receipts are eligible.
+# What 'history' accepts as a readable receipt and marks eligible. 'passing' keeps
+# its own narrower check, so an unrelated historical row cannot block a sign-off.
 # shellcheck disable=SC2016 # jq variables, not shell expansions.
 RECEIPTS='
   def receipt:
@@ -79,9 +80,13 @@ if [ "${1:-}" = passing ]; then
     exit 2
   fi
   [ -d "$STATE" ] && [ ! -L "$STATE" ] && [ -f "$FILE" ] && [ ! -L "$FILE" ] || exit 1
-  fm_review_verdict_receipts_valid || exit 1
-  exec jq -Res --arg pr "$FM_PR_URL" --arg head "$3" "$RECEIPTS"'
-    [receipts[] | select(.pr == $pr and .head == $head and eligible)]
+  exec jq -Res --arg pr "$FM_PR_URL" --arg head "$3" '
+    def receipt:
+      if type == "object" and (.pr | type == "string") and (.head | type == "string")
+         and (.reviewer | type == "string") and (.verdict == "merge" or .verdict == "fix")
+      then . else error("invalid verdict receipt") end;
+    [split("\n")[] | select(length > 0) | fromjson | receipt
+     | select(.pr == $pr and .head == $head and (.verdict == "fix" or (has("refute") | not)))]
     | last | .verdict == "merge"
   ' "$FILE" >/dev/null 2>&1
 fi
