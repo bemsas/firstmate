@@ -4139,6 +4139,11 @@ watcher_cleanup() {
     echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
     cleanup_status=1
   fi
+  if [ "$owns_lock" -eq 1 ] && [ "${RECOVERY_DUE:-0}" -eq 1 ] \
+    && ! fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER" "$CLEANUP_LOCK_BOUND"; then
+    echo "watcher: undelivered recovery could not be reopened" >&2
+    cleanup_status=1
+  fi
   return "$cleanup_status"
 }
 trap watcher_cleanup EXIT
@@ -4277,6 +4282,20 @@ rerecord_device_shifted_pr_poll() {  # <id>
   return 0
 }
 
+# Lock-free peek; procevent_surface_queued makes the locked decision.
+procevent_unsurfaced() {
+  local key
+  [ -s "$FM_WAKE_QUEUE" ] || return 1
+  while IFS= read -r key; do
+    case "$key" in
+      procevent:*) [ -e "$(procevent_surfaced_marker "$key")" ] || return 0 ;;
+    esac
+  done < <(fm_wake_queued_keys_locked check)
+  return 1
+}
+
+# Sets RECOVERY_DUE=1 when this cycle owes a recovery wake. The marker is then
+# already announced, so a stop before the wake must reopen it (watcher_cleanup).
 resurface_after_downtime() {
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
@@ -4290,7 +4309,8 @@ resurface_after_downtime() {
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
     [ "$FM_RECOVERY_MARKER_QUEUED" = 1 ] || return 0
-    wake "check: rearm-resurface"
+    RECOVERY_DUE=1
+    return 0
   fi
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
@@ -4299,7 +4319,7 @@ resurface_after_downtime() {
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
   fi
-  wake "check: rearm-resurface"
+  RECOVERY_DUE=1
 }
 
 while :; do
@@ -4438,26 +4458,18 @@ while :; do
   if [ -d "$STATE/procevent" ]; then
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
   fi
-  # Then deliver any queued-but-unsurfaced result, including one a runner
-  # published while this watcher was between cycles.
-  procevent_surface_queued
-
+  # Process-event and recovery wakes can repeat every cycle, and wake() exits it,
+  # so decide whether one is owed here and deliver it only after the check sweep.
   # A process-event result carries richer adapter-owned wake context than the
   # generic recovery reason, so give that owner first refusal.
-  reconcile_overdue_pauses
-  resurface_after_downtime
-
-  # The existing poll loop also owns the bounded inactive-outcome cadence.
-  # This is mechanical and silent unless a durable terminal-outcome obligation
-  # was created, so quiet cycles never wake firstmate or consume model tokens.
-  inactive_out=
-  if inactive_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan 2>/dev/null); then
-    if [ -n "$inactive_out" ]; then
-      wake "check: inactive-outcome"
-    fi
+  RECOVERY_DUE=0
+  CHECK_YIELD=0
+  if procevent_unsurfaced; then
+    CHECK_YIELD=1
   else
-    triage_log "inactive-outcome reconciliation unavailable"
+    reconcile_overdue_pauses
+    resurface_after_downtime
+    CHECK_YIELD=$RECOVERY_DUE
   fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
@@ -4467,7 +4479,15 @@ while :; do
   # keeps producing signals - the slow poll (e.g. merge detection) would then
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
+  # When a competing wake is owed (CHECK_YIELD=1), a due sweep leaves its results
+  # to their durable queue rows and falls through to that wake. A first such sweep
+  # also leaves the lifecycle actions (PR polls, the PR register scan, the park
+  # tick) to the handling of that wake and records .check-yielded; while that
+  # marker exists the next sweep runs them too, so repeated competing wakes cannot
+  # starve them either.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
+    full_sweep=1
+    [ "$CHECK_YIELD" -eq 0 ] || [ -e "$STATE/.check-yielded" ] || full_sweep=0
     rejected_checks=
     check_outputs=
     check_queue_outputs=
@@ -4476,7 +4496,7 @@ while :; do
     # Record each PR a task reported but nobody recorded, so its merge poll
     # below runs in this same sweep (bin/fm-pr-check.sh owns the scan).
     pr_register_reason=
-    if [ -e "$CONFIG/pr-register-scan" ]; then
+    if [ "$full_sweep" -eq 1 ] && [ -e "$CONFIG/pr-register-scan" ]; then
       FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" run_check_capture "$SCRIPT_DIR/fm-pr-check.sh" scan || exit 1
       # The scan queued each notice itself, before marking it as sent; only a
       # scan cut at the check bound, the line run_check_capture writes, is queued here.
@@ -4500,6 +4520,7 @@ while :; do
         if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
           || { rerecord_device_shifted_pr_poll "$id" \
             && fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; }; then
+          [ "$full_sweep" -eq 1 ] || continue
           is_pr_poll=1
           provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
           url=$FM_PR_POLL_SNAPSHOT_URL
@@ -4714,11 +4735,37 @@ EOF
     # the outcomes of detached park, relaunch, and cleanup actions
     # (bin/fm-park.sh owns all of them, bounds the whole tick, and records its
     # wake before printing it, so the watcher only rings: park_ring above).
-    park_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
-      "$SCRIPT_DIR/fm-park.sh" tick 2>/dev/null) || true
-    [ -z "$park_out" ] || park_ring "$park_out"
+    if [ "$full_sweep" -eq 1 ]; then
+      park_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+        "$SCRIPT_DIR/fm-park.sh" tick 2>/dev/null) || true
+      rm -f "$STATE/.check-yielded"
+      [ "$CHECK_YIELD" -eq 1 ] || [ -z "$park_out" ] || park_ring "$park_out"
+    else
+      touch "$STATE/.check-yielded"
+    fi
     touch "$STATE/.last-check"
-    [ -z "$check_outputs" ] || wake "$check_outputs"
+    [ "$CHECK_YIELD" -eq 1 ] || [ -z "$check_outputs" ] || wake "$check_outputs"
+  fi
+
+  # Then deliver any queued-but-unsurfaced result, including one a runner
+  # published while this watcher was between cycles.
+  procevent_surface_queued
+  if [ "$RECOVERY_DUE" -eq 1 ]; then
+    RECOVERY_DUE=0
+    wake "check: rearm-resurface"
+  fi
+
+  # The existing poll loop also owns the bounded inactive-outcome cadence.
+  # This is mechanical and silent unless a durable terminal-outcome obligation
+  # was created, so quiet cycles never wake firstmate or consume model tokens.
+  inactive_out=
+  if inactive_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan 2>/dev/null); then
+    if [ -n "$inactive_out" ]; then
+      wake "check: inactive-outcome"
+    fi
+  else
+    triage_log "inactive-outcome reconciliation unavailable"
   fi
 
   # On the first changed signal, linger one grace period and re-scan before
