@@ -40,13 +40,19 @@
 #     FM_LANE_REFILL_RENOTIFY seconds (default 1800), so a lost wake recovers
 #     without a repeat every sweep.
 # Leaving away mode clears the file: an archived record authorizes nothing.
-# The file's first line, `#away <entered_epoch>`, binds it to the away record it
-# was observed under, so episodes from an earlier away window are discarded
-# rather than continued even when no scan ran between the two windows.
+# The file's first line, `#away <entered_epoch> <words-digest>`, binds it to the
+# away record and the away words it was observed under, so episodes from an
+# earlier away window, or from before the words were replaced, are discarded
+# rather than continued even when no scan ran in between.
 #
 # CUE. `cue <mate> <episode>` sends the one refill cue for an emitted episode
 # through bin/fm-send.sh --fire-and-forget, with a delivery id derived from the
-# episode id, so a retried send lands at most one record, and marks it sent.
+# episode id, and marks it sent. The cue's message is written once, before the
+# first send, to state/.lane-refill.pending/<delivery-id>, and every retry
+# resends exactly that message, so an attempt whose acknowledgment was lost and
+# its retry land at most one record (the inbox deduplicates by the whole body);
+# because the episode file is bound to the words, a retry after the words
+# changed is refused rather than resent with other words.
 # It refuses (exit 3) when no away record stands, the episode file is bound to
 # another away record than the current one, the episode is not the mate's
 # current emitted one, or its last fresh observation is more than
@@ -97,6 +103,20 @@ have_secondmate() {
   return 1
 }
 
+sha16() {  # stdin -> first 16 hex characters of its SHA-256
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -c1-16; else sha256sum | cut -c1-16; fi
+}
+
+# The away record and words the episodes are bound to: `<entered_epoch>\t<words
+# digest>`, or empty when no away record can be read.
+away_binding() {
+  local entered words
+  entered=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" field entered_epoch 2>/dev/null) || return 0
+  [ -n "$entered" ] || return 0
+  words=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" words 2>/dev/null; printf x) || return 0
+  printf '%s\t%s\n' "$entered" "$(printf '%s' "${words%x}" | sha16)"
+}
+
 lock_take() {
   fm_lock_acquire_wait_max "$LOCK" 30 || { echo "error: the lane-refill record is busy" >&2; exit 1; }
   trap 'fm_lock_release "$LOCK" || true' EXIT
@@ -128,7 +148,7 @@ cmd_scan() {
   now=$(date +%s)
   lock_take
   local next away_id
-  away_id=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" field entered_epoch 2>/dev/null) || away_id=
+  away_id=$(away_binding)
   [ "$(sed -n '1p' "$EPISODES" 2>/dev/null)" = "#away	$away_id" ] || rm -f "$EPISODES"
   next=$(mktemp "$STATE/.lane-refill.next.XXXXXX") || exit 1
   printf '#away\t%s\n' "$away_id" > "$next"
@@ -166,12 +186,12 @@ EOF
 }
 
 cmd_cue() {
-  local mate=${1:-} episode=${2:-} away_id line identity since last_observed emitted sent id words delivery target working message rc
+  local mate=${1:-} episode=${2:-} away_id line identity since last_observed emitted sent id words delivery pending target working message rc
   [ -n "$mate" ] && [ -n "$episode" ] || { usage >&2; exit 2; }
   case "$mate" in .* | *[!A-Za-z0-9._-]*) echo "error: invalid mate id" >&2; exit 2 ;; esac
   fm_afk_contract_away_present "$STATE" || { echo "sent: no (no away record stands; a refill cue is an away-mode action only)"; exit 3; }
   lock_take
-  away_id=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" field entered_epoch 2>/dev/null) || away_id=
+  away_id=$(away_binding)
   if [ -z "$away_id" ] || [ "$(sed -n '1p' "$EPISODES" 2>/dev/null)" != "#away${TAB}$away_id" ]; then
     echo "sent: no (episode $episode was not observed under the current away record)"
     exit 3
@@ -195,15 +215,21 @@ EOF
   fi
   target=${identity%%:*}
   working=${identity#*:}
-  words=$("$SCRIPT_DIR/fm-afk-contract.sh" words 2>/dev/null) || words=
-  if command -v shasum >/dev/null 2>&1; then
-    delivery=$(printf 'lane-refill|%s' "$episode" | shasum -a 256 | cut -c1-16)
-  else
-    delivery=$(printf 'lane-refill|%s' "$episode" | sha256sum | cut -c1-16)
-  fi
+  words=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" words 2>/dev/null) || words=
+  delivery=$(printf 'lane-refill|%s' "$episode" | sha16)
   message="Lane refill cue from the parent home's away session: your fresh home summary has shown $working genuinely working lanes against your lane target of $target continuously since $(iso "$since"), more than 15 minutes.
 Parent away words, verbatim: ${words:-(none recorded)}
 Refill only with queued work your own existing authorization, capacity, and health gates already admit; launch nothing they do not, and if nothing is dispatchable say why in your next relay. This cue authorizes nothing by itself."
+  pending="$STATE/.lane-refill.pending/$delivery"
+  if [ -f "$pending" ]; then
+    message=$(cat "$pending") || { echo "sent: no (the pending cue $delivery could not be read)"; exit 3; }
+  else
+    { mkdir -p "${pending%/*}" && printf '%s' "$message" > "$pending.tmp" && mv -f "$pending.tmp" "$pending"; } || {
+      rm -f "$pending.tmp"
+      echo "sent: no (the pending cue $delivery could not be recorded)"
+      exit 3
+    }
+  fi
   FM_HOME=$FM_HOME "${FM_LANE_REFILL_SEND_CMD:-$SCRIPT_DIR/fm-send.sh}" "$mate" --fire-and-forget "$delivery" "$message"
   rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -212,6 +238,7 @@ Refill only with queued work your own existing authorization, capacity, and heal
   fi
   awk -F "$TAB" -v OFS="$TAB" -v m="$mate" '$1 == m { $6 = 1 } { print }' "$EPISODES" > "$EPISODES.tmp" \
     && mv -f "$EPISODES.tmp" "$EPISODES"
+  rm -f "$pending"
   echo "sent: yes $delivery"
 }
 

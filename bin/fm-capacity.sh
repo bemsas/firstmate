@@ -37,7 +37,10 @@
 # target - a fixed cap's report, --json, --publish, and --admit, and the auto
 # budget - a record is proven STOPPED, and holds no lane, only when every one
 # of these holds: this host's process table was read (fm_lane_vitals_processes
-# in bin/fm-lane-vitals-lib.sh) and attributed without error, the record names
+# in bin/fm-lane-vitals-lib.sh) and attributed without error, every live
+# (non-zombie) process this user owns had a readable working directory (one
+# that could not be read might sit in any worktree, so its absence proves
+# nothing; another user's processes cannot be ours), the record names
 # a worktree that exists as a directory on this host, its spawn time is at
 # least FM_CAPACITY_PENDING_GRACE seconds old (default 900, so a launch still
 # on its way keeps its place and concurrent admissions cannot overshoot), and
@@ -839,6 +842,44 @@ capacity_stopped_keys() {
   ' "$2" "$1" | capacity_keep_present_worktrees
 }
 
+# capacity_attribution_complete <os> <process-file>: succeed only when every
+# row without a working directory belongs to another user or is a zombie, so
+# no process of ours is unaccounted for; an owner or state that cannot be read
+# counts as ours.
+capacity_attribution_complete() {
+  local os=$1 ps=$2 pids pid uid me line
+  pids=$(awk -F'\t' '$5 == "" { print $1 }' "$ps")
+  [ -n "$pids" ] || return 0
+  me=$(id -u 2>/dev/null) || return 1
+  if [ "$os" = Darwin ]; then
+    # shellcheck disable=SC2086 # one pid list argument per ps -p
+    line=$(ps -o pid=,uid=,state= -p "$(printf '%s' $pids | tr '\n' ',')" 2>/dev/null) || line=
+    for pid in $pids; do
+      uid=$(printf '%s\n' "$line" | awk -v p="$pid" '$1 == p { print $2 " " substr($3, 1, 1); exit }')
+      case "$uid" in
+        '') continue ;;  # gone since the table was read
+        "$me Z") ;;
+        "$me "*) return 1 ;;
+      esac
+    done
+    return 0
+  fi
+  local files=()
+  for pid in $pids; do
+    [ -e "$PROC_ROOT/$pid" ] || continue
+    [ -r "$PROC_ROOT/$pid/status" ] || return 1
+    files+=("$PROC_ROOT/$pid/status")
+  done
+  [ "${#files[@]}" -gt 0 ] || return 0
+  awk -v me="$me" '
+    function judge() { if (u == "" || st == "" || (u == me && st != "Z")) bad = 1 }
+    FNR == 1 { if (seen) judge(); seen = 1; u = ""; st = "" }
+    /^Uid:/ { u = $2 }
+    /^State:/ { st = $2 }
+    END { if (seen) judge(); exit bad }
+  ' "${files[@]}" 2>/dev/null
+}
+
 # Read "<key>\t<worktree>" lines and print each key whose worktree is an
 # existing directory on this host.
 capacity_keep_present_worktrees() {
@@ -882,6 +923,7 @@ capacity_set_aside_stopped() {
   if [ "$mode" = admit ]; then
     capacity_published_stopped "$stmp/lanes" > "$stmp/stopped"
   elif fm_lane_vitals_processes "$os" "$stmp/ps" 2>/dev/null &&
+    capacity_attribution_complete "$os" "$stmp/ps" &&
     fm_lane_vitals_attribute "$stmp/worktrees" "$stmp/ps" > "$stmp/attr" 2>/dev/null; then
     capacity_stopped_keys "$stmp/lanes" "$stmp/attr" > "$stmp/stopped"
   fi
@@ -1184,7 +1226,7 @@ auto_budget() {
   : > "$tmp/stopped"
   if [ "$mode" = admit ]; then
     capacity_published_stopped "$tmp/lanes" > "$tmp/stopped"
-  elif [ "$attr_ok" = true ] && [ "$attributed" = true ] && [ -s "$tmp/ps" ]; then
+  elif [ "$attr_ok" = true ] && [ "$attributed" = true ] && [ -s "$tmp/ps" ] && capacity_attribution_complete "$os" "$tmp/ps"; then
     capacity_stopped_keys "$tmp/lanes" "$tmp/attr" > "$tmp/stopped"
   fi
   stopped_keys=$(cat "$tmp/stopped")

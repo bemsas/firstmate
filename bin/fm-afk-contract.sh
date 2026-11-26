@@ -157,8 +157,13 @@
 #   - the lane target is --lane-target <n> when the captain named a number,
 #     else this home's authoritative configured target (bin/fm-capacity.sh's
 #     `target=`, from config/lane-capacity), else `-`: none is ever invented;
-#   - without --spend the cap is the larger of that target and the live count,
-#     and with no target it is `-`: the record adds no cap of its own, and the
+#   - a configured target of 0 is the captain's explicit zero-lane limit and is
+#     recorded as lane_target 0 with a spend cap of 0, which bin/fm-spawn.sh
+#     enforces by refusing every fresh ordinary spawn (work already under way
+#     continues); only this keep-full path records 0, and --spend 0 stays a
+#     usage error;
+#   - otherwise, without --spend the cap is the larger of that target and the
+#     live count, and with no target it is `-`: the record adds no cap of its own, and the
 #     live guarded admission in bin/fm-spawn.sh (project capacity, lane
 #     admission, the away dispatch rules) still decides every spawn;
 #   - an explicit --spend still wins and is recorded unchanged;
@@ -240,13 +245,14 @@ fm_afk_contract_entry_spend_default() {  # [state-dir]
 
 # This home's authoritative configured lane target for KEEP FULL: the
 # `target=` value bin/fm-capacity.sh reads from config/lane-capacity. Prints a
-# positive integer, `-` for no target, or `invalid` for an unreadable one.
+# non-negative integer (0 is an explicit zero-lane limit), `-` for no target,
+# or `invalid` for an unreadable one.
 fm_afk_contract_configured_lane_target() {
   local line target
   line=$(FM_STATE_OVERRIDE="$FM_AFK_CONTRACT_STATE" "$FM_AFK_CONTRACT_DIR/fm-capacity.sh" 2>/dev/null | sed -n '1p')
   target=$(printf '%s\n' "$line" | tr ' ' '\n' | sed -n 's/^target=//p')
   case "$target" in
-    '' | none | 0) printf -- '-\n' ;;
+    '' | none) printf -- '-\n' ;;
     *[!0-9]*) printf 'invalid\n' ;;
     *) printf '%s\n' "$((10#$target))" ;;
   esac
@@ -432,7 +438,7 @@ fm_afk_contract_read_words() {  # <path>
 # scalar fields and words block are present. Refuses rather than guessing at a
 # foreign schema. A version 1 record's clause and grant sections are ignored.
 fm_afk_contract_validate() {  # <path>
-  local path=$1 version entered entered_epoch expected reach announced spend keep_full words_header confirmed
+  local path=$1 version entered entered_epoch expected reach announced spend keep_full lane_target words_header confirmed
   [ -f "$path" ] || return 1
   version=$(fm_afk_contract_read_field "$path" version)
   case " $FM_AFK_CONTRACT_READABLE_VERSIONS " in
@@ -454,14 +460,17 @@ fm_afk_contract_validate() {  # <path>
   spend=$(fm_afk_contract_read_field "$path" spend_max_concurrent_workers)
   keep_full=$(fm_afk_contract_read_field "$path" keep_full)
   case "$keep_full" in ''|yes) ;; *) fm_afk_contract_log "record $path has an invalid keep_full"; return 1 ;; esac
+  lane_target=$(fm_afk_contract_read_field "$path" lane_target)
   case "$spend" in
     -) [ "$keep_full" = yes ] || { fm_afk_contract_log "record $path has no valid spend cap"; return 1; } ;;
-    ''|*[!0-9]*|0) fm_afk_contract_log "record $path has no valid spend cap"; return 1 ;;
+    0) [ "$keep_full" = yes ] && [ "$lane_target" = 0 ] || { fm_afk_contract_log "record $path has no valid spend cap"; return 1; } ;;
+    ''|*[!0-9]*) fm_afk_contract_log "record $path has no valid spend cap"; return 1 ;;
   esac
-  case "$(fm_afk_contract_read_field "$path" lane_target)" in
+  case "$lane_target" in
     '') [ -z "$keep_full" ] || { fm_afk_contract_log "record $path has keep_full without a lane_target"; return 1; } ;;
     -) ;;
-    *[!0-9]*|0) fm_afk_contract_log "record $path has an invalid lane_target"; return 1 ;;
+    *[!0-9]*) fm_afk_contract_log "record $path has an invalid lane_target"; return 1 ;;
+    0) [ "$keep_full" = yes ] || { fm_afk_contract_log "record $path has an invalid lane_target"; return 1; } ;;
   esac
   case "$(fm_afk_contract_read_field "$path" mode)" in
     ''|quiet) ;;
@@ -630,6 +639,8 @@ fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS, EXPECTED_RETURN, SPEN
   if [ "$KEEP_FULL" -eq 1 ]; then
     if [ "$LANE_TARGET" = - ]; then
       SPEND=-
+    elif [ "$LANE_TARGET" = 0 ]; then
+      SPEND=0
     else
       live=$(fm_afk_contract_live_ordinary_workers)
       SPEND=$LANE_TARGET

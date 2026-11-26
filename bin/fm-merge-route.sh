@@ -8,6 +8,9 @@
 #   fm-merge-route.sh <task-id> <pr-url> --send [--mandate <text>]
 #                                                 resolve, then hand a
 #                                                 mate-owned PR to its owner
+#   fm-merge-route.sh <task-id> <pr-url> --verify-head <sha> --verify-base <branch>
+#                                                 resolve, then confirm a
+#                                                 received handoff's facts
 #   fm-merge-route.sh -h | --help
 #
 # WHY. bin/fm-pr-merge.sh merges only a task this home records
@@ -24,9 +27,12 @@
 #                relays that child id with this URL: merge here through
 #                bin/fm-pr-merge.sh exactly as before.
 #   <mate-id>    no ordinary record here, and exactly one registered second
-#                mate (state/<mate>.meta with kind=secondmate) has a status
-#                line naming `child <id>` together with this exact canonical
-#                URL as a whole field (bare, or as `pr=<url>`): hand off.
+#                mate (state/<mate>.meta with kind=secondmate) has a relay
+#                line whose subject is `child <id>` and whose structured PR
+#                evidence is this exact canonical URL (bin/fm-pr-progress.sh
+#                owns that grammar: `PR ready: <url>`, `done: PR <url>`, or a
+#                `pr=<url>` field); a child or URL merely cited in a note
+#                proves nothing: hand off.
 #   missing      neither: hold; nothing here proves who owns the PR.
 #   conflicting  more than one owner claims it (a record here and a relay, or
 #                two mates' relays), the id names a second mate itself, or the
@@ -68,19 +74,28 @@
 # handoff without a mandate authorizes nothing. It asks the mate to merge only
 # through its own guarded merge pinned to that head, under its own authority
 # and holds, and grants nothing: no waiver, force, or bypass rides on it.
-# Deduplication: state/.merge-handoffs holds one tab-separated line per
-# confirmed send, `<epoch> <mate> <url> <head> <delivery-id>`, written under
-# state/.merge-handoffs.lock. A request whose mate, URL, and head are already
-# recorded prints `sent: already <epoch>` and sends nothing, so a replayed wake
-# never repeats a handoff; a new head is a new handoff. The send uses
-# fm-send's --fire-and-forget with a delivery id derived from mate, URL, and
-# head, so an unconfirmed send retried by re-running this command lands at most
-# one record. The first message built for a delivery id is kept in
-# state/.merge-handoffs.pending/<delivery-id> until its send is confirmed, and
-# every retry resends that exact message, even when the relay evidence or
-# mandate changed meanwhile, because the inbox deduplicates by the whole body;
-# a changed mandate for the same head is not a new handoff. Exit 0 after a confirmed or already-recorded send, the send's own
-# nonzero status when fm-send could not confirm delivery.
+# Deduplication: the delivery id is derived from the mate, URL, head, live
+# base, production classification, and mandate, so a handoff is bound to the
+# facts and authority it was built from. state/.merge-handoffs holds one
+# tab-separated line per confirmed send, `<epoch> <mate> <url> <head>
+# <delivery-id>`, written under state/.merge-handoffs.lock; a request whose
+# delivery id is already recorded prints `sent: already <epoch>` and sends
+# nothing, so a replayed wake never repeats a handoff. The message built for a
+# delivery id is kept in state/.merge-handoffs.pending/<delivery-id> until its
+# send is confirmed, and a retry with the same facts resends that exact
+# message, because the inbox deduplicates by the whole body; a retry whose
+# base, production classification, or mandate changed is a different delivery
+# id, never the old body resent: the stale pending message for that mate, URL,
+# and head is discarded (printed as `superseded:`), and the new facts are
+# handed off. A superseded message that did land is void at the receiver.
+# The message tells the mate to run this script with --verify-head and
+# --verify-base in its own home before acting: that reads the live head and
+# base again, classifies production against the mate's own deployment map,
+# and prints `verified: yes` only when the head and base still match, else
+# `verified: no` with exit 3, so a queued handoff whose base or head moved
+# fails closed. It also pins the mate's guarded merge to the head. Exit 0
+# after a confirmed or already-recorded send, the send's own nonzero status
+# when fm-send could not confirm delivery.
 #
 # Test seam: FM_MERGE_ROUTE_SEND_CMD replaces bin/fm-send.sh as the send
 # command (called with the same arguments), so fixtures never steer a live
@@ -111,15 +126,27 @@ RAW_URL=$2
 shift 2
 SEND=0
 MANDATE=
+VERIFY_HEAD=
+VERIFY_BASE=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --send) SEND=1; shift ;;
+    --verify-head)
+      [ -n "${2:-}" ] || { echo "error: --verify-head requires a commit sha" >&2; exit 2; }
+      VERIFY_HEAD=$2; shift 2 ;;
+    --verify-base)
+      [ -n "${2:-}" ] || { echo "error: --verify-base requires a branch" >&2; exit 2; }
+      VERIFY_BASE=$2; shift 2 ;;
     --mandate)
       [ -n "${2:-}" ] || { echo "error: --mandate requires text" >&2; exit 2; }
       MANDATE=$2; shift 2 ;;
     *) echo "error: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+if { [ -n "$VERIFY_HEAD" ] || [ -n "$VERIFY_BASE" ]; } && { [ -z "$VERIFY_HEAD" ] || [ -z "$VERIFY_BASE" ] || [ "$SEND" -eq 1 ]; }; then
+  echo "error: --verify-head and --verify-base go together and never with --send" >&2
+  exit 2
+fi
 if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
   echo "error: invalid merge route request" >&2
   exit 2
@@ -149,15 +176,8 @@ for mate_meta in "$STATE"/*.meta; do
   mate=$(basename "$mate_meta" .meta)
   status="$STATE/$mate.status"
   [ -f "$status" ] || continue
-  line=$(awk -v id="$ID" -v url="$URL" '
-    {
-      child = 0; hit = 0
-      for (i = 1; i < NF; i++) if ($i == "child" && $(i + 1) == id) child = 1
-      for (i = 1; i <= NF; i++) if ($i == url || $i == "pr=" url) hit = 1
-      if (child && hit) last = $0
-    }
-    END { if (last != "") print last }
-  ' "$status" 2>/dev/null)
+  line=$("$SCRIPT_DIR/fm-pr-progress.sh" evidence "$status" 2>/dev/null |
+    awk -F '\t' -v id="$ID" -v url="$URL" '$2 == id && $3 == url { last = $4 } END { if (last != "") print last }')
   [ -n "$line" ] || continue
   case "$mate" in main|missing|conflicting) RESERVED_MATE=$mate ;; esac
   owners="${owners:+$owners
@@ -254,6 +274,16 @@ printf 'owner: %s\npr: %s\nstate: %s\ndraft: %s\nhead: %s\nbase: %s\nproject: %s
 [ "$ROUTE" != handoff ] || printf 'evidence: %s\n' "$EVIDENCE"
 printf 'route: %s\nreason: %s\n' "$ROUTE" "$REASON"
 
+if [ -n "$VERIFY_HEAD" ]; then
+  if [ "$PR_STATE" != OPEN ] || [ "$HEAD" != "$VERIFY_HEAD" ] || [ "$BASE" != "$VERIFY_BASE" ]; then
+    echo "verified: no (the pull request is $PR_STATE at head $HEAD on base $BASE, not open at head $VERIFY_HEAD on base $VERIFY_BASE; the handoff is void - hold and relay why)"
+    exit 3
+  fi
+  echo "verified: yes (open at head $HEAD on base $BASE; production by this home's deployment map: $PRODUCTION)"
+  [ "$ROUTE" != hold ] || exit 3
+  exit 0
+fi
+
 if [ "$ROUTE" = hold ]; then
   exit 3
 fi
@@ -287,16 +317,18 @@ fm_lock_acquire_wait_max "$LEDGER_LOCK" 30 || {
 }
 trap 'fm_lock_release "$LEDGER_LOCK" || true' EXIT
 TAB=$(printf '\t')
-prior=$(awk -F "$TAB" -v m="$OWNER" -v u="$URL" -v h="$HEAD" '$2 == m && $3 == u && $4 == h { print $1; exit }' "$LEDGER" 2>/dev/null)
+hash_text="merge-handoff|$OWNER|$URL|$HEAD|$BASE|$PRODUCTION|$MANDATE"
+if command -v shasum >/dev/null 2>&1; then
+  DELIVERY=$(printf '%s' "$hash_text" | shasum -a 256 | cut -c1-16)
+  SLOT=$(printf 'merge-handoff-slot|%s|%s|%s' "$OWNER" "$URL" "$HEAD" | shasum -a 256 | cut -c1-16)
+else
+  DELIVERY=$(printf '%s' "$hash_text" | sha256sum | cut -c1-16)
+  SLOT=$(printf 'merge-handoff-slot|%s|%s|%s' "$OWNER" "$URL" "$HEAD" | sha256sum | cut -c1-16)
+fi
+prior=$(awk -F "$TAB" -v d="$DELIVERY" '$5 == d { print $1; exit }' "$LEDGER" 2>/dev/null)
 if [ -n "$prior" ]; then
   echo "sent: already $prior"
   exit 0
-fi
-hash_text="merge-handoff|$OWNER|$URL|$HEAD"
-if command -v shasum >/dev/null 2>&1; then
-  DELIVERY=$(printf '%s' "$hash_text" | shasum -a 256 | cut -c1-16)
-else
-  DELIVERY=$(printf '%s' "$hash_text" | sha256sum | cut -c1-16)
 fi
 MESSAGE="Merge handoff from the parent home: child task $ID is yours, so the parent will not merge it.
 PR: $URL
@@ -305,12 +337,21 @@ Base: $BASE
 Production (parent registry, by base): $PRODUCTION
 Scope evidence (your relay line): $EVIDENCE
 Parent mandate: $MANDATE
+Before acting, run bin/fm-merge-route.sh $ID $URL --verify-head $HEAD --verify-base $BASE in your home; act only on \`verified: yes\`, and hold if its production line differs from the parent's above. If anything moved, this handoff is void: hold and relay why.
 Merge it only through your own bin/fm-pr-merge.sh $ID $URL --expected-head $HEAD, under your own merge authority, checks, and holds; if they do not cover it, hold and relay why. This handoff waives no check, forces nothing, and authorizes nothing your own rules do not."
-PENDING="$STATE/.merge-handoffs.pending/$DELIVERY"
+PENDING_DIR="$STATE/.merge-handoffs.pending"
+PENDING="$PENDING_DIR/$DELIVERY"
+SLOT_FILE="$PENDING_DIR/slot-$SLOT"
+stale=$(cat "$SLOT_FILE" 2>/dev/null || true)
+if [ -n "$stale" ] && [ "$stale" != "$DELIVERY" ]; then
+  rm -f "$PENDING_DIR/$stale"
+  echo "superseded: unconfirmed handoff $stale for this head was built from other facts or another mandate; it is not resent, and if it landed the mate's verification voids it"
+fi
 if [ -f "$PENDING" ]; then
   MESSAGE=$(cat "$PENDING") || { echo "sent: no (the pending handoff $DELIVERY could not be read)"; exit 3; }
 else
-  mkdir -p "${PENDING%/*}" && printf '%s' "$MESSAGE" > "$PENDING.tmp" && mv -f "$PENDING.tmp" "$PENDING" || {
+  { mkdir -p "$PENDING_DIR" && printf '%s' "$MESSAGE" > "$PENDING.tmp" && mv -f "$PENDING.tmp" "$PENDING" &&
+    printf '%s\n' "$DELIVERY" > "$SLOT_FILE"; } || {
     rm -f "$PENDING.tmp"
     echo "sent: no (the pending handoff $DELIVERY could not be recorded)"
     exit 3
@@ -324,5 +365,5 @@ if [ "$rc" -ne 0 ]; then
   exit "$rc"
 fi
 printf '%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "$OWNER" "$URL" "$HEAD" "$DELIVERY" >> "$LEDGER"
-rm -f "$PENDING"
+rm -f "$PENDING" "$SLOT_FILE"
 echo "sent: yes $DELIVERY"

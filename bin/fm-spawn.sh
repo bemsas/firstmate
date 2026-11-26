@@ -2318,8 +2318,10 @@ spawn_refuse_if_away_spend_cap() {
   FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1 || return 0
   [ "$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" mode 2>/dev/null)" = away ] || return 0
   cap=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" field spend_max_concurrent_workers 2>/dev/null || true)
+  # A validated record carries 0 only for a keep-full window under a
+  # configured zero-lane limit, which admits no fresh ordinary spawn.
   case "$cap" in
-  '' | *[!0-9]* | 0) return 0 ;;
+  '' | *[!0-9]*) return 0 ;;
   esac
   live=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" live-workers 2>/dev/null || true)
   case "$live" in

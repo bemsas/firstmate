@@ -7,11 +7,14 @@
 #   fm-pr-progress.sh count [--since <epoch>] [--json]
 #   fm-pr-progress.sh scan [--counts-file <fm-lane-count.v1 json>]
 #   fm-pr-progress.sh cue <home> <episode-id>
+#   fm-pr-progress.sh evidence <status-file>...
 #   fm-pr-progress.sh -h | --help
 #
 # PR CREATION EVIDENCE (`count`). No forge is polled. A pull request's creation
 # time is the earliest `[at=<epoch>]` status line that names its URL (GitHub
-# /pull/<n>, GitLab /-/merge_requests/<n>, Forgejo /pulls/<n>):
+# /pull/<n>, GitLab /-/merge_requests/<n>, Forgejo /pulls/<n>) in one of the
+# STRUCTURED PR EVIDENCE forms below; a URL cited in free prose is not
+# evidence that a pull request was opened:
 #   self       every ordinary task status log in this home (state/<id>.status
 #              whose state/<id>.meta kind is not secondmate);
 #   <mate-id>  the second mate's relay log in this home (state/<mate>.status),
@@ -88,22 +91,58 @@ iso() { date -u -d "@$1" +%Y-%m-%dT%H:%MZ 2>/dev/null || date -u -r "$1" +%Y-%m-
 
 kind_of() { sed -n 's/^kind=//p' "$1" 2>/dev/null | tail -1; }
 
-# Earliest stamped appearance of each PR URL across <files...>, one
-# "<epoch>\t<url>" line each.
-first_seen() {
-  awk '
+# STRUCTURED PR EVIDENCE (`evidence <status-file>...`; this script is the one
+# owner of the grammar, which bin/fm-merge-route.sh also reads). A status line
+# `<state> [<tag>]...: <body>` names a pull request only through one of these
+# structured forms, never through a URL in free prose:
+#   child <id> PR ready: <url>        a relayed PR-ready line (subject <id>)
+#   child <id> done: PR <url> ...     a relayed done line (subject <id>)
+#   done: PR <url> ...                a task's own done line (no subject)
+#   pr=<url>                          a structured field on any line; its
+#                                     subject is the line's `child <id>`, if any
+# Each match prints `<epoch|-> <subject|-> <url> <line>`, tab-separated, where
+# the epoch is the line's [at=] stamp. The URL must be a whole field.
+evidence() {
+  awk -v OFS='\t' '
+    function isurl(u) { return u ~ /^https:\/\/[A-Za-z0-9.-]+\/[^ \t]+\/(pull|pulls|-\/merge_requests)\/[0-9]+$/ }
+    function emit(u) { if (isurl(u) && !(u in done_url)) { done_url[u] = 1; print at, subject, u, line } }
+    function pr_note(text,   t) { split(text, t, " "); if (t[1] == "PR") emit(t[2]) }
     {
-      if (!match($0, /\[at=[0-9]+\]/)) next
-      at = substr($0, RSTART + 4, RLENGTH - 5) + 0
       line = $0
-      while (match(line, /https:\/\/[A-Za-z0-9.-]+\/[^ \t]+\/(pull|pulls|-\/merge_requests)\/[0-9]+/)) {
-        url = substr(line, RSTART, RLENGTH)
-        line = substr(line, RSTART + RLENGTH)
-        if (!(url in seen) || at < seen[url]) seen[url] = at
+      if (!match(line, /^[a-z][a-z-]*( \[[^]]*\])*: /)) next
+      prefix = substr(line, 1, RLENGTH)
+      body = substr(line, RLENGTH + 1)
+      state = prefix
+      sub(/[ :].*/, "", state)
+      at = "-"
+      if (match(prefix, /\[at=[0-9]+\]/)) at = substr(prefix, RSTART + 4, RLENGTH - 5)
+      split("", done_url)
+      subject = "-"
+      n = split(body, w, " ")
+      if (w[1] == "child" && n >= 3) {
+        subject = w[2]
+        rest = substr(body, length("child " w[2] " ") + 1)
+        if (substr(rest, 1, 10) == "PR ready: ") {
+          split(substr(rest, 11), t, " ")
+          emit(t[1])
+        } else if (match(rest, /^[a-z][a-z-]*: /)) {
+          if (substr(rest, 1, RLENGTH - 2) == "done") pr_note(substr(rest, RLENGTH + 1))
+        }
+      } else if (state == "done") {
+        pr_note(body)
       }
+      for (i = 1; i <= n; i++) if (substr(w[i], 1, 3) == "pr=") emit(substr(w[i], 4))
     }
-    END { for (u in seen) print seen[u] "\t" u }
   ' "$@" 2>/dev/null
+}
+
+# Earliest stamped structured appearance of each PR URL across <files...>,
+# one "<epoch>\t<url>" line each.
+first_seen() {
+  evidence "$@" | awk -F '\t' -v OFS='\t' '
+    $1 != "-" { at = $1 + 0; if (!($3 in seen) || at < seen[$3]) seen[$3] = at }
+    END { for (u in seen) print seen[u], u }
+  '
 }
 
 # The earliest first-seen time of each PR for one home, from its live logs
@@ -327,6 +366,7 @@ Do not exit, destroy, or reshuffle any worker for this, and keep every quality g
 
 case "${1:-}" in
   count) shift; cmd_count "$@" ;;
+  evidence) shift; [ "$#" -gt 0 ] || { usage >&2; exit 2; }; evidence "$@" ;;
   scan) shift; cmd_scan "$@" ;;
   cue) shift; cmd_cue "$@" ;;
   -h | --help) usage ;;
