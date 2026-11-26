@@ -237,7 +237,9 @@ if [ -z "$doc" ]; then
 if [ -n "$SNAPSHOT_FILE" ]; then
   snapshot=$(cat "$SNAPSHOT_FILE" 2>/dev/null) || { echo "error: cannot read $SNAPSHOT_FILE" >&2; exit 1; }
 else
-  snapshot=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json 2>/dev/null) \
+  # Second mates count from their structured summaries, never from their own
+  # task row, so the snapshot skips reading their panes.
+  snapshot=$(FM_HOME="$FM_HOME" FM_SNAPSHOT_SECONDMATE_LIVE_STATE=skip "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json 2>/dev/null) \
     || { echo "error: the fleet snapshot could not be read" >&2; exit 1; }
 fi
 printf '%s' "$snapshot" | jq -e '.schema == "fm-fleet-snapshot.v1"' >/dev/null 2>&1 \

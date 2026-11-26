@@ -55,7 +55,12 @@
 #     Local current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately. Remote secondmate rows use
 #     an explicit unknown value because their endpoint liveness belongs to
-#     supervision rather than this snapshot path.
+#     supervision rather than this snapshot path. With
+#     FM_SNAPSHOT_SECONDMATE_LIVE_STATE=skip, a caller that never reads a second
+#     mate's own row (bin/fm-lane-count.sh, run from the watcher's sweep) gets
+#     local secondmate rows the same explicit unknown state and an unknown
+#     agent_alive, and secondmate_current terminal_evidence is not collected,
+#     so no second mate's pane is read for it.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state. age_seconds is null when the emission time is unknown;
 #     fm-classify-lib.sh owns the optional emission-time field, and only the
@@ -735,6 +740,10 @@ prefetch_task_observations() {  # <meta> <id>
 
   if [ -n "$remote_host" ]; then
     jq -n '{state:"unknown",source:"none",detail:"remote endpoint liveness not collected by fleet snapshot",raw:""}' \
+      > "$current_file" || current_rc=1
+    agent_alive=unknown
+  elif [ "$kind" = secondmate ] && [ "${FM_SNAPSHOT_SECONDMATE_LIVE_STATE:-}" = skip ]; then
+    jq -n '{state:"unknown",source:"none",detail:"second mate live state not collected for this caller",raw:""}' \
       > "$current_file" || current_rc=1
     agent_alive=unknown
   elif [ "$generation_current" = 1 ]; then
@@ -1755,6 +1764,11 @@ terminal_evidence_json() {  # <parent-task-json> <event-note> <evidence-contradi
   if [ -n "$remote_host" ]; then
     jq -n --arg observed "$SNAPSHOT_NOW" --arg reason "remote terminal evidence is not collected by the primary" \
       '{provenance:"remote-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:$reason,lines:0,bytes:0,event_note_seen:false,contradiction:false}'
+    return 0
+  fi
+  if [ "${FM_SNAPSHOT_SECONDMATE_LIVE_STATE:-}" = skip ]; then
+    jq -n --arg observed "$SNAPSHOT_NOW" --arg reason "second mate live state not collected for this caller" \
+      '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:$reason,lines:0,bytes:0,event_note_seen:false,contradiction:false}'
     return 0
   fi
   expected="fm-$id"
