@@ -26,9 +26,8 @@ The declared value must be a boolean; anything else is an actionable configurati
 
 ## Launch login and the spawn gate
 
-Every launch and relaunch rereads the selected login's quota and refuses only on current exhaustion, as [`docs/configuration.md`](../../../docs/configuration.md#launch-quota-gate) describes.
-Never carry an earlier refusal, snapshot, or account figure across a login change, a pause, or a recovery: read again or let the spawn gate read.
-A stale or missing reading is disclosed uncertainty, never a reason to hold a launch.
+The [launch quota gate](../../../docs/configuration.md#launch-quota-gate) owns fresh login selection and launch refusal behavior.
+When resuming after a pause or recovery, never carry an earlier quota result across a login change; let the spawn gate read again.
 
 ## Worker-side quota helper
 
