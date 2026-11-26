@@ -29,8 +29,10 @@
 #                URL as a whole field (bare, or as `pr=<url>`): hand off.
 #   missing      neither: hold; nothing here proves who owns the PR.
 #   conflicting  more than one owner claims it (a record here and a relay, or
-#                two mates' relays), or the id names a second mate itself:
-#                hold.
+#                two mates' relays), the id names a second mate itself, or the
+#                relaying mate's id is itself the owner word main, missing, or
+#                conflicting, which could not be told apart from the owner
+#                state: hold.
 # The id and URL must pass bin/fm-pr-lib.sh's task-id and canonical-URL
 # validation; anything else is a usage error (exit 2).
 #
@@ -127,6 +129,7 @@ meta_field() {  # <meta> <key>
 owners=
 EVIDENCE=
 SELF_MATE=0
+RESERVED_MATE=
 main_meta="$STATE/$ID.meta"
 if [ -f "$main_meta" ] && [ ! -L "$main_meta" ]; then
   if [ "$(meta_field "$main_meta" kind)" = secondmate ]; then
@@ -151,6 +154,7 @@ for mate_meta in "$STATE"/*.meta; do
     END { if (last != "") print last }
   ' "$status" 2>/dev/null)
   [ -n "$line" ] || continue
+  case "$mate" in main|missing|conflicting) RESERVED_MATE=$mate ;; esac
   owners="${owners:+$owners
 }$mate"
   EVIDENCE=$line
@@ -159,7 +163,7 @@ owner_count=0
 [ -z "$owners" ] || owner_count=$(printf '%s\n' "$owners" | wc -l | tr -d ' ')
 
 OWNER=missing
-if [ "$SELF_MATE" -eq 1 ] || [ "$owner_count" -gt 1 ]; then
+if [ "$SELF_MATE" -eq 1 ] || [ -n "$RESERVED_MATE" ] || [ "$owner_count" -gt 1 ]; then
   OWNER=conflicting
 elif [ "$owner_count" -eq 1 ]; then
   OWNER=$owners
@@ -228,6 +232,8 @@ case "$OWNER" in
     ROUTE=hold
     if [ "$SELF_MATE" -eq 1 ]; then
       REASON="$ID is a second mate, not the task that opened this pull request; name the child task instead"
+    elif [ -n "$RESERVED_MATE" ]; then
+      REASON="second mate $RESERVED_MATE relays child $ID, but its id is an owner word this route cannot report unambiguously; rename that mate or hand the pull request off by hand"
     else
       REASON="more than one owner claims child $ID with this pull request: $(printf '%s\n' "$owners" | paste -sd, -)"
     fi

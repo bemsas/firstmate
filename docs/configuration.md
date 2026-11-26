@@ -989,7 +989,6 @@ Persistent secondmates hold no lane.
 The file is a per-machine choice and is not inherited by secondmate homes, so each home owns its own numbers.
 A second mate's home summary publishes its cap as `lane_target`, which a parent's away session reads for the refill cue (`bin/fm-lane-refill.sh`).
 A task record holds a lane until this host proves it stopped: no process at all in its worktree, past a pending-launch grace, on a process table actually read; an unreadable table or a record without a worktree still holds its lane, and `bin/fm-capacity.sh`'s header owns the rule and how admission reuses the last publish's evidence.
-Independently of this file, every ship or scout spawn and relaunch first asks `bin/fm-capacity.sh --host-gate`, which defers with exit 75 while the 1-minute load is above 1.5 times the logical cores or available memory is under 20 percent; its header owns the thresholds, which an environment override may only tighten.
 
 The first non-comment line is the cap, one non-negative integer, so a file holding only that integer keeps its earlier meaning, or the word `auto` for a measured budget instead of a fixed cap (below).
 Optional lines follow, one key and its value per line, with `#` starting a comment:

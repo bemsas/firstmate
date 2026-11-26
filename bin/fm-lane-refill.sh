@@ -25,9 +25,12 @@
 #     continuity must be proven again by fresh evidence and nothing is cued;
 #   - working >= target: recovered, the episode is dropped;
 #   - working < target: the episode identity is <target>:<working>. The same
-#     identity keeps its start; any other identity (a count identity change, a
-#     new target) starts a new episode at this observation's epoch, the
-#     summary's own generation time rather than the scan time.
+#     identity keeps its start while this observation is no more than
+#     FM_LANE_REFILL_MAX_GAP seconds (default 1200, four default check sweeps)
+#     after the episode's last observation; any other identity (a count
+#     identity change, a new target) or a longer gap, in which the mate may
+#     have recovered unseen, starts a new episode at this observation's epoch,
+#     the summary's own generation time rather than the scan time.
 #   - an episode whose latest fresh observation is more than
 #     FM_LANE_REFILL_AFTER seconds (default 900, so more than 15 continuous
 #     minutes) after its start is emitted once: the scan prints
@@ -44,8 +47,9 @@
 # CUE. `cue <mate> <episode>` sends the one refill cue for an emitted episode
 # through bin/fm-send.sh --fire-and-forget, with a delivery id derived from the
 # episode id, so a retried send lands at most one record, and marks it sent.
-# It refuses (exit 3) when no away record stands or the episode is not the
-# mate's current emitted one, and prints `sent: already` for one already sent.
+# It refuses (exit 3) when no away record stands, the episode file is bound to
+# another away record than the current one, or the episode is not the mate's
+# current emitted one, and prints `sent: already` for one already sent.
 # The cue states the observed shortage and the away words and asks the mate to
 # refill only under its own existing authorization, capacity, and health
 # gates; it authorizes nothing by itself.
@@ -67,6 +71,8 @@ EPISODES="$STATE/.lane-refill"
 LOCK="$STATE/.lane-refill.lock"
 AFTER=${FM_LANE_REFILL_AFTER:-900}
 RENOTIFY=${FM_LANE_REFILL_RENOTIFY:-1800}
+MAX_GAP=${FM_LANE_REFILL_MAX_GAP:-1200}
+case "$MAX_GAP" in ''|*[!0-9]*) MAX_GAP=1200 ;; esac
 case "$AFTER" in ''|*[!0-9]*) AFTER=900 ;; esac
 case "$RENOTIFY" in ''|*[!0-9]*) RENOTIFY=1800 ;; esac
 TAB=$(printf '\t')
@@ -94,7 +100,7 @@ lock_take() {
 
 cmd_scan() {
   local counts_file='' counts now rows mate target working evidence observed line
-  local prev_identity prev_since prev_emitted prev_sent prev_id prev_emitted_at identity since emitted sent id emitted_at out=''
+  local prev_identity prev_since prev_observed prev_emitted prev_sent prev_id prev_emitted_at identity since emitted sent id emitted_at out=''
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --counts-file) [ -n "${2:-}" ] || { echo "error: --counts-file requires a path" >&2; exit 2; }
@@ -129,10 +135,11 @@ cmd_scan() {
     [ "$working" -lt "$target" ] || continue
     identity="$target:$working"
     line=$(awk -F "$TAB" -v m="$mate" '$1 == m { print; exit }' "$EPISODES" 2>/dev/null)
-    IFS="$TAB" read -r _ prev_identity prev_since _ prev_emitted prev_sent prev_id prev_emitted_at <<EOF
+    IFS="$TAB" read -r _ prev_identity prev_since prev_observed prev_emitted prev_sent prev_id prev_emitted_at <<EOF
 $line
 EOF
-    if [ -n "$line" ] && [ "$prev_identity" = "$identity" ]; then
+    case "$prev_observed" in ''|*[!0-9]*) prev_observed=0 ;; esac
+    if [ -n "$line" ] && [ "$prev_identity" = "$identity" ] && [ $((observed - prev_observed)) -le "$MAX_GAP" ]; then
       since=$prev_since emitted=$prev_emitted sent=$prev_sent id=$prev_id emitted_at=${prev_emitted_at:-0}
     else
       since=$observed emitted=0 sent=0 emitted_at=0
@@ -155,11 +162,16 @@ EOF
 }
 
 cmd_cue() {
-  local mate=${1:-} episode=${2:-} line identity since emitted sent id words delivery target working message rc
+  local mate=${1:-} episode=${2:-} away_id line identity since emitted sent id words delivery target working message rc
   [ -n "$mate" ] && [ -n "$episode" ] || { usage >&2; exit 2; }
   case "$mate" in .* | *[!A-Za-z0-9._-]*) echo "error: invalid mate id" >&2; exit 2 ;; esac
   fm_afk_contract_away_present "$STATE" || { echo "sent: no (no away record stands; a refill cue is an away-mode action only)"; exit 3; }
   lock_take
+  away_id=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" field entered_epoch 2>/dev/null) || away_id=
+  if [ -z "$away_id" ] || [ "$(sed -n '1p' "$EPISODES" 2>/dev/null)" != "#away${TAB}$away_id" ]; then
+    echo "sent: no (episode $episode was not observed under the current away record)"
+    exit 3
+  fi
   line=$(awk -F "$TAB" -v m="$mate" '$1 == m { print; exit }' "$EPISODES" 2>/dev/null)
   IFS="$TAB" read -r _ identity since _ emitted sent id _ <<EOF
 $line

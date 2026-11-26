@@ -25,12 +25,17 @@
 # posture, at most every FM_PR_PROGRESS_INTERVAL seconds (default 300). Busy
 # lanes come from bin/fm-lane-count.sh --json --max-age 240 (the one owner of a
 # genuinely working lane; the cache keeps the sweep to one snapshot). Per home
-# (state/.pr-progress, `<home> <since> <emitted 0|1> <sent 0|1> <episode-id>`):
+# (state/.pr-progress, `<home> <since> <emitted-epoch|0> <sent 0|1>
+# <episode-id> <last-observed-epoch>`):
 #   - evidence other than fresh, working 0 or unknown, or a PR count that
 #     cannot be read: no episode (recovery, stale data, and unknown telemetry
 #     all reset it, so an alarm always rests on an unbroken busy hour);
-#   - busy with a new PR created since the episode began: the episode restarts
-#     at that PR's creation time (a real PR resets the hour);
+#   - a busy observation more than FM_PR_PROGRESS_MAX_GAP seconds (default
+#     3600, one alarm window) after the episode's last one starts a new
+#     episode at this observation, because the home may have been idle unseen;
+#   - busy with a new PR created after the episode began: the episode restarts
+#     at that PR's creation time (a real PR resets the hour); the PR that
+#     started the episode is not new, so it never resets it again;
 #   - busy with no new PR for at least FM_PR_PROGRESS_AFTER seconds (default
 #     3600): emitted once, as
 #       no-pr-progress: <home> busy <w> lanes and no new PR since <utc> episode <id> (cue: bin/fm-pr-progress.sh cue <home> <id>)
@@ -62,6 +67,8 @@ LAST_SCAN="$STATE/.pr-progress-last-scan"
 AFTER=${FM_PR_PROGRESS_AFTER:-3600}
 RENOTIFY=${FM_PR_PROGRESS_RENOTIFY:-7200}
 INTERVAL=${FM_PR_PROGRESS_INTERVAL:-300}
+MAX_GAP=${FM_PR_PROGRESS_MAX_GAP:-3600}
+case "$MAX_GAP" in ''|*[!0-9]*) MAX_GAP=3600 ;; esac
 case "$AFTER" in ''|*[!0-9]*) AFTER=3600 ;; esac
 case "$RENOTIFY" in ''|*[!0-9]*) RENOTIFY=7200 ;; esac
 case "$INTERVAL" in ''|*[!0-9]*) INTERVAL=300 ;; esac
@@ -172,7 +179,7 @@ lock_take() {
 }
 
 cmd_scan() {
-  local counts_file='' counts rows home working evidence observed line prev_since prev_emitted prev_sent prev_id
+  local counts_file='' counts rows home working evidence observed line prev_since prev_emitted prev_sent prev_id prev_observed
   local since emitted sent id latest n out='' next last
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -199,18 +206,20 @@ cmd_scan() {
     case "$working$observed" in *[!0-9]*) continue ;; esac
     [ "$evidence" = fresh ] && [ "$working" -gt 0 ] || continue
     line=$(awk -F "$TAB" -v h="$home" '$1 == h { print; exit }' "$EPISODES" 2>/dev/null)
-    IFS="$TAB" read -r _ prev_since prev_emitted prev_sent prev_id <<EOF
+    IFS="$TAB" read -r _ prev_since prev_emitted prev_sent prev_id prev_observed <<EOF
 $line
 EOF
-    if [ -n "$line" ]; then
+    case "$prev_observed" in ''|*[!0-9]*) prev_observed=0 ;; esac
+    if [ -n "$line" ] && [ $((observed - prev_observed)) -le "$MAX_GAP" ]; then
       since=$prev_since emitted=$prev_emitted sent=$prev_sent id=$prev_id
     else
       since=$observed emitted=0 sent=0 id=
     fi
-    n=$(home_count "$home" "$since")
+    # Only a PR first seen after the episode's start is new progress.
+    n=$(home_count "$home" $((since + 1)))
     [ "$n" != unknown ] || continue
     if [ "$n" -gt 0 ]; then
-      latest=$(home_latest "$home" "$since")
+      latest=$(home_latest "$home" $((since + 1)))
       since=${latest:-$observed} emitted=0 sent=0 id=
     fi
     [ -n "$id" ] || id="$home-$since"
@@ -221,7 +230,7 @@ EOF
 }no-pr-progress: $home busy $working lanes and no new PR since $(iso "$since") episode $id (cue: bin/fm-pr-progress.sh cue $home $id)"
       fi
     fi
-    printf '%s\t%s\t%s\t%s\t%s\n' "$home" "$since" "$emitted" "$sent" "$id" >> "$next"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$home" "$since" "$emitted" "$sent" "$id" "$observed" >> "$next"
   done <<EOF
 $rows
 EOF
@@ -240,7 +249,7 @@ cmd_cue() {
   [ "$(kind_of "$STATE/$mate.meta")" = secondmate ] || { echo "sent: no ($mate is not a registered second mate)"; exit 3; }
   lock_take
   line=$(awk -F "$TAB" -v h="$mate" '$1 == h { print; exit }' "$EPISODES" 2>/dev/null)
-  IFS="$TAB" read -r _ since emitted sent id <<EOF
+  IFS="$TAB" read -r _ since emitted sent id _ <<EOF
 $line
 EOF
   if [ -z "$line" ] || [ "$id" != "$episode" ] || [ "${emitted:-0}" = 0 ]; then
