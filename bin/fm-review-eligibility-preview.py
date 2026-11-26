@@ -94,8 +94,11 @@ def judge(url, pr, facts):
     tickets = [row for row in facts["ticket"] if row["pr"].lower() == url.lower() and row["head"] == pr["head"]]
     recorded = list(current.values()) or [row for row in refute_merges if row["head"] == pr["head"]]
     live = [row for row in tickets if row["live"]]
-    active = [owner for owner in owners if owner["verb"] not in FINISHED]
-    unreadable = ["local evidence unavailable"] if facts["unreadable"] else []
+    owner_status_unreadable = any(owner["verb"] == "unreadable" for owner in owners)
+    ticket_status_unreadable = any(ticket.get("status_unreadable", False) for ticket in tickets)
+    active = [owner for owner in owners if owner["verb"] not in FINISHED and owner["verb"] != "unreadable"]
+    unreadable = ["local evidence unavailable"] if (
+        facts["unreadable"] or owner_status_unreadable or ticket_status_unreadable) else []
 
     if pr["draft"]:
         status, reason = "draft", "the pull request is a draft"

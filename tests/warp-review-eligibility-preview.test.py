@@ -295,6 +295,17 @@ class PreviewTest(unittest.TestCase):
         self.assertEqual(row["status"], "unknown")
         self.assertIn("local evidence unavailable", row["reason"])
         self.assertEqual(row["owners"], [{"present": True}])
+        rows = self.rows()
+        self.assertEqual(rows[111]["status"], "unknown")
+        self.assertEqual(rows[112]["status"], "verify-fix")
+
+    def test_unreadable_scout_status_only_affects_its_ticket_pr(self):
+        self.seed()
+        (self.home / "state" / "scout114.status").unlink()
+        (self.home / "state" / "scout114.status").symlink_to(self.tmp / "missing-status")
+        rows = self.rows()
+        self.assertEqual(rows[114]["status"], "unknown")
+        self.assertEqual(rows[112]["status"], "verify-fix")
 
     def test_two_home_private_details_are_never_emitted(self):
         self.seed()
