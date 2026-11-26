@@ -12,12 +12,12 @@ code="$fixture/code"
 vm="$fixture/vm-build"
 ops="$fixture/ops"
 request="$fixture/request.md"
-result="$fixture/result.md"
+result_one="$fixture/result-one.md"
+result_two="$fixture/result-two.md"
 corr=a0123456789bcdef
 head=1111111111111111111111111111111111111111
 base=2222222222222222222222222222222222222222
 request_path="data/boston-batch-relay/inbox/request-$corr.md"
-result_path="data/boston-batch-relay/inbox/result-$corr.md"
 queue=state/.wake-queue
 export FM_REMOTE_JOB_STATE_ROOT="$fixture/jobs" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux
 export FM_BOSTON_TEST_ENTRYPOINT="$code/bin/fm-remote-entrypoint.sh"
@@ -69,8 +69,19 @@ printf -v row_one -- '- https://github.com/example/widget/pull/7 head %s base %s
 printf -v row_two -- '- https://github.com/example/gadget/pull/3 head %s | make all | from gadget-3' "$base"
 printf '%s\n\n%s\n%s\n' '# Boston test requests from vm-build-mate (report PASS/FAIL with head)' \
   "$row_one" "$row_two" > "$request"
-printf '%s\n\n%s | FAIL\n%s | PASS\n' '# Boston test results for vm-build-mate' \
-  "$row_two" "$row_one" > "$result"
+result_header='# Boston test results for vm-build-mate'
+printf '%s\n\n%s | PASS\nCounts: 24 passed, 1 skipped\n' "$result_header" "$row_one" > "$result_one"
+# shellcheck disable=SC2016
+printf '%s\n\n%s | INFRA\nEvidence: setup failed $(touch %s)\n' "$result_header" "$row_two" \
+  "$fixture/evidence-executed" > "$result_two"
+
+digest_input() {
+  python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+}
+result_one_name="result-$corr-$(printf '%s' "$row_one" | digest_input)"
+result_two_name="result-$corr-$(printf '%s' "$row_two" | digest_input)"
+result_inbox=data/boston-batch-relay/inbox
+result_outbox=data/boston-batch-relay/outbox
 
 relay() {
   local home=$1
@@ -80,7 +91,7 @@ relay() {
 
 wire() {
   local home=$1 peer=$2 kind=$3 id=$4 file=$5 digest
-  digest=${6:-$(python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())' < "$file")}
+  digest=${6:-$(digest_input < "$file")}
   FM_HOME="$home" "$code/bin/fm-on.sh" --stdin "$peer" fm-boston-batch-receive.sh \
     "$kind" "$id" "$digest" < "$file"
 }
@@ -124,16 +135,26 @@ test_round_trip() {
   assert_equals 1 "$(wc -l < "$ops/$queue" | tr -d ' ')" "duplicate request wakes"
   assert_grep "check: Boston batch request $corr at $request_path" "$ops/$queue" "missing Ops check wake"
 
-  FM_BOSTON_TEST_LINK=drop-receipt reject relay "$ops" send "$corr" "$result"
-  cmp "$result" "$vm/$result_path"
-  assert_absent "$ops/data/boston-batch-relay/outbox/result-$corr.sent" "lost reply recorded as confirmed"
+  FM_BOSTON_TEST_LINK=drop-receipt reject relay "$ops" send "$corr" "$result_two"
+  cmp "$result_two" "$vm/$result_inbox/$result_two_name.md"
+  assert_absent "$vm/$result_inbox/$result_one_name.md" "unfinished case gained a receipt"
+  assert_absent "$ops/$result_outbox/$result_two_name.sent" "lost reply recorded as confirmed"
+  assert_equals 1 "$(wc -l < "$vm/$queue" | tr -d ' ')" "infrastructure result waited for the batch"
+  assert_grep "check: Boston batch result $corr at $result_inbox/$result_two_name.md" "$vm/$queue" "missing first case wake"
+
+  relay "$ops" send "$corr" "$result_one"
+  cmp "$result_one" "$vm/$result_inbox/$result_one_name.md"
+  assert_present "$ops/$result_outbox/$result_one_name.sent" "later case blocked by the unconfirmed case"
+  sed -n '2p' "$vm/$queue" > "$fixture/second-wake"
+  assert_grep "check: Boston batch result $corr at $result_inbox/$result_one_name.md" "$fixture/second-wake" "missing second case wake"
+
   relay "$ops" retry
   FM_BOSTON_TEST_LINK=down relay "$ops" retry
-  assert_present "$ops/data/boston-batch-relay/outbox/result-$corr.sent" "reply retry not confirmed"
-  assert_equals 1 "$(wc -l < "$vm/$queue" | tr -d ' ')" "duplicate result wakes"
-  assert_grep "check: Boston batch result $corr at $result_path" "$vm/$queue" "missing VM Build check wake"
+  assert_present "$ops/$result_outbox/$result_two_name.sent" "reply retry not confirmed"
+  assert_equals 2 "$(wc -l < "$vm/$queue" | tr -d ' ')" "duplicate result wakes"
   assert_absent "$fixture/suite-executed" "suite text executed"
-  pass "a lost link, wake error and lost acknowledgement replay both ways without new receipts"
+  assert_absent "$fixture/evidence-executed" "evidence text executed"
+  pass "out-of-order case results arrive independently and replay after a lost acknowledgement"
 }
 
 test_rejections() {
@@ -156,19 +177,10 @@ test_rejections() {
     "$row_one" '- malformed second row' > "$invalid"
   reject wire "$vm" ops request "$bad" "$invalid"
   assert_grep 'invalid Boston row' "$fixture/refused.err" "invalid row was not rejected"
-  python3 - "$request" "$head" > "$invalid" <<'PY'
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as request:
-    header = request.readline()
-row = "- https://github.com/example/widget/pull/{} head " + sys.argv[2] + " | {} | from widget\n"
-body = header + "".join(row.format(number, "test") for number in range(1, 10))
-padding = 65536 - len(body) - len(row.format(10, ""))
-sys.stdout.write(body + row.format(10, "x" * padding))
-PY
+  python3 -c 'print("x" * 65537, end="")' > "$invalid"
   reject wire "$vm" ops request "$bad" "$invalid"
-  assert_grep 'too large to return a complete result' "$fixture/refused.err" "unanswerable batch was accepted"
-  digest=$(python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())' < "$request")
+  assert_grep 'batch must be 1 to 65536 bytes' "$fixture/refused.err" "oversized batch was accepted"
+  digest=$(digest_input < "$request")
   sed '$d' "$request" > "$invalid"
   reject wire "$vm" ops request "$bad" "$invalid" "$digest"
   assert_grep 'digest mismatch' "$fixture/refused.err" "a truncated batch with a valid prefix was accepted"
@@ -178,16 +190,31 @@ PY
   assert_grep 'conflicting Boston record' "$fixture/refused.err" "duplicate id with different bytes was accepted"
   cmp "$request" "$ops/$request_path"
 
-  for different in "s/$head/$base/" "s/base $base/base $head/" 's/make all/make other/' 's/from gadget-3/from other/' 's/PASS/PENDING/'; do
-    sed "$different" "$result" > "$invalid"
+  for different in 's@/pull/7@/pull/9@' "s/$head/$base/" "s/base $base/base $head/" 's/make test/make other/' 's/from widget-7/from other/'; do
+    sed "$different" "$result_one" > "$invalid"
     reject wire "$ops" vm-build-mate result "$corr" "$invalid"
+    assert_grep 'result row is absent from the correlated request' "$fixture/refused.err" "modified case row was accepted"
   done
-  reject wire "$ops" vm-build-mate result "$bad" "$result"
+  sed 's/ | PASS$/ | PENDING/' "$result_one" > "$invalid"
+  reject wire "$ops" vm-build-mate result "$corr" "$invalid"
+  assert_grep 'result needs PASS, FAIL or INFRA' "$fixture/refused.err" "a nonterminal result was accepted"
+  printf '%s\n%s | PASS\n%s | FAIL\n' "$result_header" "$row_one" "$row_two" > "$invalid"
+  reject wire "$ops" vm-build-mate result "$corr" "$invalid"
+  assert_grep 'one row and optional Evidence and Counts' "$fixture/refused.err" "multi-case result was accepted"
+  sed 's/ | PASS$/ | FAIL/' "$result_one" > "$invalid"
+  reject wire "$ops" vm-build-mate result "$corr" "$invalid"
+  assert_grep 'conflicting Boston record' "$fixture/refused.err" "terminal outcome was overwritten"
+  sed 's/24 passed/25 passed/' "$result_one" > "$invalid"
+  reject relay "$ops" send "$corr" "$invalid"
+  assert_grep 'conflicting Boston record' "$fixture/refused.err" "terminal counts were overwritten"
+
+  reject wire "$ops" vm-build-mate result "$bad" "$result_one"
   assert_grep 'no matching Boston request' "$fixture/refused.err" "uncorrelated result was accepted"
-  assert_absent "$vm/data/boston-batch-relay/inbox/result-$bad.md" "uncorrelated result stored by VM Build"
-  cmp "$result" "$vm/$result_path"
+  assert_equals 2 "$(find "$vm/$result_inbox" -name 'result-*.md' | wc -l | tr -d ' ')" "extra result receipt"
+  cmp "$result_one" "$vm/$result_inbox/$result_one_name.md"
+  cmp "$result_two" "$vm/$result_inbox/$result_two_name.md"
   assert_equals 1 "$(wc -l < "$ops/$queue" | tr -d ' ')" "unexpected Ops wake"
-  assert_equals 1 "$(wc -l < "$vm/$queue" | tr -d ' ')" "unexpected VM Build wake"
+  assert_equals 2 "$(wc -l < "$vm/$queue" | tr -d ' ')" "unexpected VM Build wake"
   assert_equals 'working: Boston batch data/batch.md' "$(cat "$vm/state/ordinary.status")" "ordinary status changed"
   assert_equals 'working: owning VM test slot admitted widget-7' "$(cat "$vm/state/widget-7.status")" "owning-VM status changed"
   pass "a sibling route cannot carry other commands, and malformed or mismatched batches leave no receipt"

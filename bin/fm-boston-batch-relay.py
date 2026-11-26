@@ -12,6 +12,7 @@ import tempfile
 
 
 MAX_BYTES = 64 * 1024
+MAX_DETAIL_BYTES = 512
 ROLE = {"request": "vm-build-mate", "result": "ops"}
 REQUEST_HEADER = "# Boston test requests from vm-build-mate (report PASS/FAIL with head)"
 RESULT_HEADER = "# Boston test results for vm-build-mate"
@@ -49,28 +50,39 @@ def read_batch(stream):
     return body
 
 
-def batch_rows(kind, body):
+def batch_lines(body, header):
     text = body.decode("utf-8")
     require(all(c == "\n" or c.isprintable() for c in text), "invalid character in Boston batch")
     lines = text.splitlines()
-    require(lines[0] == (REQUEST_HEADER if kind == "request" else RESULT_HEADER),
-            f"invalid Boston {kind} header")
-    rows = set()
-    for line in lines[1:]:
-        if not line:
-            continue
-        if kind == "result":
-            line, _, outcome = line.rpartition(" | ")
-            require(outcome in ("PASS", "FAIL"), "Boston result rows need PASS or FAIL")
-        require(ROW.fullmatch(line), "invalid Boston row (need PR URL, full head, suite and requester)")
-        require(line not in rows, "duplicate Boston request row")
-        rows.add(line)
+    require(lines and lines[0] == header, "invalid Boston batch header")
+    return [line for line in lines[1:] if line]
+
+
+def request_rows(body):
+    rows = batch_lines(body, REQUEST_HEADER)
     require(rows, "Boston batch has no rows")
-    return rows
+    require(all(ROW.fullmatch(row) for row in rows),
+            "invalid Boston row (need PR URL, full head, suite and requester)")
+    unique = set(rows)
+    require(len(unique) == len(rows), "duplicate Boston request row")
+    return unique
 
 
-def record(root, box, kind, corr):
-    return root / box / f"{kind}-{corr}.md"
+def result_row(body):
+    lines = batch_lines(body, RESULT_HEADER)
+    require(lines, "Boston result needs one originating request row")
+    row, _, outcome = lines[0].rpartition(" | ")
+    require(outcome in ("PASS", "FAIL", "INFRA"), "Boston result needs PASS, FAIL or INFRA")
+    require(ROW.fullmatch(row), "invalid Boston result row")
+    seen = set()
+    for line in lines[1:]:
+        field, sep, text = line.partition(": ")
+        require(sep and field in ("Evidence", "Counts") and field not in seen,
+                "Boston result accepts one row and optional Evidence and Counts lines")
+        require(0 < len(text.encode("utf-8")) <= MAX_DETAIL_BYTES and text == text.strip(),
+                "Boston evidence and counts must be 1 to 512 bytes each")
+        seen.add(field)
+    return row
 
 
 def read_record(path):
@@ -80,16 +92,18 @@ def read_record(path):
         return read_batch(stream)
 
 
-def validate(root, request_box, kind, corr, body):
-    rows = batch_rows(kind, body)
-    if kind == "result":
-        request = record(root, request_box, "request", corr)
-        require(request.is_file(), "no matching Boston request for this correlation")
-        require(rows == batch_rows("request", read_record(request)),
-                "Boston results must match every row of the correlated request")
-    else:
-        result_size = len(RESULT_HEADER) + 1 + sum(len(row.encode("utf-8")) + len(" | PASS\n") for row in rows)
-        require(result_size <= MAX_BYTES, "Boston request is too large to return a complete result")
+def receipt_name(root, request_box, kind, corr, body):
+    request_name = f"request-{corr}.md"
+    if kind == "request":
+        request_rows(body)
+        return request_name
+
+    row = result_row(body)
+    request = root / request_box / request_name
+    require(request.is_file(), "no matching Boston request for this correlation")
+    require(row in request_rows(read_record(request)), "Boston result row is absent from the correlated request")
+    case_id = hashlib.sha256(row.encode("utf-8")).hexdigest()
+    return f"result-{corr}-{case_id}.md"
 
 
 def sync_dir(path):
@@ -146,8 +160,8 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     send = commands.add_parser("send", help="stage and deliver a request from VM Build or result from Ops")
     send.add_argument("correlation")
-    send.add_argument("file", type=Path, help="Markdown batch")
-    commands.add_parser("retry", help="deliver all staged batches without a confirmed receipt")
+    send.add_argument("file", type=Path, help="Markdown request or single-case result")
+    commands.add_parser("retry", help="deliver all staged records without a confirmed receipt")
     receive = commands.add_parser("receive", help="validate wire input for the remote receiver")
     receive.add_argument("kind", choices=ROLE)
     receive.add_argument("correlation")
@@ -168,7 +182,7 @@ def main():
         require(not outbox.is_symlink(), "unsafe Boston outbox")
         success = True
         for path in sorted(outbox.glob(f"{kind}-*.md")):
-            corr = correlation(path.stem[len(kind) + 1:])
+            corr = correlation(path.stem.split("-", 2)[1])
             success = deliver(kind, corr, path) and success
         return 0 if success else 1
 
@@ -176,16 +190,16 @@ def main():
     if args.command == "send":
         with args.file.open("rb") as stream:
             body = read_batch(stream)
-        validate(root, "inbox", kind, corr, body)
-        path = record(root, "outbox", kind, corr)
+        name = receipt_name(root, "inbox", kind, corr, body)
+        path = root / "outbox" / name
         store(path, body)
         return 0 if deliver(kind, corr, path) else 1
 
     require(args.kind != kind, "Boston payload reached the wrong role")
     body = read_batch(sys.stdin.buffer)
     require(hashlib.sha256(body).hexdigest() == args.digest, "Boston payload digest mismatch")
-    validate(root, "outbox", args.kind, corr, body)
-    path = record(root, "inbox", args.kind, corr)
+    name = receipt_name(root, "outbox", args.kind, corr, body)
+    path = root / "inbox" / name
     store(path, body)
     print(path.relative_to(home))
     return 0

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Receive one Boston batch over fm-on.sh --stdin.
+# Receive one Boston request or case result over fm-on.sh --stdin.
 # Usage: fm-boston-batch-receive.sh <request|result> <correlation> <sha256>
 # The relay validates all bytes and publishes an immutable receipt before the
 # native check wake points at it. The queue lock spans wake and marker writes.
@@ -9,7 +9,7 @@ set -euo pipefail
 [ "$#" -eq 3 ] || { printf 'usage: fm-boston-batch-receive.sh <request|result> <correlation> <sha256>\n' >&2; exit 2; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RECEIPT=$(python3 "$SCRIPT_DIR/fm-boston-batch-relay.py" receive "$@")
-KEY="boston-batch:$1:$2"
+KEY="boston-batch:${RECEIPT##*/}"
 MARKER="$FM_HOME/$RECEIPT.woken"
 
 # shellcheck source=bin/fm-wake-lib.sh
