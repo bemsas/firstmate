@@ -1,0 +1,9 @@
+1..3
+ok - default owning-VM work stays local with no Boston route configured
+received: data/boston-batch-relay/inbox/request-a0123456789bcdef.md
+received: data/boston-batch-relay/inbox/request-a0123456789bcdef.md
+received: data/boston-batch-relay/inbox/result-a0123456789bcdef-830dcadf53e3255275267d6f110c4784fb0fb7c98cc4e5c808b617792a8695c6.md
+received: data/boston-batch-relay/inbox/result-a0123456789bcdef-215278192ac465fbc849731ffff3356202a20af3a02119f4e1d81edcfef12e4c.md
+ok - out-of-order case results arrive independently and replay after a lost acknowledgement
+ok - a sibling route cannot carry other commands, and malformed or mismatched batches leave no receipt
+FM_TEST_COMPLETE
