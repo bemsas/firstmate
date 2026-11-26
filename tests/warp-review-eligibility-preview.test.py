@@ -291,6 +291,16 @@ class PreviewTest(unittest.TestCase):
         row = self.rows("--pr", "112")[112]
         self.assertEqual(row["status"], "verify-fix")
 
+    def test_unreadable_owner_status_makes_disposition_unknown(self):
+        self.seed()
+        self.record("t111", f"pr={url(111)}", status=[self.ready(111, sha("old-111"))])
+        (self.home / "state" / "t111.status").unlink()
+        (self.home / "state" / "t111.status").symlink_to(self.tmp / "missing-status")
+        row = self.rows("--pr", "111")[111]
+        self.assertEqual(row["status"], "unknown")
+        self.assertIn("status log", row["reason"])
+        self.assertEqual(row["owners"][0]["last_status"], "unreadable")
+
     def test_selection_and_forge_failure(self):
         self.seed()
         self.assertEqual(list(self.rows("--limit", "3")), [101, 102, 103])

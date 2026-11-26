@@ -113,14 +113,14 @@ def judge(url, pr, facts):
         status, reason = "reviewed-head", f"a{kind} {names} verdict is already recorded for this head; no repeat review"
     elif holds:
         status, reason = "held", "held by " + ", ".join(hold["id"] for hold in holds)
+    elif unreadable:
+        status, reason = "unknown", "unreadable input: " + "; ".join(unreadable)
     elif active:
         status = "owned"
         reason = "active owner " + ", ".join(f"{o['id']} ({o['verb'] or 'no status yet'})" for o in active)
     elif live:
         status = "review-dispatched"
         reason = "review dispatched for this head to " + ", ".join(row["reviewer"] for row in live)
-    elif unreadable:
-        status, reason = "unknown", "unreadable input: " + "; ".join(unreadable)
     elif tickets:
         status = "unknown"
         reason = ("a review dispatch record for this head has neither a recorded verdict nor a live scout: "
