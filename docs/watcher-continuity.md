@@ -391,6 +391,10 @@ Branch acknowledgement retiring the check-row receipts of exactly its granted se
 
 `bin/fm-watch-arm.sh` never returns a clean empty success.
 
+### Due checks and competing wakes
+
+The watcher runs a due periodic check sweep before surfacing an already-queued process-event or recovery wake. The sweep leaves its own results in the durable queue, then delivers the competing wake. On the first such sweep, it defers lifecycle work such as PR polling, PR registration scanning, and the park tick; `state/.check-yielded` makes the next due sweep run that work even if competing wakes continue. This keeps repeated recovery and process-event wakes from starving scheduled checks. `tests/phase2-watcher-overdue-sweep.test.py` covers a due check alongside pending recovery.
+
 ### How an arm resolves a close
 
 | Child return | What the arm does |
