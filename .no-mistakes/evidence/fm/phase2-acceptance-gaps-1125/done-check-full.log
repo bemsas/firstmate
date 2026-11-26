@@ -1,0 +1,35 @@
+ok - checklist sections stop at the next top-level heading
+ok - base metadata uses base_branch before legacy base
+ok - off by default, by config, and for unrecognized values
+ok - the switch reads config/done-check and FM_DONE_CHECK overrides it
+ok - a clean PR passes every check and sends nothing
+ok - base must equal the intended branch when one is declared
+ok - mergeable fails on a forge conflict and on a local merge conflict
+ok - VISION.md must be unchanged by the PR itself
+ok - AI co-author trailers and generated-with footers fail, human co-authors pass
+ok - changed files must match the brief's declared scope
+ok - tests named in the brief must be shown run and passing
+ok - shadow computes and logs the verdict without steering
+ok - at most 2 bounces, then exit 11 escalates without another steer
+ok - an unconfirmed steer is not counted against the limit
+ok - unreadable facts are unknown and never bounce
+ok - fm-pr-check stops on a bounce and arms as before when the checklist is off
+ok - a UI PR's ready report must carry a verified proof rider
+ok - auto binds canonical pr even with checklist off and records head when available
+ok - watcher runs auto checklist on latest ship done URLs; other roles stay unbound
+ok - watcher runs auto checklist on latest ship done URLs; other roles stay unbound
+ok - exact source fetch requires scoped supervisor authentication when forge objects demand it
+ok - exact diff rejects test and assertion deletion, skips, tautologies, renames and worker scope edits
+ok - common test and runner paths and embedded Rust tests are protected by exact Git tree comparison
+ok - default Karma and pytest configs are protected and standalone packaging edits still admit
+ok - pinned tests permit benign stubs and refuse recognized skip, focus and trivial assertions
+# regression execution requires available bubblewrap namespaces
+armed: state/ship-accept.check.sh
+armed: state/ship-accept.check.sh
+ok - ordinary PR registration requires a current exact candidate, native independent review and explicit supervisor acceptance
+ok - retrying a recorded review appends nothing and a later decision on the same head stays effective
+ok - a native review report displaces the saved verdict at every acceptance entry point before it is recorded
+ok - retiring a refute scout never removes the only evidence of a current blocker
+ok - pipeline objects missing from the worker copy use a private pinned forge fetch
+ok - review dispatch excludes every recorded builder provider
+exit=0

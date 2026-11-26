@@ -1,0 +1,4 @@
+ok - protected status reads keep both a worker done candidate and a pipeline pass unaccepted
+ok - protected completed runs require the same full head as the accepted candidate
+ok - every supported completed-run path keeps an accepted head done and holds a different one
+exit=0

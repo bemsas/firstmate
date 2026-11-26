@@ -1,0 +1,159 @@
+=== setup: ship candidate, refute scout records merge, supervisor accepts ===
+  [accept] exit=0
+      3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34
+
+=== S1 control: current saved acceptance at every entry point ===
+  [passing] exit=0
+      3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34
+  [assert] exit=0
+      3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34
+  [accept] exit=0
+      3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34
+  [fm-pr-check.sh] exit=0
+      armed: state/ship-accept.check.sh
+  [fm-crew-state.sh] exit=0
+      state: done · source: status-log · PR https://github.com/acme/widget/pull/8 head 3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34
+  [fm-pr-merge.sh (control)] exit=0
+      armed: state/ship-accept.check.sh
+      verified: https://github.com/acme/widget/pull/8 is open and mergeable, with every unwaived required check reported and every unwaived check green at head 3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34
+      verified: https://github.com/acme/widget/pull/8 is merged (state=MERGED, merged=true, isInMergeQueue=false)
+      >>> gh pr merge WAS invoked: pr merge 8 --repo acme/widget --match-head-commit 3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34 --squash
+
+=== S1b head moved after acceptance ===
+  [passing after new head] exit=1
+      error: done acceptance: accepted evidence no longer matches this candidate or review
+  [passing with old head] exit=1
+      error: done acceptance: acceptance evidence does not name the requested head
+
+=== S2: scout writes a newer fix report + status, NOT yet recorded ===
+--- scout status now:
+      done [at=21319]: Refute cd290f58e27d1bcd03ae0ba7067656acdfc89ab3 3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34 merge
+      done [at=14314]: Refute cd290f58e27d1bcd03ae0ba7067656acdfc89ab3 3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34 fix
+--- BASE commit 3474e048 code, same state:
+  [BASE passing] exit=0
+      3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34
+  [BASE assert] exit=0
+      3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34
+--- TARGET commit code:
+  [passing] exit=1
+      error: done acceptance: native review report from keeper is not the saved verdict; record the current review and accept again, or review a fresh exact candidate if it can no longer be recorded
+  [assert] exit=1
+      error: done acceptance: native review report from keeper is not the saved verdict; record the current review and accept again, or review a fresh exact candidate if it can no longer be recorded
+  [accept] exit=1
+      error: done acceptance: native review report from keeper is not the saved verdict; record the current review and accept again, or review a fresh exact candidate if it can no longer be recorded
+  [fm-pr-check.sh] exit=1
+      error: done acceptance: native review report from keeper is not the saved verdict; record the current review and accept again, or review a fresh exact candidate if it can no longer be recorded
+  [fm-crew-state.sh] exit=0
+      state: blocked · source: status-log · worker done is a candidate awaiting supervisor acceptance for its exact head
+  [fm-pr-merge.sh (displaced)] exit=1
+      error: done acceptance: native review report from keeper is not the saved verdict; record the current review and accept again, or review a fresh exact candidate if it can no longer be recorded
+      >>> gh pr merge was NOT invoked
+
+=== S3: restore exact saved report/status; retry of same review is a no-op ===
+  [record same review again] exit=0
+      review already recorded; the journal is unchanged
+      >>> journal bytes unchanged
+  [record repeated merge report] exit=0
+      review already recorded; the journal is unchanged
+      >>> journal bytes unchanged
+  [passing] exit=0
+      3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34
+  [assert] exit=0
+      3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34
+  [accept] exit=0
+      3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34
+  [fm-pr-check.sh] exit=0
+      armed: state/ship-accept.check.sh
+  [fm-crew-state.sh] exit=0
+      state: done · source: status-log · PR https://github.com/acme/widget/pull/8 head 3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34
+  [fm-pr-merge.sh (restored)] exit=0
+      armed: state/ship-accept.check.sh
+      verified: https://github.com/acme/widget/pull/8 is open and mergeable, with every unwaived required check reported and every unwaived check green at head 3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34
+      verified: https://github.com/acme/widget/pull/8 is merged (state=MERGED, merged=true, isInMergeQueue=false)
+      >>> gh pr merge WAS invoked: pr merge 8 --repo acme/widget --match-head-commit 3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34 --squash
+
+=== S4 adversarial: blocker report lands while fm-pr-merge is already running ===
+  [fm-pr-merge.sh (late report)] exit=1
+      armed: state/ship-accept.check.sh
+      verified: https://github.com/acme/widget/pull/8 is open and mergeable, with every unwaived required check reported and every unwaived check green at head 3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34
+      error: done acceptance: native review report from keeper is not the saved verdict; record the current review and accept again, or review a fresh exact candidate if it can no longer be recorded
+      >>> gh pr merge was NOT invoked
+
+=== S5 adversarial near-miss verdict forms from a second scout (never recorded) ===
+  [passing [crlf-report]] exit=1
+      error: done acceptance: native review report from sneaky is not the saved verdict; record the current review and accept again, or review a fresh exact candidate if it can no longer be recorded
+  [passing [status-only-suffix]] exit=1
+      error: done acceptance: native review report from sneaky is not the saved verdict; record the current review and accept again, or review a fresh exact candidate if it can no longer be recorded
+  [passing [blocked-after-fix]] exit=1
+      error: done acceptance: native review report from sneaky is not the saved verdict; record the current review and accept again, or review a fresh exact candidate if it can no longer be recorded
+  [passing [status-only-fix]] exit=1
+      error: done acceptance: native review report from sneaky is not the saved verdict; record the current review and accept again, or review a fresh exact candidate if it can no longer be recorded
+  [passing [other-head-control]] exit=0
+      3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34
+  [passing after removing second scout] exit=0
+      3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34
+
+=== S6: teardown of a scout holding an unrecorded blocker (real fm-teardown.sh, fake tmux/treehouse) ===
+  fm-teardown.sh keeper exit=1
+      error: done acceptance: keeper reports unsaved blocker 'Refute cd290f58e27d1bcd03ae0ba7067656acdfc89ab3 3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34 fix' for ship-accept; record it with fm-review-verdict.sh refute ship-accept keeper 3b675a57a6b13de978f37fe03f6a6b3cdcf2ad34 while the reviewed candidate, base and policy still match, or publish and report a fresh exact candidate against the current approved base and policy, then retire the scout
+      REFUSED: refute scout keeper still holds an unsettled review; its status is kept.
+      kept: keeper.meta
+      kept: keeper.refute.json
+      kept: keeper.status
+  [passing after refused teardown] exit=1
+      error: done acceptance: native review report from keeper is not the saved verdict; record the current review and accept again, or review a fresh exact candidate if it can no longer be recorded
+  after recording the blocker: fm-teardown.sh keeper exit=0; remaining keeper files: keeper.refute.json 
+  [passing after retirement] exit=1
+      error: done acceptance: missing passing fresh-context review for this task and exact head
+
+=== S7: spaced JavaScript property names (review-brief runs the pinned-test scanner) ===
+--- spaced-if: const half = rows. if(total) / test.skip("later", check) / 2;
+  [BASE   review-brief] exit=0
+      $T/acceptance/home/data/base-spaced-if/brief.md
+  [TARGET review-brief] exit=1
+      error: done acceptance: added skip: 'src/iterator.test.js'
+--- spaced-newline: const half = rows   .   while(total) / test.only("later", check) / 2;
+  [BASE   review-brief] exit=0
+      $T/acceptance/home/data/base-spaced-newline/brief.md
+  [TARGET review-brief] exit=1
+      error: done acceptance: added skip: 'src/iterator.test.js'
+--- spaced-comment: const half = rows?. /* n */ for(total) / it.skip("later", check) / 2;
+  [BASE   review-brief] exit=0
+      $T/acceptance/home/data/base-spaced-comment/brief.md
+  [TARGET review-brief] exit=1
+      error: done acceptance: added skip: 'src/iterator.test.js'
+--- line-comment: const half = rows. // n   if(total) / test.skip("later", check) / 2;
+  [BASE   review-brief] exit=0
+      $T/acceptance/home/data/base-line-comment/brief.md
+  [TARGET review-brief] exit=1
+      error: done acceptance: added skip: 'src/iterator.test.js'
+--- spaced-return: const half = rows . return / test.skip("later", check) / 2;
+  [BASE   review-brief] exit=0
+      $T/acceptance/home/data/base-spaced-return/brief.md
+  [TARGET review-brief] exit=1
+      error: done acceptance: added skip: 'src/iterator.test.js'
+--- real-if-regex: if (checkHelp) /test.skip()/.test(helpText);
+  [BASE   review-brief] exit=0
+      $T/acceptance/home/data/base-real-if-regex/brief.md
+  [TARGET review-brief] exit=0
+      $T/acceptance/home/data/head-real-if-regex/brief.md
+--- real-while-regex: while (more) /it.only()/.test(next);
+  [BASE   review-brief] exit=0
+      $T/acceptance/home/data/base-real-while-regex/brief.md
+  [TARGET review-brief] exit=0
+      $T/acceptance/home/data/head-real-while-regex/brief.md
+--- real-return-regex: const m = () => { return /test.skip()/.test(helpText); };
+  [BASE   review-brief] exit=0
+      $T/acceptance/home/data/base-real-return-regex/brief.md
+  [TARGET review-brief] exit=0
+      $T/acceptance/home/data/head-real-return-regex/brief.md
+--- dot-before-real-if: if (rows.length) /test.skip()/.test(helpText);
+  [BASE   review-brief] exit=0
+      $T/acceptance/home/data/base-dot-before-real-if/brief.md
+  [TARGET review-brief] exit=0
+      $T/acceptance/home/data/head-dot-before-real-if/brief.md
+--- spread-return: const m = () => { use(...list); return /test.skip()/.test(t); };
+  [BASE   review-brief] exit=0
+      $T/acceptance/home/data/base-spread-return/brief.md
+  [TARGET review-brief] exit=0
+      $T/acceptance/home/data/head-spread-return/brief.md

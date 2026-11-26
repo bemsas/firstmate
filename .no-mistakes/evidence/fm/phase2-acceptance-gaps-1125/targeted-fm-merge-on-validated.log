@@ -1,0 +1,3 @@
+ok - the exact validated line stays pending and automatically sees later supervisor acceptance
+ok - final acceptance forge read failure retries while a permanent mismatch drops the pending line
+exit=0

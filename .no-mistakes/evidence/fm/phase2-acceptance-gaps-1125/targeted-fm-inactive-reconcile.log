@@ -1,0 +1,4 @@
+actionable: child outcome needs parent report: child=child state=done (missing or unreadable parent binding .fm-secondmate-parent)
+ok - pending legacy ship completion waits for acceptance before parent delivery
+ok - a worker done reaches the parent only after supervisor acceptance of its exact head
+exit=0

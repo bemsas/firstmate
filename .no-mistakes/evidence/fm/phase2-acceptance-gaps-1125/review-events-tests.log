@@ -1,0 +1,4 @@
+ok - retrying a recorded review appends nothing and a later decision on the same head stays effective
+ok - a native review report displaces the saved verdict at every acceptance entry point before it is recorded
+ok - retiring a refute scout never removes the only evidence of a current blocker
+exit=0
