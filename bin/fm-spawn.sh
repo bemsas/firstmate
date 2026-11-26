@@ -2416,7 +2416,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   }
   spawn_task_set_wait=${FM_SPAWN_TASK_SET_WAIT:-120}
-  case "$spawn_task_set_wait" in ''|*[!0-9]*) spawn_task_set_wait=120 ;; esac
+  case "$spawn_task_set_wait" in ''|*[!0-9]*) spawn_task_set_wait=120 ;; *) spawn_task_set_wait=$((10#$spawn_task_set_wait)) ;; esac
   spawn_task_set_deadline=$((SECONDS + spawn_task_set_wait))
   spawn_task_set_unroled_since=
   while ! fm_lock_try_acquire "$SPAWN_TASK_SET_LOCK"; do

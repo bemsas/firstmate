@@ -37,7 +37,8 @@
 # validation; anything else is a usage error (exit 2).
 #
 # LIVE FACTS. For a GitHub URL the PR's state, draft flag, head, and base are
-# read live through gh (bounded by FM_MERGE_ROUTE_GH_SECS, default 10). Other
+# read live through gh, addressed by the full URL so the URL's own host is
+# queried whatever GH_HOST is inherited, (bounded by FM_MERGE_ROUTE_GH_SECS, default 10). Other
 # forges, and any unreadable read, report head and base as unknown. The
 # project is the basename of the record's project= path for a main-owned task,
 # and otherwise the one clone under this home's projects/ whose origin remote
@@ -74,7 +75,11 @@
 # never repeats a handoff; a new head is a new handoff. The send uses
 # fm-send's --fire-and-forget with a delivery id derived from mate, URL, and
 # head, so an unconfirmed send retried by re-running this command lands at most
-# one record. Exit 0 after a confirmed or already-recorded send, the send's own
+# one record. The first message built for a delivery id is kept in
+# state/.merge-handoffs.pending/<delivery-id> until its send is confirmed, and
+# every retry resends that exact message, even when the relay evidence or
+# mandate changed meanwhile, because the inbox deduplicates by the whole body;
+# a changed mandate for the same head is not a new handoff. Exit 0 after a confirmed or already-recorded send, the send's own
 # nonzero status when fm-send could not confirm delivery.
 #
 # Test seam: FM_MERGE_ROUTE_SEND_CMD replaces bin/fm-send.sh as the send
@@ -173,8 +178,8 @@ fi
 PR_STATE=unknown DRAFT=unknown HEAD=unknown BASE=unknown
 if [ "$FM_PR_PROVIDER" = github ] && command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   fm_pr_github_host_export "$FM_PR_HOST"
-  if view=$(fm_run_timed "${FM_MERGE_ROUTE_GH_SECS:-10}" gh pr view "$FM_PR_NUMBER" \
-      -R "$FM_PR_OWNER/$FM_PR_REPO" --json state,isDraft,headRefOid,baseRefName </dev/null 2>/dev/null); then
+  if view=$(fm_run_timed "${FM_MERGE_ROUTE_GH_SECS:-10}" gh pr view "$URL" \
+      --json state,isDraft,headRefOid,baseRefName </dev/null 2>/dev/null); then
     facts=$(printf '%s' "$view" | jq -r '[(.state // "unknown"), (if .isDraft == true then "yes" elif .isDraft == false then "no" else "unknown" end), (.headRefOid // "unknown"), (.baseRefName // "unknown")] | @tsv' 2>/dev/null) || facts=
     if [ -n "$facts" ]; then
       IFS="$(printf '\t')" read -r PR_STATE DRAFT HEAD BASE <<EOF
@@ -301,6 +306,16 @@ Production (parent registry, by base): $PRODUCTION
 Scope evidence (your relay line): $EVIDENCE
 Parent mandate: $MANDATE
 Merge it only through your own bin/fm-pr-merge.sh $ID $URL --expected-head $HEAD, under your own merge authority, checks, and holds; if they do not cover it, hold and relay why. This handoff waives no check, forces nothing, and authorizes nothing your own rules do not."
+PENDING="$STATE/.merge-handoffs.pending/$DELIVERY"
+if [ -f "$PENDING" ]; then
+  MESSAGE=$(cat "$PENDING") || { echo "sent: no (the pending handoff $DELIVERY could not be read)"; exit 3; }
+else
+  mkdir -p "${PENDING%/*}" && printf '%s' "$MESSAGE" > "$PENDING.tmp" && mv -f "$PENDING.tmp" "$PENDING" || {
+    rm -f "$PENDING.tmp"
+    echo "sent: no (the pending handoff $DELIVERY could not be recorded)"
+    exit 3
+  }
+fi
 SEND_CMD=${FM_MERGE_ROUTE_SEND_CMD:-$SCRIPT_DIR/fm-send.sh}
 FM_HOME=$FM_HOME "$SEND_CMD" "$OWNER" --fire-and-forget "$DELIVERY" "$MESSAGE"
 rc=$?
@@ -309,4 +324,5 @@ if [ "$rc" -ne 0 ]; then
   exit "$rc"
 fi
 printf '%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "$OWNER" "$URL" "$HEAD" "$DELIVERY" >> "$LEDGER"
+rm -f "$PENDING"
 echo "sent: yes $DELIVERY"

@@ -17,7 +17,12 @@
 #   <mate-id>  the second mate's relay log in this home (state/<mate>.status),
 #              where it relays each child's PR-ready and done lines.
 # A home whose log cannot be read reports count null (unknown), never 0; a
-# line without an [at=] stamp proves nothing and is skipped. `count` prints
+# line without an [at=] stamp proves nothing and is skipped. Because task
+# cleanup removes a finished task's status log, every scan also records each
+# PR's first-seen time in state/.pr-progress-seen (`<home> <epoch> <url>`,
+# kept for FM_PR_PROGRESS_SEEN_KEEP seconds, default 86400), and both `count`
+# and `scan` read that ledger beside the live logs, so ordinary cleanup cannot
+# erase recent progress. `count` prints
 # `<home>: prs <N|unknown> since <epoch>` per home, or with --json
 # {"since":E,"homes":[{"home","count"}]}. --since defaults to an hour ago.
 #
@@ -47,7 +52,8 @@
 # new work and diagnose why its busy lanes created no PR; it says not to
 # exit, destroy, or reshuffle any worker and changes no quality gate. The
 # `self` home has no mate to cue: the wake itself is MAIN's cue. A cue for an
-# episode that is no longer current is refused (exit 3).
+# episode that is no longer current, or whose mate has relayed a PR first seen
+# after the episode began, is refused (exit 3).
 #
 # Test seams: --counts-file replaces the lane count read; FM_PR_PROGRESS_SEND_CMD
 # replaces bin/fm-send.sh; FM_PR_PROGRESS_NOW pins the clock.
@@ -64,6 +70,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 EPISODES="$STATE/.pr-progress"
 LOCK="$STATE/.pr-progress.lock"
 LAST_SCAN="$STATE/.pr-progress-last-scan"
+SEEN="$STATE/.pr-progress-seen"
+SEEN_KEEP=${FM_PR_PROGRESS_SEEN_KEEP:-86400}
+case "$SEEN_KEEP" in ''|*[!0-9]*) SEEN_KEEP=86400 ;; esac
 AFTER=${FM_PR_PROGRESS_AFTER:-3600}
 RENOTIFY=${FM_PR_PROGRESS_RENOTIFY:-7200}
 INTERVAL=${FM_PR_PROGRESS_INTERVAL:-300}
@@ -97,6 +106,42 @@ first_seen() {
   ' "$@" 2>/dev/null
 }
 
+# The earliest first-seen time of each PR for one home, from its live logs
+# <files...> (possibly none) and the recorded ledger, as "<epoch>\t<url>".
+home_first_seen() {  # <home> [<files>...]
+  local home=$1
+  shift
+  {
+    [ "$#" -eq 0 ] || first_seen "$@"
+    awk -F '\t' -v h="$home" -v OFS='\t' '$1 == h { print $2, $3 }' "$SEEN" 2>/dev/null
+  } | awk -F '\t' -v OFS='\t' '!($2 in m) || $1 < m[$2] { m[$2] = $1 } END { for (u in m) print m[u], u }'
+}
+
+# Record every PR the live logs show in the ledger, and drop ledger rows older
+# than SEEN_KEEP. Call it only under the scan lock.
+seen_refresh() {
+  local home meta files status next
+  next=$(mktemp "$STATE/.pr-progress-seen.next.XXXXXX") || return 0
+  while IFS= read -r home; do
+    files=()
+    if [ "$home" = self ]; then
+      for meta in "$STATE"/*.meta; do
+        [ -f "$meta" ] || continue
+        [ "$(kind_of "$meta")" != secondmate ] || continue
+        status="${meta%.meta}.status"
+        [ -f "$status" ] && files+=("$status")
+      done
+    else
+      [ -f "$STATE/$home.status" ] && files=("$STATE/$home.status")
+    fi
+    home_first_seen "$home" ${files[@]+"${files[@]}"} | awk -F '\t' -v h="$home" -v OFS='\t' -v floor=$((NOW - SEEN_KEEP)) \
+      '$1 >= floor { print h, $1, $2 }' >> "$next"
+  done <<EOF
+$(homes)
+EOF
+  mv -f "$next" "$SEEN" || rm -f "$next"
+}
+
 # Count PRs first seen at or after <since> for one home; prints N or unknown.
 home_count() {  # <home> <since>
   local home=$1 since=$2 meta files=() status
@@ -109,13 +154,12 @@ home_count() {  # <home> <since>
       [ -r "$status" ] || { echo unknown; return 0; }
       files+=("$status")
     done
-    [ "${#files[@]}" -gt 0 ] || { echo 0; return 0; }
   else
     status="$STATE/$home.status"
     [ -f "$status" ] && [ -r "$status" ] || { echo unknown; return 0; }
     files=("$status")
   fi
-  first_seen "${files[@]}" | awk -F '\t' -v s="$since" '$1 >= s { n++ } END { print n + 0 }'
+  home_first_seen "$home" ${files[@]+"${files[@]}"} | awk -F '\t' -v s="$since" '$1 >= s { n++ } END { print n + 0 }'
 }
 
 # The newest first-seen PR time at or after <since>, or empty.
@@ -129,10 +173,9 @@ home_latest() {  # <home> <since>
       [ -f "$status" ] && files+=("$status")
     done
   else
-    files=("$STATE/$home.status")
+    [ -f "$STATE/$home.status" ] && files=("$STATE/$home.status")
   fi
-  [ "${#files[@]}" -gt 0 ] || return 0
-  first_seen "${files[@]}" | awk -F '\t' -v s="$since" '$1 >= s && $1 > m { m = $1 } END { if (m) print m }'
+  home_first_seen "$home" ${files[@]+"${files[@]}"} | awk -F '\t' -v s="$since" '$1 >= s && $1 > m { m = $1 } END { if (m) print m }'
 }
 
 homes() {
@@ -200,6 +243,7 @@ cmd_scan() {
   rows=$(printf '%s' "$counts" | jq -r '.homes[]?
     | [.home, (.working // "-" | tostring), (.evidence // "unknown"), (.observed_epoch // "-" | tostring)] | @tsv' 2>/dev/null) || return 0
   lock_take
+  seen_refresh
   next=$(mktemp "$STATE/.pr-progress.next.XXXXXX") || exit 1
   while IFS="$TAB" read -r home working evidence observed; do
     [ -n "$home" ] || continue
@@ -257,6 +301,11 @@ EOF
     exit 3
   fi
   [ "$sent" != 1 ] || { echo "sent: already"; exit 0; }
+  case "$(home_count "$mate" $((since + 1)))" in
+    0) ;;
+    unknown) echo "sent: no ($mate's relay log cannot be read, so the no-PR episode cannot be confirmed)"; exit 3 ;;
+    *) echo "sent: no ($mate relayed a new pull request after $(iso "$since"); episode $episode has ended)"; exit 3 ;;
+  esac
   if command -v shasum >/dev/null 2>&1; then
     delivery=$(printf 'pr-progress|%s' "$episode" | shasum -a 256 | cut -c1-16)
   else

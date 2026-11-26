@@ -48,8 +48,10 @@
 # through bin/fm-send.sh --fire-and-forget, with a delivery id derived from the
 # episode id, so a retried send lands at most one record, and marks it sent.
 # It refuses (exit 3) when no away record stands, the episode file is bound to
-# another away record than the current one, or the episode is not the mate's
-# current emitted one, and prints `sent: already` for one already sent.
+# another away record than the current one, the episode is not the mate's
+# current emitted one, or its last fresh observation is more than
+# FM_LANE_REFILL_CUE_MAX_AGE seconds old (default 3600, so scans that stopped
+# cannot send a stale shortage), and prints `sent: already` for one already sent.
 # The cue states the observed shortage and the away words and asks the mate to
 # refill only under its own existing authorization, capacity, and health
 # gates; it authorizes nothing by itself.
@@ -72,6 +74,8 @@ LOCK="$STATE/.lane-refill.lock"
 AFTER=${FM_LANE_REFILL_AFTER:-900}
 RENOTIFY=${FM_LANE_REFILL_RENOTIFY:-1800}
 MAX_GAP=${FM_LANE_REFILL_MAX_GAP:-1200}
+CUE_MAX_AGE=${FM_LANE_REFILL_CUE_MAX_AGE:-3600}
+case "$CUE_MAX_AGE" in ''|*[!0-9]*) CUE_MAX_AGE=3600 ;; esac
 case "$MAX_GAP" in ''|*[!0-9]*) MAX_GAP=1200 ;; esac
 case "$AFTER" in ''|*[!0-9]*) AFTER=900 ;; esac
 case "$RENOTIFY" in ''|*[!0-9]*) RENOTIFY=1800 ;; esac
@@ -162,7 +166,7 @@ EOF
 }
 
 cmd_cue() {
-  local mate=${1:-} episode=${2:-} away_id line identity since emitted sent id words delivery target working message rc
+  local mate=${1:-} episode=${2:-} away_id line identity since last_observed emitted sent id words delivery target working message rc
   [ -n "$mate" ] && [ -n "$episode" ] || { usage >&2; exit 2; }
   case "$mate" in .* | *[!A-Za-z0-9._-]*) echo "error: invalid mate id" >&2; exit 2 ;; esac
   fm_afk_contract_away_present "$STATE" || { echo "sent: no (no away record stands; a refill cue is an away-mode action only)"; exit 3; }
@@ -173,11 +177,16 @@ cmd_cue() {
     exit 3
   fi
   line=$(awk -F "$TAB" -v m="$mate" '$1 == m { print; exit }' "$EPISODES" 2>/dev/null)
-  IFS="$TAB" read -r _ identity since _ emitted sent id _ <<EOF
+  IFS="$TAB" read -r _ identity since last_observed emitted sent id _ <<EOF
 $line
 EOF
   if [ -z "$line" ] || [ "$id" != "$episode" ] || [ "$emitted" != 1 ]; then
     echo "sent: no (episode $episode is not $mate's current shortage; it recovered, changed, or was never emitted)"
+    exit 3
+  fi
+  case "$last_observed" in ''|*[!0-9]*) last_observed=0 ;; esac
+  if [ "$sent" != 1 ] && [ $(( $(date +%s) - last_observed )) -gt "$CUE_MAX_AGE" ]; then
+    echo "sent: no (episode $episode was last observed at $(iso "$last_observed"); no fresh observation since, so the shortage is not current)"
     exit 3
   fi
   if [ "$sent" = 1 ]; then

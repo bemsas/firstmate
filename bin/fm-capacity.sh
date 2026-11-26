@@ -37,13 +37,15 @@
 # target - a fixed cap's report, --json, --publish, and --admit, and the auto
 # budget - a record is proven STOPPED, and holds no lane, only when every one
 # of these holds: this host's process table was read (fm_lane_vitals_processes
-# in bin/fm-lane-vitals-lib.sh), the record names a worktree, its spawn time
-# is at least FM_CAPACITY_PENDING_GRACE seconds old (default 900, so a launch
-# still on its way keeps its place and concurrent admissions cannot overshoot),
-# and no process at all is attributed to that worktree (fm_lane_vitals_attribute,
-# so an idle pane shell still counts). An unreadable process table, a record
-# with no worktree, or a young record counts as occupying: stale metadata can
-# never free a lane by itself, and an unknown reading never frees one either.
+# in bin/fm-lane-vitals-lib.sh) and attributed without error, the record names
+# a worktree that exists as a directory on this host, its spawn time is at
+# least FM_CAPACITY_PENDING_GRACE seconds old (default 900, so a launch still
+# on its way keeps its place and concurrent admissions cannot overshoot), and
+# no process at all is attributed to that worktree (fm_lane_vitals_attribute,
+# so an idle pane shell still counts). An unreadable process table, a failed
+# attribution, a record with no worktree or one this host cannot see, or a
+# young record counts as occupying: stale metadata can never free a lane by
+# itself, and an unknown reading never frees one either.
 # --admit and --spawn-gate read no process table of their own (they must stay
 # fast under the admission lock): they reuse the stopped keys of the watcher's
 # last --publish (lanes.stopped_keys in state/lane-capacity.json) when it was
@@ -52,8 +54,9 @@
 # nothing aside otherwise.
 # A stopped record and its worktree are left exactly as they are; the report's
 # human summary says how many it set aside, and --json carries the count as
-# lanes.stopped and the keys as lanes.stopped_keys, so the first line's fixed
-# key list is unchanged.
+# lanes.stopped and the keys as lanes.stopped_keys only when at least one was
+# set aside, so the first line's fixed key list and a home with none set aside
+# print exactly what they did before.
 # secondmates counts persistent secondmates separately; they hold no lane.
 #
 # target is the cap from config/lane-capacity. Absent means no target, so
@@ -825,14 +828,25 @@ auto_lane_rows() {
 }
 
 # capacity_stopped_keys <lanes-file> <attr-file>: print the key (<idx>:<id>) of
-# every auto_lane_rows row proven stopped (the header's lanes paragraph): a
-# worktree, a spawn time at least PENDING_GRACE old, and no attributed process.
-# Call it only with an attribution taken from a readable process table.
+# every auto_lane_rows row proven stopped (the header's lanes paragraph): an
+# existing worktree directory, a spawn time at least PENDING_GRACE old, and no
+# attributed process. Call it only with a successful attribution taken from a
+# readable process table.
 capacity_stopped_keys() {
   awk -F'\t' -v now="$now" -v grace="$PENDING_GRACE" '
     FILENAME == ARGV[1] { live[$1] = 1; next }
-    $3 != "" && $7 ~ /^[0-9]+$/ && now - $7 >= grace && !(($1 ":" $2) in live) { print $1 ":" $2 }
-  ' "$2" "$1"
+    $3 != "" && $7 ~ /^[0-9]+$/ && now - $7 >= grace && !(($1 ":" $2) in live) { print $1 ":" $2 "\t" $3 }
+  ' "$2" "$1" | capacity_keep_present_worktrees
+}
+
+# Read "<key>\t<worktree>" lines and print each key whose worktree is an
+# existing directory on this host.
+capacity_keep_present_worktrees() {
+  local key wt
+  while IFS="$(printf '\t')" read -r key wt; do
+    [ -n "$wt" ] && [ -d "$wt" ] && printf '%s\n' "$key"
+  done
+  return 0
 }
 
 # capacity_published_stopped <lanes-file>: the admission path's stopped keys -
@@ -845,8 +859,8 @@ capacity_published_stopped() {
   is_uint "$at" && [ "$at" -le "$now" ] && [ $((now - at)) -le "$max" ] || return 0
   awk -F'\t' -v now="$now" -v grace="$PENDING_GRACE" '
     FILENAME == ARGV[1] { k[$1] = 1; next }
-    (($1 ":" $2) in k) && $7 ~ /^[0-9]+$/ && now - $7 >= grace { print $1 ":" $2 }
-  ' <(jq -r '.lanes.stopped_keys[]? | strings' "$PUBLISHED" 2>/dev/null) "$1"
+    (($1 ":" $2) in k) && $3 != "" && $7 ~ /^[0-9]+$/ && now - $7 >= grace { print $1 ":" $2 "\t" $3 }
+  ' <(jq -r '.lanes.stopped_keys[]? | strings' "$PUBLISHED" 2>/dev/null) "$1" | capacity_keep_present_worktrees
 }
 
 # The fixed-cap path's stopped records for this home (auto_budget applies the
@@ -867,8 +881,8 @@ capacity_set_aside_stopped() {
   : > "$stmp/stopped"
   if [ "$mode" = admit ]; then
     capacity_published_stopped "$stmp/lanes" > "$stmp/stopped"
-  elif fm_lane_vitals_processes "$os" "$stmp/ps" 2>/dev/null; then
-    fm_lane_vitals_attribute "$stmp/worktrees" "$stmp/ps" > "$stmp/attr" 2>/dev/null || : > "$stmp/attr"
+  elif fm_lane_vitals_processes "$os" "$stmp/ps" 2>/dev/null &&
+    fm_lane_vitals_attribute "$stmp/worktrees" "$stmp/ps" > "$stmp/attr" 2>/dev/null; then
     capacity_stopped_keys "$stmp/lanes" "$stmp/attr" > "$stmp/stopped"
   fi
   stopped_keys=$(cat "$stmp/stopped")
@@ -1093,7 +1107,7 @@ def dur: if . == null then "?" elif . >= 86400 then "\(. / 86400 | floor)d" elif
 auto_notes=
 auto_ledger=
 auto_budget() {
-  local attr_ok want_gpu=1 tmp lstate i n_states have_states=0 v cfg vit prev_ledger prev_doc out disk_sample host lab mount free seen_mounts
+  local attr_ok attributed want_gpu=1 tmp lstate i n_states have_states=0 v cfg vit prev_ledger prev_doc out disk_sample host lab mount free seen_mounts
   if [ "$have_jq" -eq 0 ]; then
     free_lanes=0 reason=auto-needs-jq
     reasons="${reasons}auto: needs jq to read the lane footprint ledger
@@ -1158,7 +1172,8 @@ auto_budget() {
     auto_notes="${auto_notes}process attribution unavailable; lane samples kept from the last reading
 "
   fi
-  fm_lane_vitals_attribute "$tmp/worktrees" "$tmp/ps" > "$tmp/attr" 2>/dev/null || : > "$tmp/attr"
+  attributed=true
+  fm_lane_vitals_attribute "$tmp/worktrees" "$tmp/ps" > "$tmp/attr" 2>/dev/null || { attributed=false; : > "$tmp/attr"; }
   fm_lane_vitals_pss "$os" "$tmp/attr" 2>/dev/null || true
   # Proven-stopped records hold no lane (the header's lanes paragraph); only a
   # process table actually read can prove it, so an unreadable table sets
@@ -1169,7 +1184,7 @@ auto_budget() {
   : > "$tmp/stopped"
   if [ "$mode" = admit ]; then
     capacity_published_stopped "$tmp/lanes" > "$tmp/stopped"
-  elif [ "$attr_ok" = true ] && [ -s "$tmp/ps" ]; then
+  elif [ "$attr_ok" = true ] && [ "$attributed" = true ] && [ -s "$tmp/ps" ]; then
     capacity_stopped_keys "$tmp/lanes" "$tmp/attr" > "$tmp/stopped"
   fi
   stopped_keys=$(cat "$tmp/stopped")
@@ -1542,7 +1557,8 @@ doc=$(jq -n \
   def num: if . == "" then null else tonumber + 0 end;
   def lines: split("\n") | map(select(. != ""));
   {schema: "fm-lane-capacity.v1", generated_epoch: $now, home: $home, machine: $machine,
-   lanes: {count: ($lanes | tonumber), stopped: ($stopped | tonumber), stopped_keys: ($stopped_keys | lines), pr_ready: ($pr_ready | tonumber), ids: ($lane_ids | lines)},
+   lanes: ({count: ($lanes | tonumber), pr_ready: ($pr_ready | tonumber), ids: ($lane_ids | lines)}
+     + (if ($stopped | tonumber) > 0 then {stopped: ($stopped | tonumber), stopped_keys: ($stopped_keys | lines)} else {} end)),
    cap: {target: (if $cap_status == "ok" then ($target | tonumber) else null end), status: $cap_status},
    projects: ($projects | lines),
    pressure: {level: $level, why: ($why | lines), basis: $basis, beat_age_s: ($beat_age | num),
