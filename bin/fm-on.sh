@@ -4,11 +4,12 @@
 # Usage:
 #   fm-on.sh [--stdin] <secondmate-id|unambiguous-ssh-alias> <fm-command> [args...]
 #
-# Routes come only from remote records in data/secondmates.md. A record names an
+# Managed routes come from remote records in data/secondmates.md. A record names an
 # SSH config alias, remote Firstmate code root, and remote FM_HOME. A host alias
 # may be used directly only when exactly one record selects it; an ambiguous
 # alias is refused. The command must be a genuine executable in this checkout's
-# bin/fm-*.sh namespace. No per-command table exists.
+# bin/fm-*.sh namespace. The Boston receiver alone uses its opt-in peer record
+# from config/boston-batch-relay; that record grants no other command a route.
 #
 # argv is encoded as one NUL-delimited stream and passed through the fixed
 # fm-remote-entrypoint.sh. The remote command's stdin is /dev/null by default,
@@ -72,6 +73,16 @@ LOCAL_COMMAND="$FM_ROOT/bin/$COMMAND"
   || die "remote command is not a genuine tracked executable in this Firstmate checkout: $COMMAND"
 git -C "$FM_ROOT" ls-files --error-unmatch "bin/$COMMAND" >/dev/null 2>&1 \
   || die "remote command is not tracked by this Firstmate checkout: $COMMAND"
+if [ "$COMMAND" = fm-boston-batch-receive.sh ]; then
+  REG="$FM_HOME/config/boston-batch-relay"
+  [ "$STDIN_MODE" = caller ] && [ -f "$REG" ] && [ ! -L "$REG" ] \
+    || die "Boston delivery requires stdin and an enabled Boston peer route"
+  IFS= read -r boston_role < "$REG" || die "missing Boston role"
+  case "$boston_role:$ROUTE" in
+    vm-build-mate:ops|ops:vm-build-mate) ;;
+    *) die "Boston route must identify the configured opposite role" ;;
+  esac
+fi
 [ -f "$REG" ] && [ ! -L "$REG" ] || die "no safe secondmate registry at $REG"
 
 MATCHES=0
@@ -82,7 +93,8 @@ while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in '- '*) ;; *) continue ;; esac
   secondmate_registry_parse_line "$line" || die "malformed secondmate registry entry: $line"
   [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ] || continue
-  if [ "$SECONDMATE_REGISTRY_ID" = "$ROUTE" ] || [ "$SECONDMATE_REGISTRY_HOST" = "$ROUTE" ]; then
+  if [ "$SECONDMATE_REGISTRY_ID" = "$ROUTE" ] ||
+    { [ "$COMMAND" != fm-boston-batch-receive.sh ] && [ "$SECONDMATE_REGISTRY_HOST" = "$ROUTE" ]; }; then
     MATCHES=$((MATCHES + 1))
     HOST=$SECONDMATE_REGISTRY_HOST
     ROOT=$SECONDMATE_REGISTRY_ROOT
