@@ -286,6 +286,13 @@ class PreviewTest(unittest.TestCase):
         row = self.rows("--pr", "112")[112]
         self.assertEqual(row["status"], "verify-fix")
 
+    def test_unresolved_branch_owner_only_affects_matching_pull_requests(self):
+        self.seed()
+        self.record("stale-owner", "branch=fm/task+111", f"project={self.tmp / 'missing-project'}")
+        rows = self.rows()
+        self.assertEqual(rows[111]["status"], "unknown")
+        self.assertEqual(rows[112]["status"], "verify-fix")
+
     def test_unreadable_owner_status_makes_disposition_unknown(self):
         self.seed()
         self.record("t111", f"pr={url(111)}", status=[self.ready(111, sha("old-111"))])

@@ -107,14 +107,20 @@ fact() {  # <jq-program> [jq-args...]
   jq -nc "$@" "$program" >&3
 }
 
-unreadable() {  # <input> <detail>
-  fact '{t:"unreadable",input:$input,detail:$detail}' --arg input "$1" --arg detail "$2"
+unreadable() {  # <input> <detail> [affected PR numbers]
+  if [ -n "${3:-}" ]; then
+    fact '{t:"unreadable",input:$input,detail:$detail,prs:($prs|split(" ")|map(select(length>0)|tonumber))}' \
+      --arg input "$1" --arg detail "$2" --arg prs "$3"
+  else
+    fact '{t:"unreadable",input:$input,detail:$detail}' --arg input "$1" --arg detail "$2"
+  fi
 }
 
 # The selected open pull requests, plus the head branches their owners could
 # record.
 HEADS=' '
 HEAD_PR_NUMBERS=' '
+HEAD_BRANCH_PR=' '
 collect_forge() {
   local query jq_expr body entry num draft head hrepo base branch selected=' ' wanted p count=0
   query='query($owner:String!,$name:String!){repository(owner:$owner,name:$name){pullRequests(states:OPEN,first:'"$FM_REVIEW_CAPACITY_PAGE"',orderBy:{field:UPDATED_AT,direction:DESC}){totalCount nodes{number isDraft baseRefName headRefName headRefOid headRepository{nameWithOwner}}}}}'
@@ -141,6 +147,7 @@ collect_forge() {
     [ "$wanted" -eq 1 ] || continue
     HEADS="$HEADS$branch "
     HEAD_PR_NUMBERS="$HEAD_PR_NUMBERS$num "
+    HEAD_BRANCH_PR="$HEAD_BRANCH_PR$branch:$num "
     fact '{t:"pr",number:($num|tonumber),draft:($draft=="1"),head:$head,head_repo:$hrepo,base:$base,branch:$branch}' \
       --arg num "$num" --arg draft "$draft" --arg head "$head" --arg hrepo "$hrepo" \
       --arg base "$base" --arg branch "$branch"
@@ -150,7 +157,7 @@ collect_forge() {
 # One task record, when its pr= is in this repository or its branch could be a
 # selected pull request's head: its last status event and ready reports.
 collect_record() {  # <state> <meta>
-  local state=$1 meta=$2 id text kind pr pr_path pr_number branch pr_match=0 branch_match=0 target='' sources=''
+  local state=$1 meta=$2 id text kind pr pr_path pr_number branch pr_match=0 branch_match=0 target='' sources='' affected_prs='' pair
   local status last='' verb='' note line scan done_lines=''
   if ! fm_review_capacity_read_record "$meta"; then
     [ -e "$meta" ] || return 0
@@ -177,7 +184,10 @@ collect_record() {  # <state> <meta>
   if [ "$branch_match" -eq 1 ]; then
     target=$(fm_review_capacity_record_target "$text")
     if [ -z "$target" ]; then
-      unreadable owners "task $id records a selected head branch but its publication target cannot be resolved"
+      for pair in $HEAD_BRANCH_PR; do
+        case "$pair" in "$branch":*) affected_prs="${affected_prs}${pair#*:} " ;; esac
+      done
+      unreadable owners "task $id records a selected head branch but its publication target cannot be resolved" "${affected_prs% }"
     fi
     [ "$target" = "$WANT" ] || branch_match=0
     [ "$branch_match" -eq 0 ] || sources=$(fm_review_capacity_record_sources "$text" "$WANT" | tr '\n' ' ')

@@ -97,8 +97,10 @@ def judge(url, pr, facts):
     owner_status_unreadable = any(owner["verb"] == "unreadable" for owner in owners)
     ticket_status_unreadable = any(ticket.get("status_unreadable", False) for ticket in tickets)
     active = [owner for owner in owners if owner["verb"] not in FINISHED and owner["verb"] != "unreadable"]
+    relevant_unreadable = [row for row in facts["unreadable"]
+                           if "prs" not in row or pr["number"] in row["prs"]]
     unreadable = ["local evidence unavailable"] if (
-        facts["unreadable"] or owner_status_unreadable or ticket_status_unreadable) else []
+        relevant_unreadable or owner_status_unreadable or ticket_status_unreadable) else []
 
     if pr["draft"]:
         status, reason = "draft", "the pull request is a draft"
