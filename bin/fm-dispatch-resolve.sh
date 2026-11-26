@@ -74,7 +74,8 @@
 #   login a launch from this home would spend (bin/fm-quota-launch-lib.sh,
 #   fm_quota_launch_snapshot). A Claude pin that cannot be read, or a declared
 #   Claude account list, leaves Claude unmeasured rather than judged on the
-#   ambient login.
+#   ambient login. A missing, slow, failed, or invalid read, or any candidate
+#   left unranked, adds a "quota: stale" line.
 #
 # Shared-quota opt-out: an optional top-level "shared_quota": true in the
 #   rules file declares this home draws every provider's usage from one single
@@ -109,6 +110,7 @@
 #     preferred_provider: <family and preference or fallback decision, when applied>
 #     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
 #        (with the shared-quota opt-out: <harness>:<model> provider=.. -> eligible (quota ranking off: home declares a single shared quota))
+#     quota: stale   (an unusable quota read, or a candidate left unranked)
 #     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
 #   Task record: for <data>/<id>/brief.md, where <data> is FM_DATA_OVERRIDE,
 #   else $FM_HOME/data, every run first removes
@@ -209,7 +211,15 @@ emit_error() {
   record_task error || true
   echo "dispatch-resolve: error ($reason)" >&2
   printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
+  [ -z "${2:-}" ] || printf '  quota: %s\n' "$2"
   exit 0
+}
+# A missing or unusable quota reading: the usual error outcome, flagged and
+# logged as stale so intake carries on instead of reading it as a stop.
+emit_stale_quota() {  # <reason> <fixed code>
+  STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}" \
+    fm_quota_launch_report "${TASK_ID:--}" - '' stale "reason=$2"
+  emit_error "$1" stale
 }
 usage() {
   awk '
@@ -658,9 +668,10 @@ if [ "$SHARED_QUOTA" = true ]; then
   printf '{"providers":[]}\n' > "$QUOTA"
   SQ=true
 else
-  command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
-  fm_quota_launch_snapshot "$CONFIG" > "$QUOTA" || emit_error "quota-axi --json failed"
-  fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
+  command -v quota-axi >/dev/null 2>&1 || emit_stale_quota "quota-axi not installed" quota-axi-missing
+  fm_quota_launch_snapshot "$CONFIG" > "$QUOTA" || emit_stale_quota "quota-axi --json failed" read-failed
+  fm_quota_json_valid < "$QUOTA" ||
+    emit_stale_quota "quota-axi --json returned an invalid snapshot" read-failed
 fi
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
@@ -842,6 +853,7 @@ TEXT=$(jq -r '
   (if .note then "  note: \(.note | flat)" else empty end),
   (if .preferred_provider then "  preferred_provider: \(.preferred_provider | flat)" else empty end),
   (if .unranked_note then "  note: \(.unranked_note | flat)" else empty end),
+  (if any(.candidates[]?; .unranked) then "  quota: stale" else empty end),
   (.candidates[]? | "  candidate: \(.profile.harness | flat):\(show(.profile.model))"
       + (if .provider then "  provider=\(.provider | flat)" else "" end)
       + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)

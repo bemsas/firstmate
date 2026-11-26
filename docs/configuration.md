@@ -2024,7 +2024,8 @@ No verdict is read back, so switching logins or waiting for a reset needs no cle
 
 [`bin/fm-quota-launch-lib.sh`](../bin/fm-quota-launch-lib.sh) owns which login each runner's reading uses, which launches are unmatched, and the read's time bound.
 The reading happens in the launching process: a login selected only by the terminal session's own environment is not visible to it, so pin the account where the two can differ.
-A worker the watcher parked on a visible rate-limit banner stays parked; relaunching it runs this gate again.
+A worker the watcher parked on a visible rate-limit banner is never relaunched automatically, and the parked episode never blocks a relaunch, which runs this gate again.
+The watcher rereads that task's current login every `FM_BROKEN_QUOTA_RECHECK_SECS` (600) and reports again once it has headroom, or when a new launch of the task shows a limit.
 
 ## Claude worker sandbox
 
@@ -2500,6 +2501,7 @@ After the answer, code applies all remaining checks and ranking:
 - Every applicable account-wide and model/product row from one `quota-axi --json` snapshot.
 - The optional `preferred_provider` restriction under the [profile-array procedure](../.agents/skills/quota-array-dispatch/SKILL.md#rank-by-spendpriority).
 - The numeric `spendPriority` argmax within that candidate pool, using each candidate's limiting row.
+- A missing, slow, failed, or invalid read, or any candidate left unranked, adds a `quota: stale` line, and the outcome returns to the ordinary intake.
 - The snapshot describes the logins this home's launches spend: a `config/claude-account` pin and a `config/pi-account` root answer their own rows, and a pin that cannot be read or a `config/claude-accounts` list leaves Claude unmeasured instead of borrowing the ambient login.
 - With the home's `shared_quota: true` declaration ("Crew dispatch profiles"), the quota snapshot, floors, runway gates, and `spendPriority` argmax are skipped entirely; resolution is the matched rule's declared profile order (`preferred_provider` still narrows the pool; declared order then picks within it).
 

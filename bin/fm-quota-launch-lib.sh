@@ -1,11 +1,14 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # FM_QUOTA_LAUNCH_VERDICT is read by sourcing callers.
 # fm-quota-launch-lib.sh - the single owner of the launch quota gate: which
 # login a launch will spend on this host, the fresh quota-axi read of that
 # login, and the only verdict that stops a launch.
 #
 # docs/configuration.md "Launch quota gate" owns the operator-facing contract.
 # Sourced by bin/fm-spawn.sh (every launch and relaunch, on the host that runs
-# the agent) and bin/fm-control.sh (before a relaunch stops the live agent).
+# the agent) and bin/fm-control.sh (before a relaunch stops the live agent), by
+# bin/fm-dispatch-resolve.sh for its intake snapshot, and by bin/fm-watch.sh to
+# reread the login of a task parked on a rate limit.
 #
 # fm_quota_launch_gate <task> <harness> <model> <account-declared> <account-root> <raw 0|1> <backend>
 #   <account-declared> and <account-root> are the first two fields of
@@ -68,6 +71,7 @@ fm_quota_launch_env_credential() {
 # fm_quota_launch_report <task> <harness> <provider> <verdict> <detail>
 fm_quota_launch_report() {
   local line="quota-gate: task=$1 harness=$2 provider=${3:--} quota=$4 $5"
+  FM_QUOTA_LAUNCH_VERDICT=$4
   [ "$4" = ok ] || printf '%s\n' "$line" >&2
   [ -z "${STATE:-}" ] || [ ! -d "$STATE" ] ||
     { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$line" >> "$STATE/quota-launch.log"; } 2>/dev/null ||
@@ -179,8 +183,36 @@ fm_quota_launch_gate() {
   [ "${verdict%% *}" != exhausted ]
 }
 
+# fm_quota_launch_task_verdict <task> <meta-file> <config-dir>
+# Sets FM_QUOTA_LAUNCH_VERDICT (ok, exhausted, or stale) from one fresh reading
+# of the login a relaunch of this ship or scout record would select now: the
+# recorded account under a declared list, else the home's current pin, else the
+# ambient login. Informs the watcher's rate-limit report; it stops nothing.
+fm_quota_launch_task_verdict() {
+  local task=$1 meta=$2 config=$3 harness model backend listed account selection declared='' root=''
+  harness=$(fm_meta_get "$meta" harness)
+  model=$(fm_meta_get "$meta" model)
+  backend=$(fm_meta_get "$meta" backend)
+  FM_QUOTA_LAUNCH_VERDICT=stale
+  listed=$(fm_worker_account_list "$harness" "$config" 2>/dev/null) || return 0
+  if [ -n "$listed" ]; then
+    account=$(fm_meta_get "$meta" account)
+    printf '%s\n' "$listed" | grep -qxF -- "$account" || return 0
+    declared=$account
+    [ "$account" = ordinary ] || root=$account
+  else
+    selection=$(fm_worker_account_resolve "$harness" "$config" "the $harness account pin" 2>/dev/null) || return 0
+    if [ -n "$selection" ]; then
+      declared=${selection%%$'\t'*}
+      root=${selection#*$'\t'}
+      root=${root%%$'\t'*}
+    fi
+  fi
+  fm_quota_launch_gate "$task" "$harness" "$model" "$declared" "$root" 0 "${backend:-tmux}" 2>/dev/null || :
+}
+
 # fm_quota_launch_snapshot <config-dir>
-# Prints one fresh quota-axi --json snapshot for dispatch intake, scoped to the
+# Prints one fresh, time-bounded quota-axi --json snapshot for dispatch intake, scoped to the
 # logins this home's launches spend: a config/pi-account root answers the Pi
 # rows, and a config/claude-account pin replaces the claude rows with that
 # root's own. A pin that cannot be read, or a config/claude-accounts list (the
@@ -189,13 +221,14 @@ fm_quota_launch_gate() {
 # the home's own read fails; output validity is the caller's to check.
 fm_quota_launch_snapshot() {
   local config=$1 listed selection declared root pinned='' snapshot
-  local -a read_env=(env -u QUOTA_AXI_MAX_AGE)
+  local -a read_env=(env -u QUOTA_AXI_MAX_AGE -u QUOTA_AXI_SNAPSHOT)
   selection=$(fm_worker_account_resolve pi "$config" config/pi-account 2>/dev/null) || selection=
   if [ -n "$selection" ]; then
     root=${selection#*$'\t'}
     read_env+=("PI_CODING_AGENT_DIR=${root%%$'\t'*}")
   fi
-  snapshot=$("${read_env[@]}" quota-axi --json 2>/dev/null) || return 1
+  snapshot=$(fm_run_timed "$FM_QUOTA_LAUNCH_SECONDS" "${read_env[@]}" quota-axi --json 2>/dev/null </dev/null) ||
+    return 1
   listed=$(fm_worker_account_list claude "$config" 2>/dev/null) || listed=unreadable
   if [ -z "$listed" ] && [ ! -e "$config/claude-account" ] && [ ! -L "$config/claude-account" ]; then
     printf '%s\n' "$snapshot"

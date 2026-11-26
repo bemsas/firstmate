@@ -331,6 +331,8 @@ WATCH_HOME_EXISTED=0
 # Ship/scout broken model session recovery (API error banner with idle agent).
 # shellcheck source=/dev/null # Analyzed separately as a canonical lint root.
 . "$SCRIPT_DIR/fm-broken-session-lib.sh"
+# shellcheck source=bin/fm-quota-launch-lib.sh
+. "$SCRIPT_DIR/fm-quota-launch-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -497,6 +499,9 @@ BROKEN_SESSION_MAX_ATTEMPTS=${FM_BROKEN_SESSION_MAX_ATTEMPTS:-}
 case "$BROKEN_SESSION_MAX_ATTEMPTS" in ''|*[!0-9]*|0) BROKEN_SESSION_MAX_ATTEMPTS=3 ;; esac
 BROKEN_SESSION_WINDOW_SECS=${FM_BROKEN_SESSION_WINDOW_SECS:-}
 case "$BROKEN_SESSION_WINDOW_SECS" in ''|*[!0-9]*|0) BROKEN_SESSION_WINDOW_SECS=3600 ;; esac
+# How often a task parked on a rate or usage limit has its current login reread.
+BROKEN_QUOTA_RECHECK_SECS=${FM_BROKEN_QUOTA_RECHECK_SECS:-}
+case "$BROKEN_QUOTA_RECHECK_SECS" in ''|*[!0-9]*) BROKEN_QUOTA_RECHECK_SECS=600 ;; esac
 BROKEN_SESSION_NOTE='Supervision detected a broken model session (API error shown in the worker pane). Relaunching fresh; committed and uncommitted work in the isolated copy are preserved.'
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
@@ -1325,6 +1330,38 @@ secondmate_liveness_tick() {
   [ "$failed" -eq 0 ]
 }
 
+# A visible rate or usage limit is never relaunched automatically: the provider
+# may still be refusing. Its episode belongs to one launch of the task
+# (spawn_gen), and the current login is reread on a slow cadence, so a banner
+# left over from an earlier login is reported again once that login has
+# headroom. Sets the caller's reason, notify_key, and err.
+broken_session_quota_park() {  # <meta> <id> <now>
+  local meta=$1 id=$2 now=$3 marker="$STATE/.broken-session-park-$2"
+  local status='' generation='' headroom='' current seen=0 text
+  current=$(fm_meta_get "$meta" spawn_gen 2>/dev/null || true)
+  current=${current:--}
+  { read -r status generation headroom < "$marker"; } 2>/dev/null || :
+  if [ "$status" = quota ] && [ "$generation" = "$current" ]; then
+    [ "$headroom" != headroom ] && [ "$(age_of "$marker")" -ge "$BROKEN_QUOTA_RECHECK_SECS" ] || return 0
+    seen=1
+  fi
+  fm_quota_launch_task_verdict "$id" "$meta" "$CONFIG"
+  headroom=
+  [ "$FM_QUOTA_LAUNCH_VERDICT" != ok ] || headroom=headroom
+  if ! printf 'quota %s %s\n' "$current" "$headroom" > "$marker"; then
+    err='broken-session park marker could not be written'
+    return 0
+  fi
+  [ "$seen" = 0 ] || [ -n "$headroom" ] || return 0
+  case "$FM_QUOTA_LAUNCH_VERDICT" in
+    ok) text='a fresh reading of its current login has headroom, so this limit may be from an earlier login or window; relaunch it to recover' ;;
+    exhausted) text='its current login has no allowance left' ;;
+    *) text='quota=stale for its current login' ;;
+  esac
+  reason="check: task $id is waiting out a rate or usage limit, not relaunched; $text ($FM_BROKEN_DETAIL; backend=$FM_BROKEN_BACKEND)"
+  notify_key="broken-session-quota-$id-$now"
+}
+
 # Detect ship/scout workers stuck on a visible API error banner and relaunch
 # them with a progress note through the control plane, without touching the
 # recorded worktree.
@@ -1385,22 +1422,22 @@ broken_session_tick() {
           notify_key="broken-session-failed-$id-$now"
         fi
         ;;
-      auth|quota)
-        # Never relaunched: the same credential or limit would fail again. One
+      auth)
+        # Never relaunched: the same credential would fail again. One
         # notification per episode; the park marker clears on the next clear probe.
         rm -f "$since_file"
-        if [ "$(cat "$STATE/.broken-session-park-$id" 2>/dev/null)" != "$FM_BROKEN_STATUS" ]; then
-          if printf '%s\n' "$FM_BROKEN_STATUS" > "$STATE/.broken-session-park-$id"; then
-            if [ "$FM_BROKEN_STATUS" = auth ]; then
-              reason="check: task $id needs a credential or login, not a relaunch ($FM_BROKEN_DETAIL; backend=$FM_BROKEN_BACKEND)"
-            else
-              reason="check: task $id is waiting out a rate or usage limit, not relaunched ($FM_BROKEN_DETAIL; backend=$FM_BROKEN_BACKEND)"
-            fi
-            notify_key="broken-session-$FM_BROKEN_STATUS-$id-$now"
+        if [ "$(cat "$STATE/.broken-session-park-$id" 2>/dev/null)" != auth ]; then
+          if printf 'auth\n' > "$STATE/.broken-session-park-$id"; then
+            reason="check: task $id needs a credential or login, not a relaunch ($FM_BROKEN_DETAIL; backend=$FM_BROKEN_BACKEND)"
+            notify_key="broken-session-auth-$id-$now"
           else
             err='broken-session park marker could not be written'
           fi
         fi
+        ;;
+      quota)
+        rm -f "$since_file"
+        broken_session_quota_park "$meta" "$id" "$now"
         ;;
       skip)
         triage_log "task $id broken-session: ${FM_BROKEN_DETAIL:-skipped}"

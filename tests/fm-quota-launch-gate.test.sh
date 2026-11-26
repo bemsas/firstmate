@@ -7,6 +7,7 @@
 # another login's reading if the launch selected the wrong login. Each stub
 # reading carries an account identity that no output or log may repeat. No case
 # reads a real login, a real quota, or the network.
+# shellcheck disable=SC2030,SC2031 # The watcher tick sets PATH in its own subshell only.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -303,6 +304,8 @@ test_relaunch_rechecks_the_current_login() {
   claude_login "$CASE/spent" 0 exhausted_now
   claude_login "$CASE/open" 55
   printf '%s\n' "$CASE/spent" > "$HOME_DIR/config/claude-account"
+  # An earlier rate-limit episode the watcher parked must not decide anything.
+  printf 'quota - \n' > "$HOME_DIR/state/.broken-session-park-$id"
   out=$(run_relaunch "login spent"); rc=$?
   expect_code 1 "$rc" "a relaunch onto an exhausted login should be refused: $out"
   assert_contains "$out" "shows no allowance left" "the quota gate should explain the refusal"
@@ -326,15 +329,13 @@ test_relaunch_rechecks_the_current_login() {
 
 # Dispatch intake: stub curl picks the only rule, and each candidate line shows
 # whose figures the resolver judged.
-resolve() {
-  FM_HOME="$HOME_DIR" HOME="$HOME_DIR/user-home" PATH="$FAKEBIN:$PATH" \
+resolve() {  # [brief]
+  FM_HOME="$HOME_DIR" HOME="$HOME_DIR/user-home" PATH="${RESOLVE_PATH:-$FAKEBIN:$PATH}" \
     FM_DISPATCH_PROVIDER=typesafe TYPESAFE_API_KEY=synthetic-dispatch-key \
-    "$ROOT/bin/fm-dispatch-resolve.sh" "$CASE/brief.md" 2>&1
+    "$ROOT/bin/fm-dispatch-resolve.sh" "${1:-$CASE/brief.md}" 2>&1
 }
 
-test_dispatch_intake_reads_the_pinned_login() {
-  local out
-  new_case resolve claude
+make_intake() {
   printf '# Task\nFix a pager bug.\n' > "$CASE/brief.md"
   printf '{"rules":[{"when":"A bug fix.","use":{"harness":"claude","model":"sonnet"}}]}\n' \
     > "$HOME_DIR/config/crew-dispatch.json"
@@ -347,12 +348,20 @@ printf '{"model":"m","answers":{"rule":{"type":"choice","choice":"rule_1","confi
 printf 200
 SH
   chmod +x "$FAKEBIN/curl"
+}
+
+test_dispatch_intake_reads_the_pinned_login() {
+  local out
+  new_case resolve claude
+  make_intake
   # The stub answers an unscoped read from HOME: the ambient login, exhausted.
   login "$HOME_DIR/user-home" 5 "$(reading claude fresh all_models 0 exhausted_now)"
   claude_login "$CASE/open" 64
   printf '%s\n' "$CASE/open" > "$HOME_DIR/config/claude-account"
-  out=$(resolve)
+  out=$(QUOTA_AXI_SNAPSHOT="$CASE/fixture" QUOTA_AXI_MAX_AGE=1h resolve)
   assert_contains "$out" "status: clear" "the pinned login's headroom should resolve: $out"
+  assert_no_grep "snapshot=$CASE/fixture" "$CASE/quota-calls" "no intake read may be answered by a fixture"
+  assert_no_grep "max_age=1h" "$CASE/quota-calls" "no intake read may reuse an earlier reading"
   assert_contains "$out" "remaining=64%" "the candidate should carry the pinned login's figure"
   assert_not_contains "$out" "$SECRET" "intake must not repeat an account identity"
   printf '%s\n' "$CASE/open" "$CASE/other" > "$HOME_DIR/config/claude-accounts"
@@ -364,6 +373,109 @@ SH
   pass "dispatch intake judges the login a launch would spend"
 }
 
+test_unusable_intake_read_falls_through_to_an_ordinary_launch() {
+  local out rc name id n=0 root dir clean
+  new_case intake claude
+  make_intake
+  root="$HOME_DIR/user-home"
+  # Every PATH directory holding a real quota-axi is left out for the missing case.
+  clean=$FAKEBIN
+  while IFS= read -r -d: dir; do
+    [ -x "$dir/quota-axi" ] || clean="$clean:$dir"
+  done <<< "$PATH:"
+  for name in missing failed invalid timeout; do
+    n=$((n + 1))
+    id="quota-intake-$n"
+    rm -rf "$root/quota.json" "$root/slow" "$root/.claude"
+    make_quota_stub "$FAKEBIN" "$CASE"
+    case "$name" in
+      missing) rm "$FAKEBIN/quota-axi" ;;
+      invalid) printf 'login %s\n' "$SECRET" > "$root/quota.json" ;;
+      timeout) : > "$root/slow" ;;
+    esac
+    fm_test_spawn_brief "$HOME_DIR" "$id"
+    if [ "$name" = missing ]; then
+      out=$(RESOLVE_PATH="$clean" resolve "$HOME_DIR/data/$id/brief.md")
+    else
+      out=$(FM_QUOTA_LAUNCH_SECONDS=1 resolve "$HOME_DIR/data/$id/brief.md")
+    fi
+    assert_contains "$out" "status: error" "a $name read should leave intake non-clear: $out"
+    assert_contains "$out" "quota: stale" "a $name read should be flagged stale"
+    assert_not_contains "$out" "$SECRET" "a $name read must not leak an identity"
+    assert_grep "task=$id harness=- provider=- quota=stale" "$HOME_DIR/state/quota-launch.log" \
+      "a $name intake read should be logged"
+    assert_grep '"status":"error"' "$HOME_DIR/data/$id/dispatch-resolution.json" \
+      "a $name read should be recorded as the ordinary error outcome"
+    make_quota_stub "$FAKEBIN" "$CASE"
+    out=$(FM_QUOTA_LAUNCH_SECONDS=1 spawn_ship "$id" --harness claude --model sonnet); rc=$?
+    expect_launch "$id" "$rc" "$out"
+    assert_contains "$out" "quota=stale" "the launch after a $name read should carry the stale marker"
+  done
+  pass "a missing or unusable intake read falls through to a launch flagged stale"
+}
+
+# One watcher tick over a task whose idle pane shows a rate-limit banner.
+watch_tick() {  # <recheck-seconds>
+  rm -f "$HOME_DIR/state/.broken-session-tick"
+  (
+    export FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" HOME="$HOME_DIR/user-home" \
+      PATH="$FAKEBIN:$PATH" FM_BROKEN_QUOTA_RECHECK_SECS="$1" CLAUDE_CONFIG_DIR=
+    # shellcheck source=bin/fm-watch.sh
+    . "$ROOT/bin/fm-watch.sh"
+    wake() { printf 'WAKE %s\n' "$1"; }
+    broken_session_tick
+  ) 2>&1
+}
+
+test_old_rate_limit_episode_never_blocks_recovery() {
+  local out meta
+  new_case watch claude
+  meta="$HOME_DIR/state/ship1.meta"
+  cat > "$FAKEBIN/tmux" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  capture-pane) cat '$CASE/pane.txt' ;;
+  display-message) case "\$*" in *pane_current_command*) printf 'claude\n' ;; esac ;;
+  list-windows) printf 'win\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$FAKEBIN/tmux"
+  printf 'API Error: 429 rate_limit_error\n' > "$CASE/pane.txt"
+  printf 'window=ses:win\nkind=ship\nharness=claude\nbackend=tmux\nspawn_gen=one\n' > "$meta"
+  PATH="$FAKEBIN:$PATH" "$ROOT/bin/fm-busy-event.sh" arm "$HOME_DIR/state" ship1 \
+    --state idle --source claude-hook --event stop-failure >/dev/null || fail "could not arm busy state"
+  claude_login "$CASE/spent" 0 exhausted_now
+  claude_login "$CASE/open" 55
+  printf '%s\n' "$CASE/spent" > "$HOME_DIR/config/claude-account"
+  out=$(watch_tick 0)
+  assert_contains "$out" "its current login has no allowance left" "a current refusal should be reported: $out"
+  out=$(watch_tick 0)
+  assert_not_contains "$out" "WAKE" "an unchanged refusal should not be repeated: $out"
+  printf '%s\n' "$CASE/open" > "$HOME_DIR/config/claude-account"
+  out=$(watch_tick 3600)
+  assert_not_contains "$out" "WAKE" "the login is only reread on its cadence: $out"
+  out=$(watch_tick 0)
+  assert_contains "$out" "current login has headroom" "a login change should reopen recovery: $out"
+  assert_private "$out"
+  out=$(watch_tick 0)
+  assert_not_contains "$out" "WAKE" "headroom is reported once per launch: $out"
+  sed -i.bak 's/^spawn_gen=one$/spawn_gen=two/' "$meta"
+  rm "$CASE/open/quota.json"
+  out=$(watch_tick 3600)
+  assert_contains "$out" "quota=stale for its current login" "a new launch's limit is a new episode: $out"
+  assert_absent "$HOME_DIR/state/.broken-session-relaunch-ship1" \
+    "a visible provider limit must never be relaunched automatically"
+  printf 'API Error: 401 Unauthorized\n' > "$CASE/pane.txt"
+  : > "$CASE/quota-calls"
+  out=$(watch_tick 0)
+  assert_contains "$out" "needs a credential or login" "an authentication refusal is unchanged: $out"
+  [ ! -s "$CASE/quota-calls" ] || fail "an authentication refusal reads no quota"
+  pass "a parked rate limit is rechecked against the current login and never auto-relaunched"
+}
+
+test_unusable_intake_read_falls_through_to_an_ordinary_launch
+test_old_rate_limit_episode_never_blocks_recovery
 test_pinned_login_swap_never_inherits_a_stop
 test_unpinned_launch_reads_the_ambient_login_without_reuse
 test_only_scopes_that_bound_the_model_stop_it
