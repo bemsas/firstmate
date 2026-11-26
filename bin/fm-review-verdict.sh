@@ -9,8 +9,9 @@
 # 'history' is a read-only listing of this home's journal, one JSON object
 # {pr,head,verdict,reviewer,eligible} per record in journal order, where
 # eligible marks the records 'passing' decides from (a refute merge is not one).
-# It takes no lock and creates nothing. An absent journal lists nothing; a
-# linked, unreadable, or malformed one exits 1.
+# It takes no lock and creates nothing. Records on a host this home does not use
+# are left out. An absent journal lists nothing; a linked, unreadable, or
+# malformed one exits 1.
 # The reviewer/supervisor calls this after the independent review; this helper
 # records the verdict, it does not perform or infer a review. No forge calls.
 # Firstmate runs this when accepting the report, with its exact reviewed head;
@@ -46,12 +47,19 @@ RECEIPTS='
   def receipts: [split("\n")[] | select(length > 0) | fromjson | receipt];
 '
 
-fm_review_verdict_receipts_valid() {
-  local urls url
-  urls=$(jq -Rsc "$RECEIPTS"'[receipts[].pr]' "$FILE") || return 1
+# The journal's pull requests on hosts this home uses, as a JSON array. Fails on
+# a malformed record, or a malformed address on such a host.
+fm_review_verdict_listed_urls() {
+  local urls url host
+  urls=$(jq -Rsc "$RECEIPTS"'[receipts[].pr] | unique' "$FILE") || return 1
+  urls=$(printf '%s\n' "$urls" | jq -r '.[]') || return 1
   while IFS= read -r url; do
+    [ -n "$url" ] || continue
+    host=${url#https://}
+    fm_github_host_allowed "${host%%/*}" || continue
     fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = github ] || return 1
-  done < <(printf '%s\n' "$urls" | jq -r '.[]')
+    printf '%s\n' "$url"
+  done <<< "$urls" | jq -Rsc 'split("\n") | map(select(length > 0))'
 }
 
 # Answered before the wake library is sourced, because sourcing it creates the
@@ -59,9 +67,11 @@ fm_review_verdict_receipts_valid() {
 if [ "$#" -eq 1 ] && [ "$1" = history ]; then
   [ -e "$FILE" ] || [ -L "$FILE" ] || exit 0
   [ -f "$FILE" ] && [ ! -L "$FILE" ] || exit 1
-  fm_review_verdict_receipts_valid || exit 1
-  exec jq -Rsc "$RECEIPTS"'
-    receipts[] | {pr, head, verdict, reviewer, eligible: eligible}
+  set -o pipefail
+  listed=$(fm_review_verdict_listed_urls) || exit 1
+  exec jq -Rsc --argjson listed "$listed" "$RECEIPTS"'
+    receipts[] | select(.pr as $pr | $listed | index($pr))
+    | {pr, head, verdict, reviewer, eligible: eligible}
   ' "$FILE"
 fi
 # shellcheck source=bin/fm-wake-lib.sh

@@ -15,7 +15,7 @@ This file owns each row's disposition; the first that applies wins:
   unknown            an input could not be read, a refute dispatch for this head
                      has neither a verdict nor a live scout, or no eligible
                      prior verdict joins
-  fix-evidenced      the head changed and an owner's latest ready report for this
+  fix-evidenced      the head changed and an owner's current ready report for this
                      pull request names the observed head
   verify-fix         the head changed with no such report
 
@@ -51,12 +51,13 @@ def shown(show, field):
 
 
 def owners_of(url, pr, records):
+    source = f"{url.split('/')[2]}/{pr['head_repo'].replace('%2F', '/')}".lower()
     owners = []
     for record in records:
         by_pr = record["pr"].lower() == url.lower()
         # A recorded pr= names the record's only pull request, whatever its branch.
         by_branch = (not record["pr"] and record["branch"] == pr["branch"]
-                     and pr["head_repo"].replace("%2F", "/") in record["sources"])
+                     and source in record["sources"])
         if by_pr or by_branch:
             owners.append({**record, "joined_by": "pr" if by_pr else "branch"})
     return owners

@@ -405,6 +405,83 @@ class PreviewTest(unittest.TestCase):
                                  text=True, capture_output=True)
         self.assertEqual(passing.returncode, 0, passing.stderr)
 
+    def test_shared_inodes_cannot_borrow_another_homes_evidence(self):
+        self.seed()
+        self.record("local", f"pr={url(112)}", status=["done: no exact head"])
+        self.record("foreign", f"pr={url(112)}", status=[self.ready(112, sha(112))], home=self.mate)
+        status = self.home / "state" / "local.status"
+        own = status.read_bytes()
+        status.unlink()
+        os.link(self.mate / "state" / "foreign.status", status)
+        row = self.rows("--pr", "112")[112]
+        self.assertEqual(row["status"], "unknown")
+        self.assertIsNone(row["fix_evidence"])
+        status.unlink()
+        status.write_bytes(own)
+        self.hold("foreign-hold", "Decide elsewhere", review=(url(112), sha(112)), home=self.mate)
+        backlog = self.home / "data" / "backlog.md"
+        backlog.unlink()
+        os.link(self.mate / "data" / "backlog.md", backlog)
+        row = self.rows("--pr", "112")[112]
+        self.assertEqual(row["status"], "unknown")
+        self.assertIsNone(row["holds"])
+
+    def test_linked_inputs_stay_unknown(self):
+        self.seed()
+        for name in ("state/t110.meta", "state/review-verdicts.jsonl", "state/scout114.meta", "data/backlog.md"):
+            path = self.home / name
+            number = 114 if name.endswith("scout114.meta") else 112
+            kept = self.tmp / "kept"
+            path.rename(kept)
+            path.symlink_to(kept)
+            row = self.rows("--pr", str(number))[number]
+            self.assertEqual(row["status"], "unknown", name)
+            path.unlink()
+            kept.rename(path)
+            self.assertEqual(self.rows("--pr", str(number))[number]["status"], EXPECTED[number], name)
+
+    def test_host_authorization_comes_from_the_selected_home(self):
+        self.seed()
+        host = "github.mate.test"
+        (self.mate / "config").mkdir()
+        (self.mate / "config" / "github-hosts").write_text(host + "\n")
+        command = [PREVIEW, f"{host}/{REPO}", "--pr", "112", "--json"]
+        for extra in ({}, {"FM_CONFIG_OVERRIDE": str(self.mate / "config")}):
+            done = subprocess.run(command, env={**self.env, **extra}, text=True, capture_output=True)
+            self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        (self.home / "config").mkdir()
+        os.link(self.mate / "config" / "github-hosts", self.home / "config" / "github-hosts")
+        done = subprocess.run(command, env=self.env, text=True, capture_output=True)
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertFalse((self.tmp / "gh.log").exists())
+
+    def test_branch_owner_requires_the_observed_host_and_repository(self):
+        self.seed()
+        self.pulls([self.node(112, head_repo="fork/widget")])
+        for host, status in (("github.mate.test", "verify-fix"), ("github.com", "owned")):
+            clone = self.tmp / host
+            self.git("init", "-q", str(clone))
+            self.git("-C", str(clone), "remote", "add", "origin", f"https://{host}/fork/widget.git")
+            self.record("forker", "branch=fm/task+112", f"upstream_consent=github.com/{REPO}",
+                        f"project={clone}", status=["working: fork"])
+            self.assertEqual(self.rows("--pr", "112")[112]["status"], status, host)
+
+    def test_a_later_event_supersedes_a_ready_report(self):
+        self.seed()
+        self.record("t112", f"pr={url(112)}", status=[
+            self.ready(112, sha(112)), "working [at=2]: retry", "failed [at=3]: retry failed"])
+        row = self.rows("--pr", "112")[112]
+        self.assertEqual(row["status"], "verify-fix")
+        self.assertIsNone(row["fix_evidence"])
+
+    def test_retired_host_receipts_do_not_suppress_local_history(self):
+        self.seed()
+        self.verdict(113, sha(113), "merge")
+        with (self.home / "state" / "review-verdicts.jsonl").open("a") as stream:
+            stream.write(json.dumps({"pr": "https://github.old.test/acme/widget/pull/888",
+                                     "head": sha(888), "verdict": "fix", "reviewer": "old"}) + "\n")
+        self.assertEqual(self.rows("--pr", "113")[113]["status"], "reviewed-head")
+
     def test_selection_and_forge_failure(self):
         self.seed()
         self.assertEqual(list(self.rows("--limit", "3")), [101, 102, 103])

@@ -16,7 +16,7 @@
 #
 # Inputs, each read through its owner:
 #   forge      bin/fm-review-capacity-lib.sh: target parsing, bounded gh-axi read,
-#              and local task record matching
+#              and local task record fields
 #   verdicts   bin/fm-review-verdict.sh history
 #   holds      bin/fm-tasks-axi.sh list --state held, then show <id> --full; a hold
 #              joins by its owning task or its required-review line, never prose
@@ -24,15 +24,21 @@
 #              bin/fm-dod-lib.sh reads a ready report's exact head
 #   reviews    state/<scout>.refute.json dispatch records
 # They come only from the one home FM_HOME selects. Other-home owner and hold
-# evidence is unknown. Its state/ must exist, and state/ and data/ must resolve to
-# directories of that home, so FM_STATE_OVERRIDE and FM_DATA_OVERRIDE cannot point
-# elsewhere. A linked status log is unreadable. Error messages name no local path.
+# evidence is unknown. Its state/ must exist, and state/, data/ and config/ must
+# resolve to directories of that home, so their FM_*_OVERRIDE variables cannot
+# point elsewhere. Every task record, status log, dispatch record, verdict
+# journal, backlog, .tasks.toml and config/github-hosts it uses must be a regular
+# file owned by this user with one link; any other leaves its input unknown (a
+# github-hosts one refuses its host). Held tasks are read only from the markdown
+# backlog. An owner joins by its exact pr=, or by its exact head branch published
+# from the pull request's host and repository. Only an owner's current status
+# event, a done ready report, is fix evidence. Error messages name no local path.
 #
 # bin/fm-review-eligibility-preview.py owns how a row is judged and printed.
 #
 # Exit: 0 report printed, 1 the forge could not be observed (a report still
 # prints, with the requested rows unknown), 2 invalid arguments, no state
-# directory, or state or data outside the selected home.
+# directory, or state, data or config outside the selected home.
 # The single-quoted programs below use jq and GraphQL variables.
 # shellcheck disable=SC2016
 set -u
@@ -83,7 +89,14 @@ if [ -e "$DATA" ] || [ -L "$DATA" ]; then
 else
   [ "$DATA" = "$FM_HOME/data" ] || die "data directory is outside the selected home"
 fi
-STATE="$HOME_REAL/state" DATA="$HOME_REAL/data"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+if [ -e "$CONFIG" ] || [ -L "$CONFIG" ]; then
+  [ "$(resolved "$CONFIG")" = "$HOME_REAL/config" ] || die "config directory is outside the selected home"
+else
+  [ "$CONFIG" = "$FM_HOME/config" ] || die "config directory is outside the selected home"
+fi
+FM_HOME=$HOME_REAL STATE="$HOME_REAL/state" DATA="$HOME_REAL/data"
+export FM_CONFIG_OVERRIDE="$HOME_REAL/config"
 for tool in jq python3; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
 done
@@ -106,7 +119,23 @@ done
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 
+# A file this home alone holds: regular, not a link, owned, one name.
+owned() {  # <file>
+  [ -f "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] && [ -r "$1" ] &&
+    [ "$(fm_pr_file_link_count "$1")" = 1 ]
+}
+present() { [ -e "$1" ] || [ -L "$1" ]; }
+# An input that may be absent but must be owned when it is there.
+absent_or_owned() { ! present "$1" || owned "$1"; }
+
+HOSTS="$FM_CONFIG_OVERRIDE/github-hosts"
+case "$TARGET" in
+  github.com/*) ;;
+  *) absent_or_owned "$HOSTS" || die "the repository is not a GitHub owner/repository on a host this home uses" ;;
+esac
 fm_review_capacity_target "$FM_ROOT" "$TARGET" ||
   die "the repository is not a GitHub owner/repository on a host this home uses"
 HOST=$FM_REVIEW_TARGET_HOST OWNER=$FM_REVIEW_TARGET_OWNER REPO=$FM_REVIEW_TARGET_REPO
@@ -170,10 +199,11 @@ collect_forge() {
 }
 
 # One task record, when its pr= is in this repository or its branch could be a
-# selected pull request's head: its last status event and ready reports.
+# selected pull request's head: its current status event and, when that is a
+# ready report, the head it names.
 collect_record() {  # <state> <meta>
   local state=$1 meta=$2 id text kind pr pr_path pr_number branch pr_match=0 branch_match=0 target='' sources='' affected_prs='' pair
-  local status last='' verb='' note line scan ready_url report_head done_lines=''
+  local status last='' verb='' note scan project url source report_url='' report_head=''
   if ! fm_review_capacity_read_record "$meta"; then
     [ -e "$meta" ] || return 0
     unreadable owners "task record $meta cannot be read coherently"
@@ -205,43 +235,46 @@ collect_record() {  # <state> <meta>
       unreadable owners "task $id records a selected head branch but its publication target cannot be resolved" "${affected_prs% }"
     fi
     [ "$target" = "$WANT" ] || branch_match=0
-    [ "$branch_match" -eq 0 ] || sources=$(fm_review_capacity_record_sources "$text" "$WANT" | tr '\n' ' ')
+    if [ "$branch_match" -eq 1 ]; then
+      # Host-qualified: the same owner/name on another host is another repository.
+      sources=$target
+      project=$(fm_review_capacity_field "$text" project)
+      if url=$(git -C "$project" remote get-url origin 2>/dev/null); then
+        source=$(fm_role_remote_identity "$url" "$project" nolocal | tr '[:upper:]' '[:lower:]')
+        case "$source" in '' | path:*) ;; *) sources="$sources $source" ;; esac
+      fi
+    fi
   fi
   [ "$pr_match" -eq 1 ] || [ "$branch_match" -eq 1 ] || return 0
   [ "$branch_match" -eq 1 ] || branch=''
   status="$state/$id.status"
-  if [ -e "$status" ] || [ -L "$status" ]; then
-    if [ -f "$status" ] && [ ! -L "$status" ] && [ -r "$status" ]; then
+  if present "$status"; then
+    if owned "$status"; then
       scan=$(_fm_crew_status_event_scan < "$status") || :
       last=${scan##*$'\n'}
       [ -z "$last" ] || status_line_verb "$last" verb
-      while IFS= read -r line || [ -n "$line" ]; do
-        case "$line" in *done*"PR https://"*) ;; *) continue ;; esac
-        status_line_verb "$line" note
-        [ "$note" = "done" ] || continue
-        status_line_note "$line" note
-        ready_url=$(fm_dod_ready_note_url "$note") || continue
-        report_head=''
+      # A ready report an event has since followed is history, not evidence.
+      if [ "$verb" = "done" ]; then
+        status_line_note "$last" note
         if fm_dod_candidate_fields "$note"; then
-          report_head=$FM_DOD_CANDIDATE_HEAD
+          report_url=$FM_DOD_CANDIDATE_URL report_head=$FM_DOD_CANDIDATE_HEAD
         fi
-        done_lines="$done_lines$ready_url $report_head"$'\n'
-      done < "$status"
+      fi
     else
       verb=unreadable
     fi
   fi
   fact '{t:"record",state:$state,id:$id,kind:$kind,pr:$pr,branch:$branch,sources:($sources|split(" ")|map(select(length>0))),verb:$verb,
-         done:($reports|split("\n")|map(select(length>0)|capture("^(?<url>[^ ]+) (?<head>[^ ]*)$")))}' \
+         done:(if $url == "" then [] else [{url:$url,head:$head}] end)}' \
     --arg state "$state" --arg id "$id" --arg kind "$kind" --arg pr "$pr" --arg branch "$branch" \
-    --arg sources "$sources" --arg verb "$verb" --arg reports "$done_lines"
+    --arg sources "$sources" --arg verb "$verb" --arg url "$report_url" --arg head "$report_head"
 }
 
 collect_tickets() {  # <state>
   local state=$1 ticket row reviewer live status scan last verb status_unreadable
   for ticket in "$state"/*.refute.json; do
     [ -e "$ticket" ] || [ -L "$ticket" ] || continue
-    if [ ! -f "$ticket" ] || [ -L "$ticket" ] || ! row=$(jq -ce '
+    if ! owned "$ticket" || ! row=$(jq -ce '
       {pr: .candidate.pr, head: .candidate.head, reviewer: .reviewer}
       | if all(.pr, .reviewer; type == "string" and length > 0) then . else error("incomplete") end
       | .head |= (if type == "string" then . else "" end)' "$ticket" 2>/dev/null); then
@@ -251,12 +284,14 @@ collect_tickets() {  # <state>
     reviewer=$(basename "$ticket" .refute.json)
     live=false
     status_unreadable=false
-    if [ -f "$state/$reviewer.meta" ] && [ ! -L "$state/$reviewer.meta" ]; then
+    if present "$state/$reviewer.meta" && ! owned "$state/$reviewer.meta"; then
+      status_unreadable=true
+    elif present "$state/$reviewer.meta"; then
       live=true
       verb=''
       status="$state/$reviewer.status"
-      if [ -e "$status" ] || [ -L "$status" ]; then
-        if [ -f "$status" ] && [ ! -L "$status" ] && [ -r "$status" ]; then
+      if present "$status"; then
+        if owned "$status"; then
           scan=$(_fm_crew_status_event_scan < "$status") || :
           last=${scan##*$'\n'}
           [ -z "$last" ] || status_line_verb "$last" verb
@@ -275,7 +310,8 @@ collect_tickets() {  # <state>
 
 collect_verdicts() {  # <state>
   local state=$1 rows
-  if ! rows=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$state" "$SCRIPT_DIR/fm-review-verdict.sh" history 2>/dev/null); then
+  if ! absent_or_owned "$state/review-verdicts.jsonl" || ! absent_or_owned "$HOSTS" ||
+    ! rows=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$state" "$SCRIPT_DIR/fm-review-verdict.sh" history 2>/dev/null); then
     unreadable verdicts "review verdict journal in $state cannot be read"
     return 0
   fi
@@ -284,7 +320,9 @@ collect_verdicts() {  # <state>
 
 collect_holds() {  # <state> <home> <data>
   local state=$1 home=$2 data=$3 listing count ids id show
-  if ! listing=$(FM_HOME="$home" FM_DATA_OVERRIDE="$data" \
+  if ! absent_or_owned "$home/.tasks.toml" || ! absent_or_owned "$data/backlog.md" ||
+    [ "$(fm_tasks_axi_backend "$home" 2>/dev/null)" != markdown ] ||
+    ! listing=$(FM_HOME="$home" FM_DATA_OVERRIDE="$data" \
     "$SCRIPT_DIR/fm-tasks-axi.sh" list --state held --limit 100000 2>/dev/null); then
     unreadable holds "held tasks of $home cannot be listed"
     return 0
@@ -315,7 +353,12 @@ collect_local() {
     return 0
   fi
   for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    present "$meta" || continue
+    # Which pull request an unusable record owns cannot be known.
+    if ! owned "$meta"; then
+      unreadable owners "a task record is not a suitable owned file"
+      continue
+    fi
     collect_record "$STATE" "$meta"
   done
   collect_tickets "$STATE"
