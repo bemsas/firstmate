@@ -3,32 +3,26 @@
 
 Usage: fm-worker-pretool-check.py [--root WORKTREE] [--cursor] [--kimi] [--polytoken]
 Exit 2 blocks vendor/basisone writes and git worktree add/remove/prune/move.
-The vendor rule is CommercialEye's. A structured write or patch is exempt only
-when both --root (bound at launch, never the payload cwd) and the checkout that
-holds each resolved destination have origins that verify as other repositories.
-A missing or unverifiable identity keeps the rule, as do shell commands, whose
-actual write targets cannot be proven for that exemption.
+The vendor rule applies to every project: no trusted project classification
+reaches this hook, and a checkout's own mutable configuration cannot exempt it.
 Read tools remain available. Shell commands touching protected paths are allowed
-only for known read operations, whose redirections name literal paths outside
-the subtree. Quoted here-documents that cat writes to literal paths outside it
-are data. This is a tool-call seatbelt, not an OS sandbox.
+only for known read operations. Quoted here-documents that cat writes to literal
+paths outside the subtree are data. This is a tool-call seatbelt, not an OS
+sandbox.
 --kimi scopes the global hook to an authenticated Firstmate worker pointer.
 --polytoken emits that harness's native allow outcome.
 """
 
 import argparse
-import functools
 import json
 import os
 from pathlib import Path
 import re
 import shlex
-import subprocess
 import sys
 
 
-def protected(value, cwd, parents=False, by_destination=False):
-    """by_destination ignores subtrees held by a verified other repository."""
+def protected(value, cwd, parents=False):
     if not isinstance(value, str) or not value:
         return False
     path = Path(os.path.expanduser(value))
@@ -36,10 +30,9 @@ def protected(value, cwd, parents=False, by_destination=False):
         path = Path(cwd) / path
     for candidate in (Path(os.path.abspath(path)), path.resolve()):
         parts = candidate.parts
-        holders = [i for i in range(len(parts) - 1) if parts[i:i + 2] == ("vendor", "basisone")]
+        if any(parts[i:i + 2] == ("vendor", "basisone") for i in range(len(parts) - 1)):
+            return True
         if parents and candidate.name == "vendor":
-            holders.append(len(parts) - 1)
-        if any(not by_destination or commercialeye_scope(str(Path(*parts[:i]))) for i in holders):
             return True
     return False
 
@@ -230,22 +223,6 @@ def data_authoring(words, bodies, cwd):
     return not pending
 
 
-def without_safe_redirects(words, cwd):
-    """Drop redirections that cannot write the subtree; None if any might."""
-    kept = []
-    remaining = iter(words)
-    for word in remaining:
-        if "<" not in word and ">" not in word:
-            kept.append(word)
-            continue
-        target = next(remaining, "")
-        if word == ">&" and target.isdigit():
-            continue
-        if word not in {"<", ">", ">>", "&>"} or not target or not literal_target(target, cwd):
-            return None
-    return kept
-
-
 def conservative_reason(command, vendor):
     """Raw-text fallback when the lexer still cannot tokenise the command."""
     if vendor and re.search(r"\bvendor/+basisone(?:/|\b)", command):
@@ -286,16 +263,16 @@ def shell_reason(command, cwd, vendor=True, depth=0):
         # Heredoc bodies can feed interpreters or hide paths, so each stripped
         # body is inspected like a quoted shell script. Proven data keeps every
         # rule except the vendor one, since only its literal targets are written.
-        body_vendor = vendor and not data_authoring(words, bodies, cwd)
+        # A carriage return splits words here but not in the shell.
+        body_vendor = vendor and ("\r" in command or not data_authoring(words, bodies, cwd))
         for body in bodies:
             denied = shell_reason(body[0], cwd, body_vendor, depth + 1)
             if denied:
                 return denied
         return None
-    # Substitutions, unproven redirections and unknown interpreters with a
-    # protected path are not read-only. Require explicit read commands throughout.
-    words = without_safe_redirects(words, cwd)
-    if words is None or any(word in {"(", ")"} for word in words) or "$" in command or "`" in command:
+    # Redirections, substitutions and unknown interpreters with a protected
+    # path are not proven read-only. Require explicit read commands throughout.
+    if any("<" in word or ">" in word or word in {"(", ")"} for word in words) or "$" in command or "`" in command:
         return "shell writes or indirection involving vendor/basisone are blocked"
     segments = [[]]
     for word in words:
@@ -320,46 +297,7 @@ def shell_reason(command, cwd, vendor=True, depth=0):
     return None
 
 
-# Reuse the role library's offline remote normalization for repository identity.
-IDENTITY_SCRIPT = r"""
-. "$1" || exit 1
-[ "$(git -C "$2" rev-parse --show-toplevel)" -ef "$2" ] || exit 1
-remotes=$(git -C "$2" remote) || exit 1
-for remote in $remotes; do
-  url=$(git -C "$2" remote get-url "$remote") || exit 1
-  printf '%s\t%s\n' "$remote" "$(fm_role_remote_identity "$url" "$2")"
-done
-"""
-
-
-@functools.lru_cache(maxsize=None)
-def commercialeye_scope(root):
-    """False only when this checkout verifies as some other repository."""
-    if not root:
-        return True
-    library = Path(__file__).resolve().with_name("fm-role-lib.sh")
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    try:
-        result = subprocess.run(["bash", "-c", IDENTITY_SCRIPT, "identity", str(library), str(root)],
-                                env=env, text=True, capture_output=True, timeout=5)
-        identities = dict(line.split("\t", 1) for line in result.stdout.splitlines())
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return True
-    origin = identities.get("origin", "")
-    if result.returncode or not origin or origin.startswith("path:"):
-        return True
-    return any(identity.rsplit("/", 1)[-1].lower().removesuffix(".git") == "commercialeye"
-               for identity in identities.values())
-
-
 def reason(payload, root):
-    denied = evaluate(payload, root, False)
-    if denied and not commercialeye_scope(root):
-        return evaluate(payload, root, True)
-    return denied
-
-
-def evaluate(payload, root, by_destination):
     name = str(payload.get("tool_name", payload.get("toolName", ""))).lower()
     args = payload.get("tool_input", payload.get("toolInput", payload.get("input", {})))
     cwd = payload.get("cwd") or root or os.getcwd()
@@ -373,14 +311,12 @@ def evaluate(payload, root, by_destination):
             denied = shell_reason(command, cwd)
             if denied:
                 return denied
-        if name not in READ_TOOLS and any(
-            protected(p, cwd, True, by_destination) for p in paths(args)
-        ):
+        if name not in READ_TOOLS and any(protected(p, cwd, parents=True) for p in paths(args)):
             return "worker edits to vendor/basisone are blocked"
     if "patch" in name:
         for text in strings(args):
             for match in re.finditer(r"^(?:\*\*\* (?:Add|Update|Delete|Move to) File: |\*\*\* Move to: |(?:rename|copy) (?:from|to) )(.+)$", text, re.M):
-                if protected(match[1], cwd, True, by_destination):
+                if protected(match[1], cwd, parents=True):
                     return "worker patches to vendor/basisone are blocked"
     return None
 
