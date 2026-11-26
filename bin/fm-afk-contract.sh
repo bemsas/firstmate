@@ -52,10 +52,14 @@
 #   expected_return: <UTC ISO 8601> | -
 #   reach_channels: none
 #   reach_announced: <the one-sentence reach announcement>
-#   spend_max_concurrent_workers: <n>   without --spend, the ordinary worker
-#                                  records this home already holds at entry,
-#                                  and never fewer than the default
-#                                  (SPEND CAP below)
+#   spend_max_concurrent_workers: <n> | -   without --spend, the ordinary
+#                                  worker records this home already holds at
+#                                  entry, and never fewer than the default;
+#                                  `-` only on a keep-full record with no
+#                                  target (SPEND CAP below)
+#   keep_full: yes                 only on a keep-full entry (KEEP FULL below)
+#   lane_target: <n> | -           only on a keep-full entry: the lane target
+#                                  the away session keeps filled
 #   confirmed: <UTC ISO 8601>       when this mandate was recorded; /afk itself
 #   confirmed_epoch: <seconds>        is the go, so no later human step stamps it
 #   mode: quiet                    only on a quiet entry (FM_AFK_MODE=quiet); absent
@@ -84,6 +88,7 @@
 # Usage:
 #   fm-afk-contract.sh enter [--words-file <path> | --words <text>]
 #       [--expected-return <UTC ISO 8601>] [--spend <n>]
+#       [--keep-full [--lane-target <n>]]
 #     Write the record now, with no separate confirmation step, then print the
 #     entry announcement and the read-back. Exit 0 on success and 2 on a usage
 #     error. --words-file keeps the file's bytes verbatim, trailing newlines
@@ -93,6 +98,8 @@
 #     record. A replacement is staged before the prior record is archived and
 #     replaced. `propose` and `confirm` were retired with the wait-for-go gate.
 #     Without --spend the recorded cap follows SPEND CAP below.
+#     --keep-full (KEEP FULL below) is refused on a quiet entry, which records
+#     no spend cap; --lane-target implies it.
 #   fm-afk-contract.sh readback
 #     The record's content for the captain and for the away session: the words
 #     verbatim plus the entry time, expected return, spend cap, and reach line
@@ -140,6 +147,34 @@
 # FM_AFK_CONTRACT_SPEND_DEFAULT, so an idle home still enters with the ordinary
 # room to work, and never 0. An explicit --spend is the captain's number and is
 # recorded unchanged.
+#
+# KEEP FULL (keep_full and lane_target; this script is their one owner).
+# The words are never parsed here. The entering session, which already reads
+# the captain's away words at entry to give its read-back (the afk skill),
+# passes --keep-full when it reads them as asking to keep the lanes full. Then
+# the floor of FM_AFK_CONTRACT_SPEND_DEFAULT no longer applies, because that
+# floor sized an ordinary away window, not a full one:
+#   - the lane target is --lane-target <n> when the captain named a number,
+#     else this home's authoritative configured target (bin/fm-capacity.sh's
+#     `target=`, from config/lane-capacity), else `-`: none is ever invented;
+#   - a configured target of 0 is the captain's explicit zero-lane limit and is
+#     recorded as lane_target 0 with a spend cap of 0, which bin/fm-spawn.sh
+#     enforces by refusing every fresh ordinary spawn (work already under way
+#     continues); only this keep-full path records 0, and --spend 0 stays a
+#     usage error;
+#   - otherwise, without --spend the cap is the larger of that target and the
+#     live count, and with no target it is `-`: the record adds no cap of its own, and the
+#     live guarded admission in bin/fm-spawn.sh (project capacity, lane
+#     admission, the away dispatch rules) still decides every spawn;
+#   - an explicit --spend still wins and is recorded unchanged;
+#   - a configured target that cannot be read (target=invalid, or no capacity
+#     report at all) is never guessed: the record keeps keep_full with lane_target `-` and falls back
+#     to the ordinary default cap above, so broken limits never widen spend.
+# The record is written once at entry and is the same whichever actor spawns
+# first, so a keep-full window never collapses to the default merely because
+# the supervision branch, rather than main, acts first. lane_target is also the
+# authorized target the away session's lane-refill cue reads for this home
+# (bin/fm-lane-refill.sh).
 #
 # Sourceable: with the BASH_SOURCE guard, other scripts get the path, presence,
 # posture, spend-cap, and lock helpers (fm_afk_contract_path,
@@ -206,6 +241,22 @@ fm_afk_contract_entry_spend_default() {  # [state-dir]
   live=$(fm_afk_contract_live_ordinary_workers "${1:-$FM_AFK_CONTRACT_STATE}")
   [ "$live" -gt "$FM_AFK_CONTRACT_SPEND_DEFAULT" ] || live=$FM_AFK_CONTRACT_SPEND_DEFAULT
   printf '%s\n' "$live"
+}
+
+# This home's authoritative configured lane target for KEEP FULL: the
+# `target=` value bin/fm-capacity.sh reads from config/lane-capacity. Prints a
+# non-negative integer (0 is an explicit zero-lane limit), `-` for no target
+# (`target=none`), or `invalid` for an unreadable one, including a capacity
+# report that was not produced at all.
+fm_afk_contract_configured_lane_target() {
+  local line target
+  line=$(FM_STATE_OVERRIDE="$FM_AFK_CONTRACT_STATE" "$FM_AFK_CONTRACT_DIR/fm-capacity.sh" 2>/dev/null | sed -n '1p')
+  target=$(printf '%s\n' "$line" | tr ' ' '\n' | sed -n 's/^target=//p')
+  case "$target" in
+    none) printf -- '-\n' ;;
+    '' | *[!0-9]*) printf 'invalid\n' ;;
+    *) printf '%s\n' "$((10#$target))" ;;
+  esac
 }
 
 # The posture a record at <path> is (the header's AWAY OR QUIET): quiet only
@@ -307,6 +358,10 @@ fm_afk_contract_render_record() {  # <entered-iso> <entered-epoch> <confirmed-is
   printf 'reach_channels: none\n'
   printf 'reach_announced: %s\n' "$FM_AFK_CONTRACT_REACH_ANNOUNCED"
   printf 'spend_max_concurrent_workers: %s\n' "${SPEND:-$FM_AFK_CONTRACT_SPEND_DEFAULT}"
+  if [ "${KEEP_FULL:-0}" -eq 1 ]; then
+    printf 'keep_full: yes\n'
+    printf 'lane_target: %s\n' "${LANE_TARGET:--}"
+  fi
   printf 'confirmed: %s\n' "$confirmed"
   printf 'confirmed_epoch: %s\n' "$confirmed_epoch"
   [ "${FM_AFK_CONTRACT_ENTRY_MODE:-away}" != quiet ] || printf 'mode: quiet\n'
@@ -384,7 +439,7 @@ fm_afk_contract_read_words() {  # <path>
 # scalar fields and words block are present. Refuses rather than guessing at a
 # foreign schema. A version 1 record's clause and grant sections are ignored.
 fm_afk_contract_validate() {  # <path>
-  local path=$1 version entered entered_epoch expected reach announced spend words_header confirmed
+  local path=$1 version entered entered_epoch expected reach announced spend keep_full lane_target words_header confirmed
   [ -f "$path" ] || return 1
   version=$(fm_afk_contract_read_field "$path" version)
   case " $FM_AFK_CONTRACT_READABLE_VERSIONS " in
@@ -404,7 +459,20 @@ fm_afk_contract_validate() {  # <path>
   announced=$(fm_afk_contract_read_field "$path" reach_announced)
   [ -n "$announced" ] || { fm_afk_contract_log "record $path has no reach announcement"; return 1; }
   spend=$(fm_afk_contract_read_field "$path" spend_max_concurrent_workers)
-  case "$spend" in ''|*[!0-9]*|0) fm_afk_contract_log "record $path has no valid spend cap"; return 1 ;; esac
+  keep_full=$(fm_afk_contract_read_field "$path" keep_full)
+  case "$keep_full" in ''|yes) ;; *) fm_afk_contract_log "record $path has an invalid keep_full"; return 1 ;; esac
+  lane_target=$(fm_afk_contract_read_field "$path" lane_target)
+  case "$spend" in
+    -) [ "$keep_full" = yes ] || { fm_afk_contract_log "record $path has no valid spend cap"; return 1; } ;;
+    0) [ "$keep_full" = yes ] && [ "$lane_target" = 0 ] || { fm_afk_contract_log "record $path has no valid spend cap"; return 1; } ;;
+    ''|*[!0-9]*) fm_afk_contract_log "record $path has no valid spend cap"; return 1 ;;
+  esac
+  case "$lane_target" in
+    '') [ -z "$keep_full" ] || { fm_afk_contract_log "record $path has keep_full without a lane_target"; return 1; } ;;
+    -) ;;
+    *[!0-9]*) fm_afk_contract_log "record $path has an invalid lane_target"; return 1 ;;
+    0) [ "$keep_full" = yes ] || { fm_afk_contract_log "record $path has an invalid lane_target"; return 1; } ;;
+  esac
   case "$(fm_afk_contract_read_field "$path" mode)" in
     ''|quiet) ;;
     *) fm_afk_contract_log "record $path has an invalid mode"; return 1 ;;
@@ -441,7 +509,11 @@ fm_afk_contract_render_readback() {  # <path>
     printf 'Away posture (recorded):\n'
     printf '  entered: %s\n' "$(fm_afk_contract_read_field "$path" entered)"
     printf '  expected return: %s\n' "$( [ "$expected" = - ] && printf 'not given' || printf '%s' "$expected")"
-    printf '  spend cap: %s concurrent workers\n' "$spend"
+    printf '  spend cap: %s\n' "$(fm_afk_contract_spend_text "$spend")"
+    if [ "$(fm_afk_contract_read_field "$path" keep_full)" = yes ]; then
+      printf '  keep lanes full: yes, lane target %s\n' \
+        "$(fm_afk_contract_lane_target_text "$(fm_afk_contract_read_field "$path" lane_target)")"
+    fi
     printf '  reach: hold-for-return only. %s\n' "$(fm_afk_contract_read_field "$path" reach_announced)"
   fi
   words=$(fm_afk_contract_read_words "$path"; rc=$?; printf x; exit "$rc") || return 1
@@ -453,6 +525,18 @@ fm_afk_contract_render_readback() {  # <path>
   else
     printf '  your words: (none)\n'
   fi
+}
+
+fm_afk_contract_spend_text() {  # <recorded cap>
+  if [ "$1" = - ]; then
+    printf 'none beyond live admission (keep lanes full, no target set)'
+  else
+    printf '%s concurrent workers' "$1"
+  fi
+}
+
+fm_afk_contract_lane_target_text() {  # <recorded target>
+  if [ "$1" = - ]; then printf 'not set'; else printf '%s lanes' "$1"; fi
 }
 
 fm_afk_contract_render_announcement() {  # <path>
@@ -470,19 +554,20 @@ fm_afk_contract_render_announcement() {  # <path>
   else
     mandate_text='No away instructions were recorded; the away session acts on standing authority only, and anything that needs you waits for your return.'
   fi
-  printf 'Away posture recorded at %s: hold-for-return only. %s %s Destructive, irreversible, and security-sensitive actions are never pre-authorizable, whatever the words say. Expected return: %s. Spend cap: %s concurrent workers.\n' \
+  printf 'Away posture recorded at %s: hold-for-return only. %s %s Destructive, irreversible, and security-sensitive actions are never pre-authorizable, whatever the words say. Expected return: %s. Spend cap: %s.\n' \
     "$(fm_afk_contract_read_field "$path" confirmed)" \
     "$(fm_afk_contract_read_field "$path" reach_announced)" \
     "$mandate_text" \
     "$( [ "$expected" = - ] && printf 'not given' || printf '%s' "$expected")" \
-    "$(fm_afk_contract_read_field "$path" spend_max_concurrent_workers)"
+    "$(fm_afk_contract_spend_text "$(fm_afk_contract_read_field "$path" spend_max_concurrent_workers)")"
 }
 
 # --- subcommands ------------------------------------------------------------
 
 fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS, EXPECTED_RETURN, SPEND
-  local words_file='' spend_given=0
+  local words_file='' spend_given=0 target_given=0 live configured
   WORDS=; EXPECTED_RETURN=-; SPEND=$FM_AFK_CONTRACT_SPEND_DEFAULT; FM_AFK_CONTRACT_SCALARS_GIVEN=0
+  KEEP_FULL=0; LANE_TARGET=-
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --words-file)
@@ -509,6 +594,18 @@ fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS, EXPECTED_RETURN, SPEN
         spend_given=1
         FM_AFK_CONTRACT_SCALARS_GIVEN=1
         shift 2 ;;
+      --keep-full)
+        KEEP_FULL=1
+        FM_AFK_CONTRACT_SCALARS_GIVEN=1
+        shift ;;
+      --lane-target)
+        [ "$#" -gt 1 ] || { fm_afk_contract_log '--lane-target requires a positive integer'; return 2; }
+        case "$2" in ''|*[!0-9]*|0) fm_afk_contract_log "--lane-target must be a positive integer, got '$2'"; return 2 ;; esac
+        LANE_TARGET=$((10#$2))
+        target_given=1
+        KEEP_FULL=1
+        FM_AFK_CONTRACT_SCALARS_GIVEN=1
+        shift 2 ;;
       --action|--object|--when|--stop|--grant|--grant=*)
         fm_afk_contract_log "$1 was retired: the captain's away words are the whole mandate, so pass them with --words or --words-file and nothing else"
         return 2 ;;
@@ -524,7 +621,35 @@ fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS, EXPECTED_RETURN, SPEN
     WORDS=$(cat "$words_file"; rc=$?; printf x; exit "$rc") || return 1
     WORDS=${WORDS%x}
   fi
-  [ "$spend_given" -eq 1 ] || SPEND=$(fm_afk_contract_entry_spend_default) || return 1
+  if [ "$KEEP_FULL" -eq 1 ] && [ "${FM_AFK_MODE:-}" = quiet ]; then
+    fm_afk_contract_log '--keep-full and --lane-target belong to the away posture; quiet mode records no spend cap or lane target'
+    return 2
+  fi
+  if [ "$KEEP_FULL" -eq 1 ] && [ "$target_given" -eq 0 ]; then
+    configured=$(fm_afk_contract_configured_lane_target)
+    case "$configured" in
+      invalid)
+        fm_afk_contract_log 'the configured lane target cannot be read; keeping lanes full with no lane target and the ordinary default spend cap'
+        LANE_TARGET=-
+        [ "$spend_given" -eq 1 ] || SPEND=$(fm_afk_contract_entry_spend_default) || return 1
+        return 0 ;;
+      *) LANE_TARGET=$configured ;;
+    esac
+  fi
+  [ "$spend_given" -eq 0 ] || return 0
+  if [ "$KEEP_FULL" -eq 1 ]; then
+    if [ "$LANE_TARGET" = - ]; then
+      SPEND=-
+    elif [ "$LANE_TARGET" = 0 ]; then
+      SPEND=0
+    else
+      live=$(fm_afk_contract_live_ordinary_workers)
+      SPEND=$LANE_TARGET
+      [ "$live" -le "$SPEND" ] || SPEND=$live
+    fi
+    return 0
+  fi
+  SPEND=$(fm_afk_contract_entry_spend_default) || return 1
   return 0
 }
 
@@ -565,7 +690,7 @@ fm_afk_contract_cmd_enter() {
       fm_afk_contract_log "away posture already recorded at $(fm_afk_contract_read_field "$record" entered); a refresh leaves it untouched"
     fi
     if [ "$FM_AFK_CONTRACT_SCALARS_GIVEN" -eq 1 ]; then
-      fm_afk_contract_log "the expected return and spend cap given with this refresh were not applied; enter new words to replace the mandate"
+      fm_afk_contract_log "the expected return, spend cap, and keep-full target given with this refresh were not applied; enter new words to replace the mandate"
     fi
     rm -f "$legacy"
     fm_afk_contract_render_announcement "$record" || return 1

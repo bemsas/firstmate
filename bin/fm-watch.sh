@@ -4483,6 +4483,43 @@ while :; do
       [ -z "$FM_CHECK_RESULT" ] || pr_register_reason="check: pr-register: $FM_CHECK_RESULT"
       [ -z "$FM_CHECK_CUT" ] || fm_wake_append check pr-register "check: pr-register: $FM_CHECK_CUT" || exit 1
     fi
+    # Away-mode lane refill (bin/fm-lane-refill.sh owns the rule): off costs
+    # one file test, and the scan itself does nothing unless the record is an
+    # away one and a second mate is registered. Both scans below run under
+    # this sweep's own check bound (FM_CHECK_TIMEOUT), so a slow scan is cut
+    # like any other check rather than holding the sweep. Its emitted episodes are queued
+    # durably; the scan re-emits an unsent one later if this wake is lost.
+    if [ -f "$STATE/.afk-contract" ]; then
+      CHECK_TIMEOUT=${FM_LANE_REFILL_TIMEOUT:-$CHECK_TIMEOUT} FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+        run_check_capture "$SCRIPT_DIR/fm-lane-refill.sh" scan || exit 1
+      if [ -n "$FM_CHECK_CUT" ]; then
+        # A cut scan published nothing it could not finish; the next sweep
+        # re-reads and an unsent episode re-emits, so the cut only logs.
+        triage_log "lane-refill scan $FM_CHECK_CUT"
+      elif [ -n "$FM_CHECK_RESULT" ]; then
+        reason="check: $(printf '%s' "$FM_CHECK_RESULT" | paste -sd ';' - | sed 's/;/; /g')"
+        if [ -z "$check_queue_outputs" ]; then check_queue_key=lane-refill; else check_queue_key="state-checks"; fi
+        check_queue_outputs="${check_queue_outputs:+$check_queue_outputs
+}$reason"
+        check_outputs="${check_outputs:+$check_outputs
+}$reason"
+      fi
+    fi
+    # Busy lanes with no new PR for an hour (bin/fm-pr-progress.sh owns the
+    # rule and throttles itself); it reads only local status records and the
+    # shared lane count, and does nothing for a home with no busy lanes.
+    CHECK_TIMEOUT=${FM_PR_PROGRESS_TIMEOUT:-$CHECK_TIMEOUT} FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      run_check_capture "$SCRIPT_DIR/fm-pr-progress.sh" scan || exit 1
+    if [ -n "$FM_CHECK_CUT" ]; then
+      triage_log "no-pr-progress scan $FM_CHECK_CUT"
+    elif [ -n "$FM_CHECK_RESULT" ]; then
+      reason="check: $(printf '%s' "$FM_CHECK_RESULT" | paste -sd ';' - | sed 's/;/; /g')"
+      if [ -z "$check_queue_outputs" ]; then check_queue_key=no-pr-progress; else check_queue_key="state-checks"; fi
+      check_queue_outputs="${check_queue_outputs:+$check_queue_outputs
+}$reason"
+      check_outputs="${check_outputs:+$check_outputs
+}$reason"
+    fi
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0

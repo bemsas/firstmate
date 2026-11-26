@@ -46,9 +46,9 @@ export function afkPostureRecordPresent(state: string): boolean {
 // The per-wake prompt every supervision-branch host sends: the Pi branch
 // extension, and the supervision host off Pi (bin/fm-supervision-host.sh,
 // through bin/fm-branch-dispatch.mjs), so the wake text has one owner. The
-// tail is appended while the away-posture record exists: per-wake content,
-// never prefix; bin/fm-branch-prompt.sh's fixed "Postures" section is what it
-// refers back to.
+// away tail is appended while the away-posture record exists and the attended
+// tail otherwise: per-wake content, never prefix; bin/fm-branch-prompt.sh's
+// fixed "Postures" section is what both refer back to.
 export const AWAY_POSTURE_TAIL =
   "POSTURE: AWAY. The away-posture record state/.afk-contract exists, so the captain is not present and MAIN is parked: you take every row, including check rows and decision rows, and no outcome reaches the captain until the return brief. " +
   "The record below is the captain's away words, verbatim, and the whole mandate: act on them by your own judgment where this event is the moment they name, only through the guarded scripts under MAIN's standing authority - never more - which enforce it: bin/fm-pr-merge.sh merges any pull request that is green at its live head, synchronously, and refuses a red one or --allow-red; bin/fm-spawn.sh dispatches queued work (already queued, or filed by you from the words) within the spend cap; bin/fm-send.sh --resolve-key answers a decision the words pre-answer, or one the ask-user-authority policy in your prompt lets firstmate decide; bin/fm-merge-local.sh still refuses you. " +
@@ -64,6 +64,20 @@ export const AWAY_POSTURE_TAIL =
 // enforce either way.
 export function awayPostureTailFor(readback: string): string {
   return `\n\n${AWAY_POSTURE_TAIL}\n${readback || "(the record's read-back could not be rendered; treat the captain's words as unavailable, act on standing authority only, and hold on doubt)"}`;
+}
+
+// The attended counterpart, so every wake names its posture affirmatively. The
+// branch conversation outlives the captain's return, and an absent tail alone
+// left earlier away tails as the newest posture it had seen, so after a return
+// its summaries kept away-posture wording and return-only holds. This tail
+// supersedes them on the first attended wake.
+export const ATTENDED_POSTURE_TAIL =
+  "POSTURE: ATTENDED. No away-posture record is in force (none exists, or it is quiet mode's), so the captain is present and this tail, not any earlier wake, is your current posture. " +
+  "Any away words or away tail earlier in this conversation are archived and authorize nothing: do not open an outcome with \"per your away instructions:\", do not call the posture away, and do not hold anything for a return brief, because there is none. " +
+  "Your attended role limits and verdict rules apply exactly as written in your prompt; runtime decision gates and genuine captain escalations still stand, and MAIN decides what the captain hears.";
+
+export function attendedPostureTailFor(): string {
+  return `\n\n${ATTENDED_POSTURE_TAIL}`;
 }
 
 // The read-only dialog mirror a host that is not Pi carries at the head of a

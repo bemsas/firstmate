@@ -1,0 +1,466 @@
+#!/usr/bin/env bash
+# fm-merge-route.sh - resolve which home owns a task's pull request before any
+# merge, and hand a second mate's green child PR to that mate instead of
+# merging it here.
+#
+# Usage:
+#   fm-merge-route.sh <task-id> <pr-url>          resolve only; changes nothing
+#   fm-merge-route.sh <task-id> <pr-url> --send [--mandate <text>]
+#                                                 resolve, then hand a
+#                                                 mate-owned PR to its owner
+#   fm-merge-route.sh <task-id> <pr-url> --verify-head <sha> --verify-base <branch>
+#                     [--verify-delivery <id>]    resolve, then confirm a
+#                                                 received handoff's facts and
+#                                                 parent authorization
+#   fm-merge-route.sh -h | --help
+#
+# WHY. bin/fm-pr-merge.sh merges only a task this home records
+# (state/<id>.meta). A second mate relays its children's outcomes into its own
+# status log (`child <id> <state>: ... pr=<url>`, bin/fm-inactive-reconcile.sh
+# and bin/fm-pr-check.sh own those relay lines), but the child's task record
+# lives in the mate's home, so calling the guarded merge here with the child's
+# id can only refuse with "task metadata is unavailable". This script is the
+# one owner of the owner decision that must precede every merge attempt.
+#
+# OWNER. Exactly one of:
+#   main         this home holds a regular, non-symlink state/<id>.meta whose
+#                kind is not secondmate, and no registered second mate also
+#                relays that child id with this URL: merge here through
+#                bin/fm-pr-merge.sh exactly as before.
+#   <mate-id>    no ordinary record here, and exactly one registered second
+#                mate (state/<mate>.meta with kind=secondmate) has a relay
+#                line whose subject is `child <id>` (or the inactive-outcome
+#                fallback's `inactive terminal child=<id>`) and whose
+#                structured PR evidence is this exact canonical URL
+#                (bin/fm-pr-progress.sh owns that grammar: `PR ready: <url>`,
+#                `done: PR <url>`, or a `pr=<url>` field); a child or URL
+#                merely cited in a note
+#                proves nothing: hand off.
+#   missing      neither: hold; nothing here proves who owns the PR.
+#   conflicting  more than one owner claims it (a record here and a relay, or
+#                two mates' relays), the id names a second mate itself, or the
+#                relaying mate's id is itself the owner word main, missing, or
+#                conflicting, which could not be told apart from the owner
+#                state: hold.
+# The id and URL must pass bin/fm-pr-lib.sh's task-id and canonical-URL
+# validation; anything else is a usage error (exit 2).
+#
+# LIVE FACTS. For a GitHub URL the PR's state, draft flag, head, and base are
+# read live through gh, addressed by the full URL so the URL's own host is
+# queried whatever GH_HOST is inherited, (bounded by FM_MERGE_ROUTE_GH_SECS, default 10). Other
+# forges, and any unreadable read, report head and base as unknown. The
+# project is the basename of the record's project= path for a main-owned task,
+# and otherwise the one clone under this home's projects/ whose origin remote
+# names the same host/owner/repository; none or several is unknown.
+# Production is bin/fm-project-mode.sh --production <project> <base>, the one
+# owner of that classification, or unknown when either input is unknown.
+#
+# OUTPUT. key: value lines on stdout, in this order:
+#   owner: main|<mate-id>|missing|conflicting
+#   pr: <canonical url>
+#   state: OPEN|CLOSED|MERGED|unknown          draft: yes|no|unknown
+#   head: <sha>|unknown                         base: <branch>|unknown
+#   project: <name>|unknown                     production: production|non-production|unknown
+#   evidence: <the mate's newest matching relay line>   (mate owner only)
+#   route: merge-here|handoff|hold
+#   reason: <one sentence>
+# Exit 0 for merge-here and handoff, 3 for hold, 2 for usage. Resolution never
+# merges, records, or sends anything.
+#
+# HANDOFF (--send). Only a handoff route sends, and only for an OPEN pull
+# request whose head and base were read live; every other route or fact exits
+# as resolved without sending. The message goes through bin/fm-send.sh to the
+# owning mate, carrying the exact URL, head, base, production classification,
+# the relay line as scope evidence, and the current mandate: the away record's
+# words verbatim while an away record stands (bin/fm-afk-contract.sh mode),
+# else the caller's --mandate text, else the send refuses (exit 3) because a
+# handoff without a mandate authorizes nothing. It asks the mate to merge only
+# through its own guarded merge pinned to that head, under its own authority
+# and holds, and grants nothing: no waiver, force, or bypass rides on it.
+# Deduplication: the delivery id is derived from the mate, URL, head, live
+# base, production classification, and mandate, so a handoff is bound to the
+# facts and authority it was built from. state/.merge-handoffs holds one
+# tab-separated line per confirmed send, `<epoch> <mate> <url> <head>
+# <delivery-id>`, written under state/.merge-handoffs.lock; a request whose
+# delivery id is already recorded prints `sent: already <epoch>` and sends
+# nothing, so a replayed wake never repeats a handoff. The message built for a
+# delivery id is kept in state/.merge-handoffs.pending/<delivery-id> until its
+# send is confirmed, and a retry with the same facts resends that exact
+# message, because the inbox deduplicates by the whole body; a retry whose
+# base, production classification, or mandate changed is a different delivery
+# id, never the old body resent: the stale pending message for that mate, URL,
+# and head is discarded (printed as `superseded:`), and the new facts are
+# handed off. A superseded message that did land is void at the receiver.
+# The slot file state/.merge-handoffs.pending/slot-<hash of mate, URL, head>
+# names the one delivery id currently in flight for that mate, URL, and head;
+# it is replaced atomically and removed once the send is confirmed.
+# The message tells the mate to run this script with --verify-head,
+# --verify-base, and --verify-delivery <its delivery id> in its own home before
+# acting, and to merge through bin/fm-pr-merge.sh with --expected-head and
+# --expected-base, which pin the guarded merge to that head and base.
+#
+# RECEIVER VERIFICATION (--verify-head/--verify-base). It reads the live head
+# and base again, classifies production against this home's own deployment
+# map, and prints `verified: no` with exit 3 when the pull request is not open
+# at that head on that base. In a home with a second-mate identity
+# (.fm-secondmate-home), or whenever --verify-delivery is given, it then checks
+# the delivery's provenance read-only through this home's trusted parent
+# binding (.fm-secondmate-parent): the binding must be a readable local route,
+# the parent's state/<this mate's id>.meta must be a second-mate record whose
+# home= is this home, and the parent's records must name this delivery id as
+# the current one for this mate, URL, and head - the slot file while the send
+# is unconfirmed (its pending message must exist), otherwise the newest
+# confirmed ledger line for them. A missing or malformed delivery id or
+# identity, a missing, unreadable, or remote parent binding, a record for
+# another home, a slot or ledger that cannot be read, an empty slot or one with
+# no pending message, a delivery the parent no longer records (revoked or never
+# sent), and one a newer delivery replaced each print `verified: no` with exit
+# 3. Only then does it print `verified: yes`. A home with no second-mate
+# identity never receives a handoff, so there only the live facts are checked.
+# Exit 0 after a confirmed or already-recorded send, the send's own nonzero
+# status when fm-send could not confirm delivery.
+#
+# Test seam: FM_MERGE_ROUTE_SEND_CMD replaces bin/fm-send.sh as the send
+# command (called with the same arguments), so fixtures never steer a live
+# endpoint.
+set -u
+
+usage() {
+  sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'
+}
+case "${1:-}" in -h | --help) usage; exit 0 ;; esac
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-afk-contract.sh
+. "$SCRIPT_DIR/fm-afk-contract.sh"
+# shellcheck source=bin/fm-parent-channel-lib.sh
+. "$SCRIPT_DIR/fm-parent-channel-lib.sh"
+
+[ "$#" -ge 2 ] || { usage >&2; exit 2; }
+ID=$1
+RAW_URL=$2
+shift 2
+SEND=0
+MANDATE=
+VERIFY_HEAD=
+VERIFY_BASE=
+VERIFY_DELIVERY=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --send) SEND=1; shift ;;
+    --verify-head)
+      [ -n "${2:-}" ] || { echo "error: --verify-head requires a commit sha" >&2; exit 2; }
+      VERIFY_HEAD=$2; shift 2 ;;
+    --verify-base)
+      [ -n "${2:-}" ] || { echo "error: --verify-base requires a branch" >&2; exit 2; }
+      VERIFY_BASE=$2; shift 2 ;;
+    --verify-delivery)
+      [ -n "${2:-}" ] || { echo "error: --verify-delivery requires a delivery id" >&2; exit 2; }
+      VERIFY_DELIVERY=$2; shift 2 ;;
+    --mandate)
+      [ -n "${2:-}" ] || { echo "error: --mandate requires text" >&2; exit 2; }
+      MANDATE=$2; shift 2 ;;
+    *) echo "error: unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+if { [ -n "$VERIFY_HEAD" ] || [ -n "$VERIFY_BASE" ] || [ -n "$VERIFY_DELIVERY" ]; } &&
+  { [ -z "$VERIFY_HEAD" ] || [ -z "$VERIFY_BASE" ] || [ "$SEND" -eq 1 ]; }; then
+  echo "error: --verify-head and --verify-base go together (with an optional --verify-delivery) and never with --send" >&2
+  exit 2
+fi
+if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
+  echo "error: invalid merge route request" >&2
+  exit 2
+fi
+URL=$FM_PR_URL
+
+meta_field() {  # <meta> <key>
+  grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2-
+}
+
+sha16() {  # stdin -> first 16 hex characters of its SHA-256
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -c1-16; else sha256sum | cut -c1-16; fi
+}
+
+# handoff_authorization: the header's RECEIVER VERIFICATION provenance check.
+# Prints how the delivery is current and succeeds, or prints why not and
+# fails. Reads the parent's records only; never writes there.
+handoff_authorization() {
+  local id rc=0 pstate meta mhome slot_file cur ledger last
+  id=$(fm_parent_channel_home_id "$FM_HOME") || rc=$?
+  [ "$rc" -eq 0 ] || { echo "this home's second-mate identity cannot be read"; return 1; }
+  case "$VERIFY_DELIVERY" in
+    '') echo "the handoff names no delivery id, so no parent authorization can be matched"; return 1 ;;
+    *[!0-9a-f]*) echo "the delivery id $VERIFY_DELIVERY is malformed"; return 1 ;;
+  esac
+  [ "${#VERIFY_DELIVERY}" -eq 16 ] || { echo "the delivery id $VERIFY_DELIVERY is malformed"; return 1; }
+  fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent" ||
+    { echo "this home's parent binding is missing or unreadable"; return 1; }
+  [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] && [ -n "$FM_SECONDMATE_PARENT_HOME" ] ||
+    { echo "the parent home is not a local route, so its authorization cannot be read here"; return 1; }
+  pstate="$FM_SECONDMATE_PARENT_HOME/state"
+  meta="$pstate/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] ||
+    { echo "the parent holds no readable record for this home ($id)"; return 1; }
+  mhome=$(meta_field "$meta" home)
+  [ "$(meta_field "$meta" kind)" = secondmate ] && [ -n "$mhome" ] && [ "$mhome" -ef "$FM_HOME" ] ||
+    { echo "the parent's record for $id names another home, so the handoff is not addressed here"; return 1; }
+  slot_file="$pstate/.merge-handoffs.pending/slot-$(printf 'merge-handoff-slot|%s|%s|%s' "$id" "$URL" "$VERIFY_HEAD" | sha16)"
+  if [ -e "$slot_file" ] || [ -L "$slot_file" ]; then
+    { [ -f "$slot_file" ] && [ ! -L "$slot_file" ] && cur=$(cat "$slot_file" 2>/dev/null); } ||
+      { echo "the parent's in-flight handoff record cannot be read"; return 1; }
+    case "$cur" in
+      '') echo "the parent's in-flight handoff record is empty, so the current delivery is ambiguous"; return 1 ;;
+      "$VERIFY_DELIVERY") ;;
+      *) echo "delivery $VERIFY_DELIVERY was replaced by delivery $cur"; return 1 ;;
+    esac
+    [ -f "$pstate/.merge-handoffs.pending/$VERIFY_DELIVERY" ] ||
+      { echo "the parent's in-flight record names delivery $VERIFY_DELIVERY without its message, so it is ambiguous"; return 1; }
+    echo "delivery $VERIFY_DELIVERY is the parent's current in-flight handoff"
+    return 0
+  fi
+  ledger="$pstate/.merge-handoffs"
+  if [ ! -e "$ledger" ] && [ ! -L "$ledger" ]; then
+    echo "the parent no longer records delivery $VERIFY_DELIVERY (revoked or never sent)"
+    return 1
+  fi
+  if ! { [ -f "$ledger" ] && [ ! -L "$ledger" ] && [ -r "$ledger" ] &&
+    last=$(awk -F '\t' -v m="$id" -v u="$URL" -v h="$VERIFY_HEAD" '$2 == m && $3 == u && $4 == h { d = $5 } END { print d }' "$ledger" 2>/dev/null); }; then
+    echo "the parent's handoff ledger cannot be read"
+    return 1
+  fi
+  case "$last" in
+    '') echo "the parent no longer records delivery $VERIFY_DELIVERY (revoked or never sent)"; return 1 ;;
+    "$VERIFY_DELIVERY") echo "delivery $VERIFY_DELIVERY is the parent's newest confirmed handoff"; return 0 ;;
+    *) echo "delivery $VERIFY_DELIVERY was replaced by delivery $last"; return 1 ;;
+  esac
+}
+
+# Owners claiming the task, one per line.
+owners=
+EVIDENCE=
+SELF_MATE=0
+RESERVED_MATE=
+main_meta="$STATE/$ID.meta"
+if [ -f "$main_meta" ] && [ ! -L "$main_meta" ]; then
+  if [ "$(meta_field "$main_meta" kind)" = secondmate ]; then
+    SELF_MATE=1
+  else
+    owners="main"
+  fi
+fi
+for mate_meta in "$STATE"/*.meta; do
+  [ -f "$mate_meta" ] && [ ! -L "$mate_meta" ] || continue
+  [ "$(meta_field "$mate_meta" kind)" = secondmate ] || continue
+  mate=$(basename "$mate_meta" .meta)
+  status="$STATE/$mate.status"
+  [ -f "$status" ] || continue
+  line=$("$SCRIPT_DIR/fm-pr-progress.sh" evidence "$status" 2>/dev/null |
+    awk -F '\t' -v id="$ID" -v url="$URL" '$2 == id && $3 == url { last = $4 } END { if (last != "") print last }')
+  [ -n "$line" ] || continue
+  case "$mate" in main|missing|conflicting) RESERVED_MATE=$mate ;; esac
+  owners="${owners:+$owners
+}$mate"
+  EVIDENCE=$line
+done
+owner_count=0
+[ -z "$owners" ] || owner_count=$(printf '%s\n' "$owners" | wc -l | tr -d ' ')
+
+OWNER=missing
+if [ "$SELF_MATE" -eq 1 ] || [ -n "$RESERVED_MATE" ] || [ "$owner_count" -gt 1 ]; then
+  OWNER=conflicting
+elif [ "$owner_count" -eq 1 ]; then
+  OWNER=$owners
+fi
+
+# Live pull request facts (GitHub only; see LIVE FACTS).
+PR_STATE=unknown DRAFT=unknown HEAD=unknown BASE=unknown
+if [ "$FM_PR_PROVIDER" = github ] && command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  fm_pr_github_host_export "$FM_PR_HOST"
+  if view=$(fm_run_timed "${FM_MERGE_ROUTE_GH_SECS:-10}" gh pr view "$URL" \
+      --json state,isDraft,headRefOid,baseRefName </dev/null 2>/dev/null); then
+    facts=$(printf '%s' "$view" | jq -r '[(.state // "unknown"), (if .isDraft == true then "yes" elif .isDraft == false then "no" else "unknown" end), (.headRefOid // "unknown"), (.baseRefName // "unknown")] | @tsv' 2>/dev/null) || facts=
+    if [ -n "$facts" ]; then
+      IFS="$(printf '\t')" read -r PR_STATE DRAFT HEAD BASE <<EOF
+$facts
+EOF
+    fi
+  fi
+fi
+case "$HEAD" in *[!0-9a-f]* | '') HEAD=unknown ;; esac
+[ -n "$BASE" ] || BASE=unknown
+
+# The owning project (see LIVE FACTS).
+PROJECT=unknown
+origin_matches() {  # <remote-url>
+  local u=$1
+  u=${u%.git}
+  u=${u%/}
+  case "$u" in
+    "https://$FM_PR_HOST/$FM_PR_PATH" | "ssh://git@$FM_PR_HOST/$FM_PR_PATH" | "git@$FM_PR_HOST:$FM_PR_PATH") return 0 ;;
+  esac
+  return 1
+}
+if [ "$OWNER" = main ]; then
+  proj=$(meta_field "$main_meta" project)
+  [ -z "$proj" ] || PROJECT=$(basename "$proj")
+elif [ "$OWNER" != conflicting ] && [ -d "$PROJECTS" ]; then
+  found=
+  for clone in "$PROJECTS"/*/; do
+    [ -d "$clone" ] || continue
+    remote=$(git -C "$clone" remote get-url origin 2>/dev/null) || continue
+    origin_matches "$remote" || continue
+    found="${found:+$found
+}$(basename "$clone")"
+  done
+  if [ -n "$found" ] && [ "$(printf '%s\n' "$found" | wc -l | tr -d ' ')" -eq 1 ]; then
+    PROJECT=$found
+  fi
+fi
+PRODUCTION=unknown
+if [ "$PROJECT" != unknown ] && [ "$BASE" != unknown ]; then
+  PRODUCTION=$("$SCRIPT_DIR/fm-project-mode.sh" --production "$PROJECT" "$BASE" 2>/dev/null) || PRODUCTION=unknown
+  [ -n "$PRODUCTION" ] || PRODUCTION=unknown
+fi
+
+case "$OWNER" in
+  main)
+    ROUTE=merge-here
+    REASON="this home records task $ID; merge only through bin/fm-pr-merge.sh under its usual gates"
+    ;;
+  missing)
+    ROUTE=hold
+    REASON="no task record here and no registered second mate relays child $ID with this pull request, so nothing proves who may merge it"
+    ;;
+  conflicting)
+    ROUTE=hold
+    if [ "$SELF_MATE" -eq 1 ]; then
+      REASON="$ID is a second mate, not the task that opened this pull request; name the child task instead"
+    elif [ -n "$RESERVED_MATE" ]; then
+      REASON="second mate $RESERVED_MATE relays child $ID, but its id is an owner word this route cannot report unambiguously; rename that mate or hand the pull request off by hand"
+    else
+      REASON="more than one owner claims child $ID with this pull request: $(printf '%s\n' "$owners" | paste -sd, -)"
+    fi
+    ;;
+  *)
+    ROUTE=handoff
+    REASON="child $ID belongs to second mate $OWNER, whose home owns its record and its merge; hand it off rather than merging here"
+    ;;
+esac
+
+printf 'owner: %s\npr: %s\nstate: %s\ndraft: %s\nhead: %s\nbase: %s\nproject: %s\nproduction: %s\n' \
+  "$OWNER" "$URL" "$PR_STATE" "$DRAFT" "$HEAD" "$BASE" "$PROJECT" "$PRODUCTION"
+[ "$ROUTE" != handoff ] || printf 'evidence: %s\n' "$EVIDENCE"
+printf 'route: %s\nreason: %s\n' "$ROUTE" "$REASON"
+
+if [ -n "$VERIFY_HEAD" ]; then
+  if [ "$PR_STATE" != OPEN ] || [ "$HEAD" != "$VERIFY_HEAD" ] || [ "$BASE" != "$VERIFY_BASE" ]; then
+    echo "verified: no (the pull request is $PR_STATE at head $HEAD on base $BASE, not open at head $VERIFY_HEAD on base $VERIFY_BASE; the handoff is void - hold and relay why)"
+    exit 3
+  fi
+  identity_rc=0
+  fm_parent_channel_home_id "$FM_HOME" >/dev/null 2>&1 || identity_rc=$?
+  authorization=
+  if [ -n "$VERIFY_DELIVERY" ] || [ "$identity_rc" -ne 1 ]; then
+    authorization=$(handoff_authorization) || {
+      echo "verified: no ($authorization; the handoff is void - hold and relay why)"
+      exit 3
+    }
+    authorization="; $authorization"
+  fi
+  echo "verified: yes (open at head $HEAD on base $BASE; production by this home's deployment map: $PRODUCTION$authorization)"
+  [ "$ROUTE" != hold ] || exit 3
+  exit 0
+fi
+
+if [ "$ROUTE" = hold ]; then
+  exit 3
+fi
+[ "$SEND" -eq 1 ] || exit 0
+if [ "$ROUTE" != handoff ]; then
+  echo "sent: no (this home owns the task; nothing is handed off)"
+  exit 0
+fi
+if [ "$PR_STATE" != OPEN ] || [ "$HEAD" = unknown ] || [ "$BASE" = unknown ]; then
+  echo "sent: no (the pull request is not readably open at a known head and base; nothing is handed off)"
+  exit 3
+fi
+if fm_afk_contract_away_present "$STATE"; then
+  MANDATE=$("$SCRIPT_DIR/fm-afk-contract.sh" words 2>/dev/null) || {
+    echo "sent: no (the away record's words could not be read)"
+    exit 3
+  }
+  MANDATE="away words, verbatim: ${MANDATE:-(none recorded)}"
+elif [ -z "$MANDATE" ]; then
+  echo "sent: no (no away record stands and no --mandate was given, so the handoff would authorize nothing)"
+  exit 3
+fi
+
+LEDGER="$STATE/.merge-handoffs"
+LEDGER_LOCK="$STATE/.merge-handoffs.lock"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+fm_lock_acquire_wait_max "$LEDGER_LOCK" 30 || {
+  echo "sent: no (the handoff ledger lock is busy; re-run to retry)"
+  exit 3
+}
+trap 'fm_lock_release "$LEDGER_LOCK" || true' EXIT
+TAB=$(printf '\t')
+hash_text="merge-handoff|$OWNER|$URL|$HEAD|$BASE|$PRODUCTION|$MANDATE"
+if command -v shasum >/dev/null 2>&1; then
+  DELIVERY=$(printf '%s' "$hash_text" | shasum -a 256 | cut -c1-16)
+else
+  DELIVERY=$(printf '%s' "$hash_text" | sha256sum | cut -c1-16)
+fi
+SLOT=$(printf 'merge-handoff-slot|%s|%s|%s' "$OWNER" "$URL" "$HEAD" | sha16)
+prior=$(awk -F "$TAB" -v d="$DELIVERY" '$5 == d { print $1; exit }' "$LEDGER" 2>/dev/null)
+if [ -n "$prior" ]; then
+  echo "sent: already $prior"
+  exit 0
+fi
+MESSAGE="Merge handoff from the parent home: child task $ID is yours, so the parent will not merge it.
+PR: $URL
+Head: $HEAD
+Base: $BASE
+Production (parent registry, by base): $PRODUCTION
+Scope evidence (your relay line): $EVIDENCE
+Parent mandate: $MANDATE
+Before acting, run bin/fm-merge-route.sh $ID $URL --verify-head $HEAD --verify-base $BASE --verify-delivery $DELIVERY in your home; act only on \`verified: yes\`, and hold if its production line differs from the parent's above. If anything moved, or the parent replaced or withdrew this delivery, this handoff is void: hold and relay why.
+Merge it only through your own bin/fm-pr-merge.sh $ID $URL --expected-head $HEAD --expected-base $BASE, under your own merge authority, checks, and holds; if they do not cover it, hold and relay why. This handoff waives no check, forces nothing, and authorizes nothing your own rules do not."
+PENDING_DIR="$STATE/.merge-handoffs.pending"
+PENDING="$PENDING_DIR/$DELIVERY"
+SLOT_FILE="$PENDING_DIR/slot-$SLOT"
+stale=$(cat "$SLOT_FILE" 2>/dev/null || true)
+if [ -n "$stale" ] && [ "$stale" != "$DELIVERY" ]; then
+  rm -f "$PENDING_DIR/$stale"
+  echo "superseded: unconfirmed handoff $stale for this head was built from other facts or another mandate; it is not resent, and if it landed the mate's verification voids it"
+fi
+if [ -f "$PENDING" ]; then
+  MESSAGE=$(cat "$PENDING") || { echo "sent: no (the pending handoff $DELIVERY could not be read)"; exit 3; }
+else
+  { mkdir -p "$PENDING_DIR" && printf '%s' "$MESSAGE" > "$PENDING.tmp" && mv -f "$PENDING.tmp" "$PENDING" &&
+    printf '%s\n' "$DELIVERY" > "$SLOT_FILE.tmp" && mv -f "$SLOT_FILE.tmp" "$SLOT_FILE"; } || {
+    rm -f "$PENDING.tmp" "$SLOT_FILE.tmp"
+    echo "sent: no (the pending handoff $DELIVERY could not be recorded)"
+    exit 3
+  }
+fi
+SEND_CMD=${FM_MERGE_ROUTE_SEND_CMD:-$SCRIPT_DIR/fm-send.sh}
+FM_HOME=$FM_HOME "$SEND_CMD" "$OWNER" --fire-and-forget "$DELIVERY" "$MESSAGE"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "sent: unconfirmed (fm-send exit $rc; re-run this command to retry the same delivery $DELIVERY)"
+  exit "$rc"
+fi
+printf '%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "$OWNER" "$URL" "$HEAD" "$DELIVERY" >> "$LEDGER"
+rm -f "$PENDING" "$SLOT_FILE"
+echo "sent: yes $DELIVERY"

@@ -70,6 +70,7 @@
 # Usage:
 #   fm-afk-launch.sh enter [--words-file <path> | --words <text>]
 #                          [--expected-return <UTC ISO 8601>] [--spend <n>]
+#                          [--keep-full [--lane-target <n>]]
 #                              Write the away-posture record now, with no
 #                              separate confirmation, then print the entry
 #                              announcement and the read-back. With no words

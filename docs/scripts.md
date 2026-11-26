@@ -52,7 +52,10 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-test-run.sh`         | Behavior-test runner: selection, portable lanes, bounded concurrency, budgets, coverage guard, timing/JSON; refuses to execute in the repository primary checkout when `FM_TASK_ID` marks a task worker |
 | `fm-test-isolation-proof.sh` | Concurrent isolation harness and portable candidate set owner |
 | `fm-ensure-agents-md.sh` | Manually initialize project agent-memory files (see the helper's header and help) |
-| `fm-capacity.sh`         | Report of open lanes against the optional `config/lane-capacity` target, or a measured `auto` budget, and host headroom for queued-work dispatch; `--publish` writes this home's `state/lane-capacity.json`, and `--spawn-gate` is the opt-in spawn check |
+| `fm-capacity.sh`         | Report of open lanes against the optional `config/lane-capacity` target, or a measured `auto` budget, and host headroom for queued-work dispatch; `--publish` writes this home's `state/lane-capacity.json`, `--spawn-gate` is the opt-in spawn check, and `--host-gate` is the always-on host load and memory gate every spawn and relaunch asks first |
+| `fm-lane-count.sh`       | Count each home's genuinely working lanes from the fresh fleet snapshot, beside active, total, lane target, and live worker-process occupancy, each split by model tool; `--host-health` prints the one-line load, memory, and PRs-in-the-last-hour health check |
+| `fm-pr-progress.sh`      | Count newly created PRs per home from local status records, and alarm once when busy lanes create no PR for a full hour, with one stop-spawning-and-diagnose cue to the owning mate |
+| `fm-lane-refill.sh`      | Away-mode-only shortage episodes for a second mate below its lane target, and the one deduplicated refill cue per episode |
 | `fm-lane-vitals-lib.sh`  | Read-only host vitals and per-lane process attribution behind `fm-capacity.sh`'s auto budget (Linux, macOS, the Windows host from WSL2, and native Windows under Git Bash/MSYS) |
 | `fm-guard.sh`            | Warn on primary-checkout tangles, main-session pending wakes, and unhealthy supervision |
 | `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |
@@ -166,6 +169,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-check-unregister.sh` | Retire a custom watcher check and its trust binding by validated task id            |
 | `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
 | `fm-tool-update-check.sh` | Report watched tooling with an update available, and updates installed but left inert by PATH order |
+| `fm-merge-route.sh`      | Resolve which home owns a task's pull request before any merge, hand a second mate's child PR to that mate, and let the receiving mate verify that delivery against its parent's records before it merges pinned to the verified head and base |
 | `fm-merge-on-validated.sh` | Opt-in, dry-run-first hook that merges a validated dev pull request through `fm-pr-merge.sh` once the standing dev-merge test holds |
 | `fm-review-verdict.sh` | Record a second-model merge/fix review for one exact pull request head |
 | `fm-startup-growth-check.sh` | Daily metadata-only growth check for startup memory and tracked startup/instruction surfaces |

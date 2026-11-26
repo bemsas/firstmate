@@ -579,6 +579,7 @@ A leftover `state/.afk` flag declines nothing.
   Parking is a cost and chat-cleanliness measure.
   Supervision continuity is the safety property, and the return brief's health section reads any gap.
 - The wake message ends with a fixed `POSTURE: AWAY` tail plus the record's read-back verbatim (`bin/fm-afk-contract.sh readback`).
+- Without an away record the wake ends with a fixed `POSTURE: ATTENDED` tail instead, so a conversation that outlived the return never keeps an earlier away tail as its newest posture.
   The branch therefore has the captain's away words, the spend cap, the expected return, and the reach line in front of it at execution time, without any prefix change.
 - Captain-verdict outcomes accumulate unprocessed in the outcome store.
   Their visible entries still persist, but no processing turn opens on the parked main.
@@ -613,7 +614,10 @@ Each relocated script keeps its own gate, enforcing exactly what a script can ch
 | Script | Gate while away |
 | --- | --- |
 | `bin/fm-pr-merge.sh` | Merges a pull request synchronously under the record lock after the [merge helper's guards](../bin/fm-pr-merge.sh) pass, and refuses `--allow-red`, `--allow-missing`, and `--allow-no-pipeline` while away, so the green gate is absolute in this posture; which pull request the words meant is the branch's reading. |
-| `bin/fm-spawn.sh` | Dispatches only queued work whose blockers cleared - already queued, or filed by the branch because the words explicitly call for it; refuses a fresh ordinary spawn for either actor once the home holds as many ordinary task records as the record's spend cap (relaunches and secondmates exempt). |
+| `bin/fm-spawn.sh` | Dispatches only queued work whose blockers cleared - already queued, or filed by the branch because the words explicitly call for it; refuses a fresh ordinary spawn for either actor once the home holds as many ordinary task records as the record's spend cap (relaunches and secondmates exempt; a keep-full record with no target adds no cap). |
+| `bin/fm-merge-route.sh` | Runs before every merge: a task this home records merges here, a second mate's child is handed to that mate, which verifies the delivery against this home's records and merges pinned to the verified head and base, and a missing or conflicting owner holds; its production reading follows the verified base. |
+| `bin/fm-lane-refill.sh` | Sends the one refill cue a `check: lane-refill:` wake names, for a second mate below its lane target for more than 15 minutes. |
+| `bin/fm-pr-progress.sh` | Sends the one stop-spawning-and-diagnose cue a `check: no-pr-progress:` wake names, for a home whose busy lanes created no PR for a full hour. |
 | `bin/fm-send.sh --resolve-key` | Answers a decision the words pre-answer, or one `ask-user-authority`'s judgment (carried verbatim in the branch prompt) lets firstmate decide. |
 | `bin/fm-merge-local.sh` | Never relocated. |
 
