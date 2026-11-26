@@ -117,6 +117,7 @@ unreadable() {  # <input> <detail>
 # The selected open pull requests, plus the head branches their owners could
 # record.
 HEADS=' '
+HEAD_PR_NUMBERS=' '
 collect_forge() {
   local query jq_expr body entry num draft head hrepo base branch selected=' ' wanted p count=0
   query='query($owner:String!,$name:String!){repository(owner:$owner,name:$name){pullRequests(states:OPEN,first:'"$FM_REVIEW_CAPACITY_PAGE"',orderBy:{field:UPDATED_AT,direction:DESC}){totalCount nodes{number isDraft baseRefName headRefName headRefOid headRepository{nameWithOwner}}}}}'
@@ -142,6 +143,7 @@ collect_forge() {
     fi
     [ "$wanted" -eq 1 ] || continue
     HEADS="$HEADS$branch "
+    HEAD_PR_NUMBERS="$HEAD_PR_NUMBERS$num "
     fact '{t:"pr",number:($num|tonumber),draft:($draft=="1"),head:$head,head_repo:$hrepo,base:$base,branch:$branch}' \
       --arg num "$num" --arg draft "$draft" --arg head "$head" --arg hrepo "$hrepo" \
       --arg base "$base" --arg branch "$branch"
@@ -151,7 +153,7 @@ collect_forge() {
 # One task record, when its pr= is in this repository or its branch could be a
 # selected pull request's head: its last status event and ready reports.
 collect_record() {  # <state> <meta>
-  local state=$1 meta=$2 id text kind pr branch pr_match=0 branch_match=0 target='' sources=''
+  local state=$1 meta=$2 id text kind pr pr_path pr_number branch pr_match=0 branch_match=0 target='' sources=''
   local status last='' verb='' note line scan done_lines=''
   if ! fm_review_capacity_read_record "$meta"; then
     [ -e "$meta" ] || return 0
@@ -163,7 +165,13 @@ collect_record() {  # <state> <meta>
   kind=$(fm_review_capacity_field "$text" kind)
   [ "$kind" != secondmate ] || return 0
   pr=$(fm_review_capacity_field "$text" pr)
-  case "$(printf '%s' "$pr" | tr '[:upper:]' '[:lower:]')" in "https://$WANT/pull/"*) pr_match=1 ;; esac
+  pr_path=$(printf '%s' "$pr" | tr '[:upper:]' '[:lower:]')
+  case "$pr_path" in
+    "https://$WANT/pull/"*)
+      pr_number=${pr_path#"https://$WANT/pull/"}
+      case "$pr_number" in ''|*[!0-9]*) ;; *) case "$HEAD_PR_NUMBERS" in *" $pr_number "*) pr_match=1 ;; esac ;; esac
+      ;;
+  esac
   branch=$(fm_review_capacity_field "$text" branch)
   if [ -n "$branch" ]; then
     branch=$(fm_review_capacity_uri "$branch")

@@ -283,6 +283,14 @@ class PreviewTest(unittest.TestCase):
             self.assertEqual(row["status"], "unknown")
             self.assertIn("neither a recorded verdict nor a live scout", row["reason"])
 
+    def test_unrelated_pr_prefix_does_not_poison_selected_pr(self):
+        self.seed()
+        self.record("t1120", f"pr={url(112)}0", status=["working: unrelated"])
+        (self.home / "state" / "t1120.status").unlink()
+        (self.home / "state" / "t1120.status").symlink_to(self.tmp / "missing-status")
+        row = self.rows("--pr", "112")[112]
+        self.assertEqual(row["status"], "verify-fix")
+
     def test_selection_and_forge_failure(self):
         self.seed()
         self.assertEqual(list(self.rows("--limit", "3")), [101, 102, 103])
