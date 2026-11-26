@@ -275,6 +275,14 @@ class PreviewTest(unittest.TestCase):
         (self.mate / "data" / "backlog.md").symlink_to(self.tmp / "nowhere")
         self.assertIn("held tasks", self.rows()[112]["reason"])
 
+    def test_terminal_refute_scouts_are_not_live(self):
+        self.seed()
+        for terminal in ("done: review complete", "failed: review failed"):
+            (self.home / "state" / "scout114.status").write_text(terminal + "\n")
+            row = self.rows("--pr", "114")[114]
+            self.assertEqual(row["status"], "unknown")
+            self.assertIn("neither a recorded verdict nor a live scout", row["reason"])
+
     def test_selection_and_forge_failure(self):
         self.seed()
         self.assertEqual(list(self.rows("--limit", "3")), [101, 102, 103])

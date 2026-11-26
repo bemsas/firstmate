@@ -205,7 +205,7 @@ collect_record() {  # <state> <meta>
 }
 
 collect_tickets() {  # <state>
-  local state=$1 ticket row reviewer live
+  local state=$1 ticket row reviewer live status scan last verb
   for ticket in "$state"/*.refute.json; do
     [ -e "$ticket" ] || [ -L "$ticket" ] || continue
     if [ ! -f "$ticket" ] || [ -L "$ticket" ] || ! row=$(jq -ce '
@@ -216,7 +216,22 @@ collect_tickets() {  # <state>
     fi
     reviewer=$(basename "$ticket" .refute.json)
     live=false
-    [ ! -e "$state/$reviewer.meta" ] || live=true
+    if [ -f "$state/$reviewer.meta" ] && [ ! -L "$state/$reviewer.meta" ]; then
+      live=true
+      verb=''
+      status="$state/$reviewer.status"
+      if [ -e "$status" ] || [ -L "$status" ]; then
+        if [ -f "$status" ] && [ -r "$status" ]; then
+          scan=$(_fm_crew_status_event_scan < "$status") || :
+          last=${scan##*$'\n'}
+          [ -z "$last" ] || status_line_verb "$last" verb
+          case "${verb:-}" in done|failed) live=false ;; esac
+        else
+          unreadable reviews "scout status log $status cannot be read"
+          live=false
+        fi
+      fi
+    fi
     fact '$row + {t:"ticket",state:$state,live:$live}' --argjson row "$row" --arg state "$state" --argjson live "$live"
   done
 }
