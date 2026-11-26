@@ -13,8 +13,8 @@ This file owns each row's disposition; the first that applies wins:
   owned              an owner's last status event is neither done nor failed
   review-dispatched  a live refute scout was dispatched for the observed head
   unknown            an input could not be read, a refute dispatch for this head
-                     has neither a verdict nor a live scout, no eligible prior
-                     verdict joins, or homes disagree about the prior one
+                     has neither a verdict nor a live scout, or no eligible
+                     prior verdict joins
   fix-evidenced      the head changed and an owner's latest ready report for this
                      pull request names the observed head
   verify-fix         the head changed with no such report
@@ -27,14 +27,9 @@ import re
 import sys
 import time
 
-NOTE = ("Advice only, bound to the observed head and time. The dispatch owner rechecks the live "
-        "head, holds, owners, capacity, proof and model before any review starts.")
+NOTE = ("Advice only, bound to the observed head and time. Other-home owner and hold evidence is "
+        "unknown; the dispatch owner rechecks the live head, holds, owners, capacity, proof and model.")
 FINISHED = ("done", "failed")
-
-
-def clean(text, limit=300):
-    text = " ".join("".join(c if c.isprintable() else " " for c in str(text)).split())
-    return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
 def shown(show, field):
@@ -69,9 +64,7 @@ def holds_of(url, owners, holds):
     for hold in holds:
         text = "\n".join(shown(hold["show"], field) for field in ("title", "hold_reason", "links", "body"))
         if (hold["state"], hold["id"]) in tasks or named.search(text):
-            found.append({"id": hold["id"], "state": hold["state"],
-                          "kind": shown(hold["show"], "hold_kind"),
-                          "reason": clean(shown(hold["show"], "hold_reason"))})
+            found.append({"id": hold["id"], "state": hold["state"]})
     return found
 
 
@@ -82,28 +75,27 @@ def judge(url, pr, facts):
     refute_merges = []
     for row in verdicts:
         if not row["eligible"]:
-            refute_merges.append({key: row[key] for key in ("head", "verdict", "reviewer", "state")})
+            refute_merges.append({key: row[key] for key in ("head", "verdict")})
             continue
-        record = {key: row[key] for key in ("head", "verdict", "reviewer", "state")}
+        record = {key: row[key] for key in ("head", "verdict")}
         # Journal order is the only order, so the last row of each home wins.
         if row["head"] == pr["head"]:
             current[row["state"]] = record
         else:
             latest_prior[row["state"]] = record
     priors = list(latest_prior.values())
-    prior_conflict = len({(row["head"], row["verdict"]) for row in priors}) > 1
     owners = owners_of(url, pr, facts["record"])
     holds = holds_of(url, owners, facts["hold"])
     evidence = []
     for owner in owners:
         reports = [report for report in owner["done"] if report["url"].lower() == url.lower()]
         if reports and reports[-1]["head"] == pr["head"]:
-            evidence.append({"owner": owner["id"], "state": owner["state"], "report": clean(reports[-1]["line"])})
+            evidence.append({"head": reports[-1]["head"]})
     tickets = [row for row in facts["ticket"] if row["pr"].lower() == url.lower() and row["head"] == pr["head"]]
     recorded = list(current.values()) or [row for row in refute_merges if row["head"] == pr["head"]]
     live = [row for row in tickets if row["live"]]
     active = [owner for owner in owners if owner["verb"] not in FINISHED]
-    unreadable = [f"{row['input']}: {clean(row['detail'])}" for row in facts["unreadable"]]
+    unreadable = ["local evidence unavailable"] if facts["unreadable"] else []
 
     if pr["draft"]:
         status, reason = "draft", "the pull request is a draft"
@@ -112,23 +104,20 @@ def judge(url, pr, facts):
         kind = "" if current else " refute"
         status, reason = "reviewed-head", f"a{kind} {names} verdict is already recorded for this head; no repeat review"
     elif holds:
-        status, reason = "held", "held by " + ", ".join(hold["id"] for hold in holds)
+        status, reason = "held", "a local hold applies"
     elif unreadable:
         status, reason = "unknown", "unreadable input: " + "; ".join(unreadable)
     elif active:
         status = "owned"
-        reason = "active owner " + ", ".join(f"{o['id']} ({o['verb'] or 'no status yet'})" for o in active)
+        reason = "a local task is active"
     elif live:
         status = "review-dispatched"
-        reason = "review dispatched for this head to " + ", ".join(row["reviewer"] for row in live)
+        reason = "review dispatched for this head"
     elif tickets:
         status = "unknown"
-        reason = ("a review dispatch record for this head has neither a recorded verdict nor a live scout: "
-                  + ", ".join(row["reviewer"] for row in tickets))
+        reason = "a local review dispatch record has neither a verdict nor a live scout"
     elif not priors:
         status, reason = "unknown", "no eligible prior verdict joins this pull request"
-    elif prior_conflict:
-        status, reason = "unknown", "local homes record different prior verdicts and no order between them"
     elif evidence:
         status, reason = "fix-evidenced", "the head changed and its owner reported this exact head ready"
     else:
@@ -141,10 +130,9 @@ def judge(url, pr, facts):
         "current_verdicts": list(current.values()),
         "prior_verdicts": priors,
         "refute_merges": refute_merges[-1:],
-        "fix_evidence": evidence,
-        "owners": [{"id": o["id"], "state": o["state"], "kind": o["kind"], "last_status": o["verb"],
-                    "joined_by": o["joined_by"]} for o in owners],
-        "holds": holds,
+        "fix_evidence": [{"present": True}] if evidence else None,
+        "owners": ([{"present": True} for _ in owners] if owners else None),
+        "holds": ([{"present": True}] if holds else None),
         "unreadable": unreadable,
     }
 
@@ -166,7 +154,7 @@ def report(lines):
         url = f"https://{repo}/pull/{number}"
         pr = by_number.get(number)
         if pr is None:
-            why = (f"the forge could not be observed: {seen['error']}" if seen["error"]
+            why = ("the forge could not be observed" if seen["error"]
                    else "not among the observed open pull requests (closed, merged, absent, or past one page)")
             row = {"status": "unknown", "reason": why, "head": None, "current_verdicts": [],
                    "prior_verdicts": [], "refute_merges": [], "fix_evidence": [], "owners": [],
@@ -175,7 +163,7 @@ def report(lines):
             row = judge(url, pr, facts)
         rows.append({"pr": url, "observed_at": observed, **row})
     return {"repository": repo, "observed_at": observed, "open_total": None if seen["error"] else seen["total"],
-            "error": seen["error"] or None, "rows": rows, "note": NOTE}
+            "error": "forge could not be observed" if seen["error"] else None, "rows": rows, "note": NOTE}
 
 
 def text(result):
@@ -186,21 +174,20 @@ def text(result):
         out.append(f"error: {result['error']}")
     for row in result["rows"]:
         unknown = "unknown" if row["unreadable"] else "none"
-        verdicts = [f"{v['verdict']} {v['head']} by {clean(v['reviewer'] or 'unnamed')}"
+        verdicts = [f"{v['verdict']} {v['head']}"
                     for v in row["current_verdicts"] + row["prior_verdicts"]]
-        verdicts += [f"refute {v['verdict']} {v['head']} by {clean(v['reviewer'])} (not eligible)"
+        verdicts += [f"refute {v['verdict']} {v['head']} (not eligible)"
                      for v in row["refute_merges"]]
-        owners = [f"{o['id']} ({o['last_status'] or 'no status yet'}, by {o['joined_by']}) in {o['state']}"
-                  for o in row["owners"]]
-        holds = [f"{h['id']} ({h['kind'] or 'unknown kind'}) in {h['state']}: {h['reason']}" for h in row["holds"]]
-        fixes = [f"{e['owner']}: {e['report']}" for e in row["fix_evidence"]]
+        owners = "present" if row["owners"] else "unknown"
+        holds = "present" if row["holds"] else "unknown"
+        fixes = "present" if row["fix_evidence"] else "unknown"
         out += ["", f"{row['pr']}  {row['status']}",
                 f"  head: {row['head'] or 'unknown'}",
                 f"  observed: {row['observed_at']}",
                 f"  verdicts: {'; '.join(verdicts) or unknown}",
-                f"  fix evidence: {'; '.join(fixes) or unknown}",
-                f"  owner: {'; '.join(owners) or 'unknown'}",
-                f"  hold: {'; '.join(holds) or unknown}",
+                f"  fix evidence: {fixes if row['fix_evidence'] else unknown}",
+                f"  owner: {owners}",
+                f"  hold: {holds}",
                 f"  reason: {row['reason']}"]
     counts = {}
     for row in result["rows"]:

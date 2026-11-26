@@ -85,8 +85,8 @@ EXPECTED = {
     113: "unknown",            # no verdict joins
     114: "review-dispatched",
     115: "unknown",            # dispatch record without verdict or scout
-    116: "unknown",            # homes disagree about the prior verdict
-    117: "held",               # hold lives in a secondmate home
+    116: "verify-fix",          # only the caller's prior verdict is joined
+    117: "verify-fix",         # a secondmate hold is not read
     118: "verify-fix",         # same branch name on a fork is not the owner
     119: "verify-fix",         # a newer ready report withdrew the observed head
     120: "verify-fix",         # a hold on pull/1200 is not a hold on pull/120
@@ -245,15 +245,15 @@ class PreviewTest(unittest.TestCase):
         self.assertEqual(evidenced["head"], sha(110))
         self.assertRegex(evidenced["observed_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
         self.assertEqual(evidenced["prior_verdicts"][0]["head"], sha("old-110"))
-        self.assertEqual(evidenced["fix_evidence"][0]["report"], self.ready(110, sha(110)))
-        self.assertEqual(evidenced["owners"][0]["id"], "t110")
-        self.assertEqual(rows[105]["holds"][0]["reason"], "synthetic (choice) pending")
-        self.assertEqual(rows[109]["owners"][0]["joined_by"], "branch")
-        self.assertEqual(rows[118]["owners"], [])
+        self.assertEqual(evidenced["fix_evidence"], [{"present": True}])
+        self.assertEqual(evidenced["owners"], [{"present": True}])
+        self.assertEqual(rows[105]["holds"], [{"present": True}])
+        self.assertEqual(rows[109]["owners"], [{"present": True}])
+        self.assertIsNone(rows[118]["owners"])
         self.assertEqual(rows[103]["refute_merges"][0]["head"], sha(103))
         text = self.run_preview().stdout
-        for part in (f"{url(110)}  fix-evidenced", f"head: {sha(110)}", f"fix {sha('old-110')} by rv-110",
-                     "hold: h105 (captain)", "dispatch owner rechecks"):
+        for part in (f"{url(110)}  fix-evidenced", f"head: {sha(110)}", f"fix {sha('old-110')}",
+                     "hold: present", "dispatch owner rechecks"):
             self.assertIn(part, text)
 
     def test_unreadable_inputs_leave_eligibility_unknown(self):
@@ -261,19 +261,14 @@ class PreviewTest(unittest.TestCase):
         (self.mate / "state" / "review-verdicts.jsonl").write_text("not json\n")
         rows = self.rows()
         for number in (110, 111, 112):
-            self.assertEqual(rows[number]["status"], "unknown")
-            self.assertIn("review verdict journal", rows[number]["reason"])
+            self.assertEqual(rows[number]["status"], EXPECTED[number])
         # Positive exclusions already proven stay visible.
         for number in (101, 104, 105, 108, 114):
             self.assertEqual(rows[number]["status"], EXPECTED[number])
         (self.mate / "state" / "review-verdicts.jsonl").unlink()
         (self.home / "state" / "bad.refute.json").write_text("{}")
-        self.assertIn("review dispatch record", self.rows()[112]["reason"])
+        self.assertIn("local evidence unavailable", self.rows()[112]["reason"])
         (self.home / "state" / "bad.refute.json").unlink()
-        (self.mate / "data" / "backlog.md").unlink()
-        # A linked backlog is refused by bin/fm-tasks-axi.sh itself.
-        (self.mate / "data" / "backlog.md").symlink_to(self.tmp / "nowhere")
-        self.assertIn("held tasks", self.rows()[112]["reason"])
 
     def test_terminal_refute_scouts_are_not_live(self):
         self.seed()
@@ -281,7 +276,7 @@ class PreviewTest(unittest.TestCase):
             (self.home / "state" / "scout114.status").write_text(terminal + "\n")
             row = self.rows("--pr", "114")[114]
             self.assertEqual(row["status"], "unknown")
-            self.assertIn("neither a recorded verdict nor a live scout", row["reason"])
+            self.assertIn("neither a verdict nor a live scout", row["reason"])
 
     def test_unrelated_pr_prefix_does_not_poison_selected_pr(self):
         self.seed()
@@ -298,8 +293,29 @@ class PreviewTest(unittest.TestCase):
         (self.home / "state" / "t111.status").symlink_to(self.tmp / "missing-status")
         row = self.rows("--pr", "111")[111]
         self.assertEqual(row["status"], "unknown")
-        self.assertIn("status log", row["reason"])
-        self.assertEqual(row["owners"][0]["last_status"], "unreadable")
+        self.assertIn("local evidence unavailable", row["reason"])
+        self.assertEqual(row["owners"], [{"present": True}])
+
+    def test_two_home_private_details_are_never_emitted(self):
+        self.seed()
+        private = ("MATE_PRIVATE_TASK_884", "MATE_PRIVATE_TITLE_991", "MATE_PRIVATE_REASON_672",
+                   "MATE_PRIVATE_LINK_513", str(self.mate))
+        self.record(private[0], f"pr={url(112)}", status=["working: MATE_PRIVATE_STATUS_228"],
+                    home=self.mate)
+        self.hold(private[0], f"{private[1]} {private[3]}", home=self.mate)
+        (self.mate / "data" / "backlog.md").write_text(json.dumps([{
+            "id": private[0], "title": private[1], "hold_kind": "captain",
+            "body": private[3], "hold_reason": "fm-hold-v1:" + base64.b64encode(private[2].encode()).decode(),
+            "links": private[3]}]))
+        outputs = (self.run_preview("--json").stdout, self.run_preview().stdout)
+        for output in outputs:
+            for secret in private + ("MATE_PRIVATE_STATUS_228",):
+                self.assertNotIn(secret, output)
+        rows = self.rows()
+        self.assertIsNone(rows[112]["owners"])
+        self.assertIsNone(rows[112]["holds"])
+        self.assertEqual(rows[117]["status"], "verify-fix")
+        self.assertIsNone(rows[117]["holds"])
 
     def test_selection_and_forge_failure(self):
         self.seed()

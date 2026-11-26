@@ -22,9 +22,8 @@
 #   owners     task records and status logs; fm_dod_candidate_fields in
 #              bin/fm-dod-lib.sh reads a ready report's exact head
 #   reviews    state/<scout>.refute.json dispatch records
-# All of them come from every local Firstmate home on this machine
-# (fm_local_firstmate_state_dirs, starting at this home's state directory). Work
-# on another machine is not visible. FM_HOME, FM_STATE_OVERRIDE, and
+# They come only from this Firstmate home. Other-home owner and hold evidence is
+# unknown. FM_HOME, FM_STATE_OVERRIDE, and
 # FM_DATA_OVERRIDE select this home as usual; its state directory must exist.
 #
 # bin/fm-review-eligibility-preview.py owns how a row is judged and printed.
@@ -80,8 +79,6 @@ done
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-# shellcheck source=bin/fm-secondmate-registry-lib.sh
-. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-project-capacity-lib.sh
 . "$SCRIPT_DIR/fm-project-capacity-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -277,32 +274,21 @@ collect_holds() {  # <state> <home> <data>
 }
 
 collect_local() {
-  local state home data meta
-  if ! fm_local_firstmate_state_dirs "$STATE"; then
-    unreadable owners "$FM_LOCAL_FIRSTMATE_ERROR"
-    FM_LOCAL_FIRSTMATE_STATES=("$STATE")
+  local meta
+  if [ ! -d "$STATE" ] || [ ! -r "$STATE" ] || [ ! -x "$STATE" ]; then
+    unreadable owners "the caller's local state cannot be read"
+    unreadable verdicts "the caller's local state cannot be read"
+    unreadable reviews "the caller's local state cannot be read"
+    unreadable holds "the caller's local state cannot be read"
+    return 0
   fi
-  for state in "${FM_LOCAL_FIRSTMATE_STATES[@]}"; do
-    if [ "$state" = "$STATE" ]; then
-      home=$FM_HOME data=$DATA
-    else
-      home=$(dirname "$state") data="$(dirname "$state")/data"
-    fi
-    if [ -e "$state" ]; then
-      if [ ! -d "$state" ] || [ ! -r "$state" ] || [ ! -x "$state" ]; then
-        unreadable owners "state directory $state cannot be read"
-        unreadable verdicts "state directory $state cannot be read"
-      else
-        for meta in "$state"/*.meta; do
-          [ -f "$meta" ] && [ ! -L "$meta" ] || continue
-          collect_record "$state" "$meta"
-        done
-        collect_tickets "$state"
-        collect_verdicts "$state"
-      fi
-    fi
-    collect_holds "$state" "$home" "$data"
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    collect_record "$STATE" "$meta"
   done
+  collect_tickets "$STATE"
+  collect_verdicts "$STATE"
+  collect_holds "$STATE" "$FM_HOME" "$DATA"
 }
 
 collect() {

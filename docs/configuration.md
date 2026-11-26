@@ -2257,12 +2257,14 @@ The preview reports and never acts, needs no configuration, and is not part of a
 FM_HOME=/absolute/home bin/fm-review-eligibility-preview.sh owner/repo [--limit 20] [--pr <number>] [--json]
 ```
 
-Each row names the exact head and the time it was observed, recorded verdicts, any ready report that names that head, known owners and holds, and the reason for its disposition.
+Each row names the exact head and the time it was observed, recorded verdicts, whether a ready report names that head, and whether this home has matching owners or holds.
 `fix-evidenced` means an eligible earlier verdict exists, the head changed, and the owning task reported that exact head ready; it is a candidate for re-review, not proof that the findings are fixed.
 `verify-fix` means the head changed without such a report, so check the fix before re-reviewing it.
 `reviewed-head`, `draft`, `held`, `owned`, and `review-dispatched` rows propose no new review.
 `unknown` means an input could not be read or joined, which includes a pull request with no recorded eligible verdict; `none` beside an input is reported only when every read of it succeeded.
-It reads the task records, verdict journals, refute dispatch records, and held backlog tasks of every local Firstmate home on this machine, so work recorded only on another machine is invisible to it.
+It reads task records, verdict journals, refute dispatch records, and held backlog tasks from the selected home only.
+Other-home owner and hold evidence stays unknown.
+Output omits task identifiers, local paths, hold details, and ready report text.
 Every row is advice, and the dispatch owner still rechecks the live head, holds, owners, capacity, proof, and model.
 [`bin/fm-review-eligibility-preview.sh`](../bin/fm-review-eligibility-preview.sh) owns the inputs and bounds, and [`bin/fm-review-eligibility-preview.py`](../bin/fm-review-eligibility-preview.py) owns the disposition order.
 
