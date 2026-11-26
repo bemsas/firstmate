@@ -974,7 +974,7 @@ task_json_row() {  # <captured-meta> <id>
     --argjson worktree_path "$worktree_json" \
     --argjson home_path "$home_json" \
     --argjson endpoint_exists "$endpoint_exists" \
-    --argjson open_decisions "$open_decisions_json" \
+    --rawfile open_decisions <(printf '%s' "$open_decisions_json") \
     --argjson pending_decision "$(bool_json "$pending_decision")" \
     --argjson blocked_event "$(bool_json "$blocked_event")" \
     --argjson report_present "$(bool_json "$report_present")" \
@@ -1007,7 +1007,7 @@ task_json_row() {  # <captured-meta> <id>
       hints:{
         pending_decision:$pending_decision,
         blocked_event:$blocked_event,
-        open_decisions:$open_decisions,
+        open_decisions:($open_decisions | fromjson),
         scout_report_present:$report_present,
         last_event_text:$last_event_raw
       },
@@ -1768,8 +1768,12 @@ terminal_evidence_json() {  # <parent-task-json> <event-note> <evidence-contradi
 }
 
 parent_evidence_reconciliation_json() {  # <summary-json-file> <activities-json> <decisions-json>
-  jq -n --slurpfile summary "$1" --argjson activities "$2" --argjson decisions "$3" '
+  # Aggregated status JSON can exceed Linux's per-argument limit, so it reaches jq
+  # through descriptors; fromjson rejects missing or malformed input.
+  jq -n --slurpfile summary "$1" --rawfile activities <(printf '%s' "$2") --rawfile decisions <(printf '%s' "$3") '
     ($summary[0]) as $summary
+    | ($activities | fromjson) as $activities
+    | ($decisions | fromjson) as $decisions
     |
     def keyed: . != null and . != "" and . != "default";
     def result($e; $matches; $complete; $surface):
@@ -1991,11 +1995,15 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
         --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg state "$state" --arg observed "$summary_observed" \
         --arg summary_source "$summary_source" --arg summary_freshness "$summary_freshness" --argjson summary_age "$summary_age" \
         --arg spawn_gen "$sampled_spawn_gen" \
-        --argjson registered "$registered" --slurpfile summary "$summary_file" --argjson summary_valid "$summary_valid" --argjson decisions "$decisions" \
-        --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
-        --argjson reconciliation "$reconciliation" --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
+        --argjson registered "$registered" --slurpfile summary "$summary_file" --argjson summary_valid "$summary_valid" --rawfile decisions <(printf '%s' "$decisions") \
+        --rawfile activities <(printf '%s' "$activities") --rawfile activity_scan <(printf '%s' "$activity_scan") \
+        --rawfile reconciliation <(printf '%s' "$reconciliation") --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
         --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" '
         ($summary[0]) as $summary
+        | ($decisions | fromjson) as $decisions
+        | ($activities | fromjson) as $activities
+        | ($activity_scan | fromjson) as $activity_scan
+        | ($reconciliation | fromjson) as $reconciliation
         |
         {id:$id,home:$home,host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          spawn_gen:($spawn_gen | if . == "" then null else . end),
@@ -2028,9 +2036,12 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
         --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
         --arg spawn_gen "$sampled_spawn_gen" \
         --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
-        --argjson registered "$registered" --argjson event_age "$event_age" --argjson observed_age "$observed_age" --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
-        --argjson decisions "$decisions" --argjson terminal "$terminal" --slurpfile summary "$summary_file" --argjson summary_sampled "$summary_sampled" '
+        --argjson registered "$registered" --argjson event_age "$event_age" --argjson observed_age "$observed_age" --rawfile activities <(printf '%s' "$activities") --rawfile activity_scan <(printf '%s' "$activity_scan") \
+        --rawfile decisions <(printf '%s' "$decisions") --argjson terminal "$terminal" --slurpfile summary "$summary_file" --argjson summary_sampled "$summary_sampled" '
         ($summary[0]) as $summary
+        | ($decisions | fromjson) as $decisions
+        | ($activities | fromjson) as $activities
+        | ($activity_scan | fromjson) as $activity_scan
         |
         {id:$id,home:($home | if . == "" then null else . end),host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          spawn_gen:($spawn_gen | if . == "" then null else . end),
