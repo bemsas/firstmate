@@ -2251,7 +2251,7 @@ A worker on another machine that has not opened its pull request yet is invisibl
 ## Review eligibility preview
 
 Before starting another review, a supervisor can ask which open pull requests of a GitHub repository look ready for one.
-The preview reports and never acts, needs no configuration, and is not part of any dispatch path.
+The preview reports and never acts, requires no Firstmate configuration, uses `gh-axi` to read GitHub, and is not part of any dispatch path.
 
 ```text
 FM_HOME=/absolute/home bin/fm-review-eligibility-preview.sh owner/repo [--limit 20] [--pr <number>] [--json]
