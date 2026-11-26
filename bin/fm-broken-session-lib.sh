@@ -30,8 +30,9 @@
 #   - quota: 429, rate limit, Too Many Requests, usage limit, quota exceeded,
 #     RESOURCE_EXHAUSTED. A relaunch would only hit the same limit, so the probe
 #     reports FM_BROKEN_STATUS=quota with any visible reset time in
-#     FM_BROKEN_DETAIL and nothing is relaunched; the watcher raises one
-#     notification per episode and the pane is left to resume after the reset.
+#     FM_BROKEN_DETAIL and nothing is relaunched; the watcher reports it once per
+#     launch, once more if the task's current login later reads with headroom,
+#     and otherwise leaves the pane to resume after the reset.
 #   - generic: everything else keeps the bounded relaunch below.
 # Auth wins when a banner carries both, because a credential needs a human.
 #

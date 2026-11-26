@@ -131,6 +131,9 @@
 #              Claude ship or scout keeps the account its record names, and
 #              only an explicit --account <entry> moves it to another
 #              declared one, checked here the same way.
+#              The launch quota gate (bin/fm-quota-launch-lib.sh) is asked for
+#              that login here as well, so a relaunch onto a login with no
+#              allowance left refuses before the old agent stops.
 #              A replacement omp secondmate likewise passes its per-secondmate
 #              omp profile pin (bin/fm-omp-profile-lib.sh) before the old agent
 #              stops.
@@ -262,6 +265,8 @@ unset FM_CONTROL_PARK_ATTEMPT
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-quota-launch-lib.sh
+. "$SCRIPT_DIR/fm-quota-launch-lib.sh"
 # shellcheck source=bin/fm-omp-profile-lib.sh
 . "$SCRIPT_DIR/fm-omp-profile-lib.sh"
 # shellcheck source=bin/fm-exclude-tools-lib.sh
@@ -1453,8 +1458,16 @@ resolve_relaunch_profile() {
   [ "$KIND" != secondmate ] || account_mate=$ID
   TARGET_ACCOUNT=$(fm_worker_account_relaunch_request "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
     "$PRIOR_HARNESS" "$(fm_meta_get "$META" account)" "$NEW_ACCOUNT" "$account_mate") || return 1
-  fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
-    "$account_model" "$TARGET_HARNESS" "" "$account_mate" "$TARGET_ACCOUNT" >/dev/null || return 1
+  local account_selection account_declared account_root
+  account_selection=$(fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
+    "$account_model" "$TARGET_HARNESS" "" "$account_mate" "$TARGET_ACCOUNT") || return 1
+  # The launch owner's quota gate, asked here too so that a login with no
+  # allowance left refuses while the current agent is still running.
+  account_declared=${account_selection%%$'\t'*}
+  account_root=${account_selection#*$'\t'}
+  account_root=${account_root%%$'\t'*}
+  fm_quota_launch_gate "$ID" "$TARGET_HARNESS" "$account_model" "$account_declared" "$account_root" 0 "$BACKEND" \
+    || die "a fresh quota reading of the login this relaunch would use shows no allowance left; task $ID was not relaunched and its agent and record are unchanged"
   fm_omp_profile_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
     "$account_mate" >/dev/null || return 1
   # Likewise polytoken's launch profile and wiring refusals

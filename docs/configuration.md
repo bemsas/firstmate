@@ -2009,6 +2009,24 @@ The relaunch checks the selected pin before stopping the current agent.
 Per-secondmate pins stay in the primary home and are not inherited or copied into the secondmate's home.
 A matching primary-side per-secondmate pin for a remote route refuses before remote launch, because its account must be configured on that host instead.
 
+## Launch quota gate
+
+Every launch and relaunch reads the quota of the login it is about to spend, fresh, on the host that runs the agent.
+This covers ships, scouts, local secondmates, and the host-local leg of a remote secondmate, so a remote launch is judged on its own host's login.
+`bin/fm-control.sh relaunch` asks the same question before it stops the running agent.
+It is always on and has no setting to opt in.
+
+A launch is refused only when that fresh reading shows a scope bounding the launch model as `exhausted_now` or at 0% remaining.
+Every other result launches and is flagged `quota=stale`: a missing `quota-axi`, a failed, slow, invalid, non-fresh, or unknown reading, or a login that cannot be matched.
+Sign-in, approval, capacity, spend-cap, review, and every other launch protection applies unchanged.
+The flag is printed on stderr, and every verdict is appended to `state/quota-launch.log` on the launching host without account names, paths, or `quota-axi` output.
+No verdict is read back, so switching logins or waiting for a reset needs no cleanup before the next launch.
+
+[`bin/fm-quota-launch-lib.sh`](../bin/fm-quota-launch-lib.sh) owns which login each runner's reading uses, which launches are unmatched, and the read's time bound.
+The reading happens in the launching process: a login selected only by the terminal session's own environment is not visible to it, so pin the account where the two can differ.
+A worker the watcher parked on a visible rate-limit banner is never relaunched automatically, and the parked episode never blocks a relaunch, which runs this gate again.
+The watcher rereads that task's current login every `FM_BROKEN_QUOTA_RECHECK_SECS` (600) and reports again once it has headroom, or when a new launch of the task shows a limit.
+
 ## Claude worker sandbox
 
 The experimental per-task Claude Bash sandbox is opt-in and leaves unselected workers unchanged.
@@ -2483,6 +2501,8 @@ After the answer, code applies all remaining checks and ranking:
 - Every applicable account-wide and model/product row from one `quota-axi --json` snapshot.
 - The optional `preferred_provider` restriction under the [profile-array procedure](../.agents/skills/quota-array-dispatch/SKILL.md#rank-by-spendpriority).
 - The numeric `spendPriority` argmax within that candidate pool, using each candidate's limiting row.
+- A missing, slow, failed, or invalid read, or any candidate left unranked, adds a `quota: stale` line, and the outcome returns to the ordinary intake.
+- The snapshot describes the logins this home's launches spend: a `config/claude-account` pin and a `config/pi-account` root answer their own rows, and a pin that cannot be read or a `config/claude-accounts` list leaves Claude unmeasured instead of borrowing the ambient login.
 - With the home's `shared_quota: true` declaration ("Crew dispatch profiles"), the quota snapshot, floors, runway gates, and `spendPriority` argmax are skipped entirely; resolution is the matched rule's declared profile order (`preferred_provider` still narrows the pool; declared order then picks within it).
 
 The resolver prints its preferred-family decision while retaining evidence for every candidate.
