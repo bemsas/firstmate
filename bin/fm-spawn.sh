@@ -548,6 +548,12 @@
 #   Pins are never inherited; remote per-mate overrides refuse locally.
 #   T3 Code refuses a pin because its provider instance owns the account.
 #   bin/fm-worker-account-lib.sh owns parsing, the check, and the shed list.
+# Launch quota gate:
+#   Every launch reads the selected login's quota fresh on this host, including
+#   the launch half of a relaunch that goes through spawn, and refuses only on
+#   current exhaustion of a comparable reading. Any other result launches.
+#   bin/fm-quota-launch-lib.sh and docs/configuration.md "Launch quota gate"
+#   own the contract.
 # Claude account list (config/claude-accounts, --account <entry>):
 #   Opt-in and Claude-only. When the list is present, a Claude ship or scout
 #   spawn must name one declared entry with --account, chosen at intake, and
@@ -1036,6 +1042,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-review-capacity-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-quota-launch-lib.sh
+. "$SCRIPT_DIR/fm-quota-launch-lib.sh"
 # shellcheck source=bin/fm-omp-profile-lib.sh
 . "$SCRIPT_DIR/fm-omp-profile-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -3671,6 +3679,12 @@ if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
   else
     unset CLAUDE_CONFIG_DIR
   fi
+fi
+# Launch quota gate (bin/fm-quota-launch-lib.sh owns it): one fresh read of the
+# login selected above, still before any endpoint, worktree, or record exists.
+if ! fm_quota_launch_gate "$ID" "$HARNESS" "$MODEL" "$WORKER_ACCOUNT_DECLARED" "$WORKER_ACCOUNT_ROOT" "$RAW_LAUNCH" "$BACKEND"; then
+  echo "error: $ID was not launched: a fresh quota reading of the login this launch would use shows no allowance left; choose another profile or login, or launch again after the limit resets" >&2
+  exit 1
 fi
 
 secondmate_registry_value() {

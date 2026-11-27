@@ -86,22 +86,23 @@ JSON
 cp "$BASE_RULES" "$RULES"
 
 write_quota() {  # <path> <cursor spendPriority> [<claude all_models spendPriority>]
-  local path=$1 cursor=$2 claude=${3:--0.4627}
+  local path=$1 cursor=$2 claude=${3:--0.4627} refreshed
+  refreshed=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   cat > "$path" <<JSON
 {
   "generatedAt": "2030-01-01T00:00:00Z",
   "schemaVersion": 5,
   "providers": [
-    { "provider": "claude", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
+    { "provider": "claude", "state": { "status": "fresh", "refreshedAt": "$refreshed" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 79, "runway": { "status": "projected_exhaustion" }, "selection": { "spendPriority": $claude } },
       { "scope": "model:fable", "status": "known", "effectivePercentRemaining": 15, "runway": { "status": "projected_exhaustion" }, "selection": { "spendPriority": -0.79 } } ] } },
-    { "provider": "codex", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
+    { "provider": "codex", "state": { "status": "fresh", "refreshedAt": "$refreshed" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 31, "runway": { "status": "projected_exhaustion" }, "selection": { "spendPriority": -0.1649 } } ] } },
-    { "provider": "cursor", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
+    { "provider": "cursor", "state": { "status": "fresh", "refreshedAt": "$refreshed" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 91, "runway": { "status": "through_reset" }, "selection": { "spendPriority": $cursor } } ] } },
-    { "provider": "agy", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
+    { "provider": "agy", "state": { "status": "fresh", "refreshedAt": "$refreshed" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 64, "runway": { "status": "through_reset" }, "selection": { "spendPriority": 0.4 } } ] } },
-    { "provider": "google", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
+    { "provider": "google", "state": { "status": "fresh", "refreshedAt": "$refreshed" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 72, "runway": { "status": "through_reset" }, "selection": { "spendPriority": 0.3 } } ] } },
     { "provider": "kimi", "state": { "status": "unknown" }, "quotaSemantics": { "status": "unknown", "effectiveAvailability": [] } }
   ]
@@ -1328,10 +1329,10 @@ assert_contains "$out" "  profile: --harness 'agy' --model 'gemini-4-argon'" "AG
 pass "AGY quota pools bind by model family without third-party exhaustion bounding Gemini"
 
 write_agy_tiers() {  # <path> <gemini row JSON or ""> <claude_gpt row JSON or "">
-  jq -n --argjson g "${2:-null}" --argjson c "${3:-null}" '{
+  jq -n --arg refreshed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson g "${2:-null}" --argjson c "${3:-null}" '{
     generatedAt: "2030-01-01T00:00:00Z",
     schemaVersion: 5,
-    providers: [{ provider: "agy", state: { status: "fresh" }, quotaSemantics: { status: "known", effectiveAvailability: ([$g, $c] | map(select(. != null))) } }]
+    providers: [{ provider: "agy", state: { status: "fresh", refreshedAt: $refreshed }, quotaSemantics: { status: "known", effectiveAvailability: ([$g, $c] | map(select(. != null))) } }]
   }' > "$1"
 }
 AGY_GEMINI='{"scope":"gemini","status":"known","effectivePercentRemaining":80,"runway":{"status":"through_reset"},"selection":{"spendPriority":0.5}}'

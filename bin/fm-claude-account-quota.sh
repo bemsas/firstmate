@@ -35,6 +35,8 @@
 #   runway's projectionConfidence, the default TOON's confidence column.
 #   Uncertainty names a failed or invalid read, quota-axi's own unknown or
 #   rate-limited state and reason, a missing claude row, or no applicable scope.
+#   A reading that is not fresh, past a reset time, or without a usable
+#   provider refresh time prints no figures.
 #   A missing quota-axi prints `error: quota-axi not installed` in the block.
 #   Readings exit 0. Exit 2 for a usage error, an absent list, or a list that
 #   bin/fm-worker-account-lib.sh refuses, which is actionable, never selected
@@ -116,7 +118,7 @@ while IFS= read -r entry; do
   fi >> "$WORK/accounts.jsonl" || die "cannot record the quota reading for $entry"
 done <<< "$LISTED"
 
-jq -rs --arg model "$MODEL" '
+jq -rs --arg model "$MODEL" "$FM_QUOTA_ROW_JQ"'
   def flat: tostring | gsub("[\t\r\n]"; " ");
   def show($value): ($value // "-") | flat;
   def bare($m): ($m | split("/") | last);
@@ -133,11 +135,15 @@ jq -rs --arg model "$MODEL" '
       ([.snapshot.providers[]? | select(.provider == "claude")] | first) as $row |
       if $row == null then "\($head)  uncertainty: no claude quota row"
       else
-        applicable($row) as $rows |
+        applicable($row) as $found |
+        quota_row_stale($row) as $stale |
+        (if $stale then [] else $found end) as $rows |
+        (if $row.state.status then " (\($row.state.status | flat): \(show($row.state.error)))" else "" end) as $why |
         (if (["known", "partial"] | index($row.quotaSemantics.status)) == null then
-          "\($head)  uncertainty: quota \(show($row.quotaSemantics.status))\(if $row.state.status then " (\($row.state.status | flat): \(show($row.state.error)))" else "" end)"
+          "\($head)  uncertainty: quota \(show($row.quotaSemantics.status))\($why)"
+         elif $stale then "\($head)  uncertainty: quota reading is stale or past its reset\($why)"
          else empty end),
-        (if ($rows | length) == 0 then "\($head)  uncertainty: no applicable quota scope" else empty end),
+        (if ($found | length) == 0 then "\($head)  uncertainty: no applicable quota scope" else empty end),
         ($rows[] | "\($head)  scope=\(.scope | flat)  status=\(show(.status))  remaining=\(show(.effectivePercentRemaining))%  spendPriority=\(show(.selection.spendPriority))  runway=\(show(.runway.status))"
           + (if .runway.usableRunwaySeconds != null or .runway.status == "projected_exhaustion"
              then "  usableRunwaySeconds=\(show(.runway.usableRunwaySeconds))" else "" end)

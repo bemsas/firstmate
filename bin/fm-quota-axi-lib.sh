@@ -26,11 +26,53 @@ FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 # Prepend them to a consumer's program:
 #   quota_lane($harness; $model)   the candidate's account key, or "" when none
 #                                  is identified by the contract.
+#   quota_reset_passed($row)       true when any reset time the row reports is
+#                                  past or unreadable.
+#   quota_refresh_unusable($row)   true when that row's own refresh time is
+#                                  missing, unbound, unreadable, or outside the
+#                                  trailing weekly window. Snapshot generatedAt
+#                                  is a different clock and is never consulted.
+#   quota_row_stale($row)          true when a stated reading is non-fresh,
+#                                  flagged stale, or has an unusable refresh
+#                                  time, or when a reset has passed. Such
+#                                  figures bound nothing. A row with no state
+#                                  object is not judged by the refresh clock.
 #   quota_row($snapshot; $provider; $lane)
 #                                  the one provider row the candidate binds to,
 #                                  or null; schema 5 ignores $lane.
 # shellcheck disable=SC2016,SC2034  # jq program text, not shell expansion; read by the sourcing consumers
+# The refresh horizon is seven days (the weekly window) plus two minutes of
+# future clock skew. A labelled-fresh row older than that is not evidence of
+# the current window, even when the aggregate snapshot was just generated.
 FM_QUOTA_ROW_JQ='
+  def quota_epoch:
+    capture("^(?<t>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})([.][0-9]+)?(?<z>Z|[+-][0-9]{2}:[0-9]{2})$") as $m |
+    (($m.t + "Z") | fromdateiso8601) -
+      (if $m.z == "Z" then 0
+       else (if $m.z[0:1] == "-" then -1 else 1 end) *
+         (($m.z[1:3] | tonumber) * 3600 + ($m.z[4:6] | tonumber) * 60)
+       end);
+  def quota_refresh_horizon: 604800;
+  def quota_refresh_skew: 120;
+  def quota_refresh_epoch($row):
+    ([$row.state.refreshedAt?, $row.refreshedAt?] | map(select(type == "string" and . != "")) | first // null) as $t |
+    if $t == null then null
+    else ((try ($t | quota_epoch) catch null) // null)
+    end;
+  def quota_refresh_unusable($row):
+    quota_refresh_epoch($row) as $e |
+    $e == null or $e > (now + quota_refresh_skew) or $e < (now - quota_refresh_horizon);
+  def quota_reset_passed($row):
+    [$row.windows[]?.resetsAt?, $row.quotaSemantics.effectiveAvailability[]?.resetsAt?] |
+    map(select(. != null)) |
+    any(.[]; ((try quota_epoch catch 0) // 0) <= now);
+  def quota_row_stale($row):
+    (($row | has("state")) and (
+      ($row.state.status? != "fresh") or
+      ($row.state.stale? == true) or
+      quota_refresh_unusable($row)
+    )) or
+    quota_reset_passed($row);
   def quota_lane($harness; $model):
     if $harness == "codex" then "codex-home"
     elif ($harness == "pi" or $harness == "pi-signed") and (($model // "") | contains("/"))
