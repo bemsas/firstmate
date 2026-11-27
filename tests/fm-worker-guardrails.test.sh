@@ -68,6 +68,25 @@ for command in ("cat > vendor/basisone/x <<'EOF'\ndon't\nEOF\n",
     run({"tool_name": "Bash", "tool_input": {"command": command}}, 2)
 run({"tool_name": "Bash", "cwd": str(wt / "vendor/basisone"), "tool_input": {"command": "touch a"}}, 2)
 run({"tool_name": "Bash", "tool_input": {"cmd": ["git", "worktree", "prune"]}}, 2)
+# Quoted report prose may name the subtree only when every cat writes it to one
+# ordinary report file outside that subtree.
+(wt / "to-stdout").symlink_to("/dev/stdout")
+prose = "see vendor/basisone helpers\nR\n"
+tabbed = "\tsee vendor/basisone helpers\n\tR\n"
+for command in (f"cat > notes.md <<'R'\n{prose}", f"cat > notes.md <<-'R'\n{tabbed}",
+                f"cat > notes.md <<- 'R'\n{tabbed}", f"cat <<- \"R\" >> notes.md\n{tabbed}"):
+    run({"tool_name": "Bash", "tool_input": {"command": command}}, 0)
+for command in (f"cat <<'R'\n{prose}", f"cat <<- 'R'\n{tabbed}",
+                f"cat > notes.md <<'A'\nx\nA\ncat <<'R'\n{prose}",
+                f"cat '>' notes.md <<'R'\n{prose}", f"cat \\> notes.md <<'R'\n{prose}",
+                f"cat > /dev/stdout <<'R'\n{prose}", f"cat > /dev/null <<'R'\n{prose}",
+                f"cat > to-stdout <<'R'\n{prose}", f"cat > src <<'R'\n{prose}",
+                f"cat > notes.md > /dev/stderr <<'R'\n{prose}",
+                f"cat > notes.md <<- R\n{tabbed}", f"cat > notes.md << - 'R'\n{tabbed}",
+                "cat > notes.md <<- 'R'\n\tsee vendor/basisone helpers\n  R\n",
+                f"cat > vendor/basisone/x <<- 'R'\n{tabbed}", f"cat > alias/x <<- 'R'\n{tabbed}",
+                "cat > notes.md <<- 'R'\n\tgit worktree add /tmp/nope\n\tR\n"):
+    run({"tool_name": "Bash", "tool_input": {"command": command}}, 2)
 for operation in ("Update File", "Delete File", "Add File"):
     run({"tool_name": "apply_patch", "tool_input": {"patch": f"*** Begin Patch\n*** {operation}: vendor/basisone/a\n*** End Patch"}}, 2)
 run({"tool_name": "apply_patch", "tool_input": "*** Begin Patch\n*** Move to: vendor/basisone/a\n*** End Patch"}, 2)

@@ -6,9 +6,9 @@ Exit 2 blocks vendor/basisone writes and git worktree add/remove/prune/move.
 The vendor rule applies to every project: no trusted project classification
 reaches this hook, and a checkout's own mutable configuration cannot exempt it.
 Read tools remain available. Shell commands touching protected paths are allowed
-only for known read operations. Quoted here-documents that cat writes to literal
-paths outside the subtree are data. This is a tool-call seatbelt, not an OS
-sandbox.
+only for known read operations. A quoted here-document that cat writes to one
+literal report file outside the subtree is data. This is a tool-call seatbelt,
+not an OS sandbox.
 --kimi scopes the global hook to an authenticated Firstmate worker pointer.
 --polytoken emits that harness's native allow outcome.
 """
@@ -187,16 +187,28 @@ def strip_heredocs(command):
     return "".join(out), bodies
 
 
-def literal_target(word, cwd):
-    """A redirection target that provably names a path outside the subtree."""
-    return (not any(char in word for char in "$`*?[]{}()<>;&|\n")
-            and (not word.startswith("~") or word.startswith("~/"))
-            and not protected(word, cwd, parents=True))
+def report_target(word, cwd):
+    """A literal ordinary-file destination provably outside the subtree."""
+    if (any(char in word for char in "$`*?[]{}()<>;&|\n")
+            or (word.startswith("~") and not word.startswith("~/"))
+            or protected(word, cwd, parents=True)):
+        return False
+    path = Path(cwd) / os.path.expanduser(word)
+    resolved = path.resolve()
+    # /dev and /proc names can hand the text back to stdout or another stream.
+    if any(Path(name).parts[1:2] in (("dev",), ("proc",)) for name in (os.path.abspath(path), resolved)):
+        return False
+    return resolved.is_file() or not resolved.exists()
 
 
-def data_authoring(words, bodies, cwd):
-    """True when every command is cat writing one literal here-document."""
+def data_authoring(stripped, words, bodies, cwd):
+    """True when every command is cat writing one here-document to one report."""
     if not bodies or not all(body[3] for body in bodies):
+        return False
+    # Posix tokenising drops quotes and escapes, so a literal operator would
+    # read as a redirection.
+    quoted_spans = re.findall(r"'[^']*'|\"[^\"]*\"", stripped)
+    if re.search(r"\\[<>;&|'\"\\\n]", stripped) or any(re.search(r"[<>;&|]", span) for span in quoted_spans):
         return False
     pending = list(bodies)
     segment = []
@@ -206,18 +218,27 @@ def data_authoring(words, bodies, cwd):
             continue
         if not segment:
             continue
-        if segment[0] != "cat" or len(segment) % 2 == 0:
+        if segment[0] != "cat":
             return False
-        feeds = 0
-        for operator, target in zip(segment[1::2], segment[2::2]):
+        feeds = outputs = 0
+        rest = iter(segment[1:])
+        for operator in rest:
+            target = next(rest, None)
+            if target is None:
+                return False
             if operator == "<<" and pending:
                 _, delimiter, tabs, _ = pending.pop(0)
+                # `<<- 'END'` tokenises the dash apart from its delimiter.
+                if tabs and target == "-":
+                    target += next(rest, "")
                 if target != delimiter and not (tabs and target == "-" + delimiter):
                     return False
                 feeds += 1
-            elif operator not in {">", ">>"} or not literal_target(target, cwd):
+            elif operator in {">", ">>"} and report_target(target, cwd):
+                outputs += 1
+            else:
                 return False
-        if feeds != 1:
+        if feeds != 1 or outputs != 1:
             return False
         segment = []
     return not pending
@@ -262,9 +283,9 @@ def shell_reason(command, cwd, vendor=True, depth=0):
     if not mentions:
         # Heredoc bodies can feed interpreters or hide paths, so each stripped
         # body is inspected like a quoted shell script. Proven data keeps every
-        # rule except the vendor one, since only its literal targets are written.
+        # rule except the vendor one, since only its report targets are written.
         # A carriage return splits words here but not in the shell.
-        body_vendor = vendor and ("\r" in command or not data_authoring(words, bodies, cwd))
+        body_vendor = vendor and ("\r" in command or not data_authoring(stripped, words, bodies, cwd))
         for body in bodies:
             denied = shell_reason(body[0], cwd, body_vendor, depth + 1)
             if denied:
