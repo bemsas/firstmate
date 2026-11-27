@@ -426,7 +426,7 @@ A candidate must meet all of these conditions:
 
 Firstmate then cleans up the candidate in this order:
 
-1. Acquire the existing task-id spawn lock, and then the shared named-session presentation lock.
+1. Acquire the existing task-id spawn lock, then the shared named-session presentation lock, waiting only within the one pass budget that `bin/fm-herdr-session-cleanup.sh`'s header owns.
 2. Inside both locks, take one exact snapshot.
 3. Require one unambiguous non-target focus and the exact title, token, tab, and pane shape.
 4. Positively confirm no registered agent.
@@ -468,6 +468,7 @@ Any of these preserves the candidate and lets session startup continue with at m
 
 A finished ship worker's pane can also be retired before its PR lands, by `bin/fm-pane-retire.sh`; [`configuration.md`](configuration.md#finished-worker-pane-retirement-configpane-retire) owns its guards and opt-in.
 It reuses the same exact-pane focus-preserving close helper, called with the observed agent state as its required state under the task's spawn lock and the shared presentation lock.
+The presentation-lock wait uses the one pass budget `bin/fm-pane-retire.sh`'s header owns.
 A dead agent counts only when `fm_backend_herdr_pane_shell_tree_proof` reads shells alone below the pane shell, which also accepts the nested `treehouse get` login shell that the strict lone-idle-shell proof rejects on every crew pane.
 A live agent counts only when its status is idle or done and the foreground process group is the harness alone.
 A pane in a projected workspace is left for teardown, which owns the presentation journal.

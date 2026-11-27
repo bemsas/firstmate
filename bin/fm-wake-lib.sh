@@ -1713,6 +1713,47 @@ fm_lock_acquire_wait_max() {  # <lockdir> <max-seconds>
   done
 }
 
+# fm_lock_wait_budget_begin <requested-tenths-or-empty>
+#
+# Arm one shared in-process wait for fm_lock_try_acquire_budget. The budget is
+# 600 tenths (60 seconds) unless <requested> is a smaller non-negative integer.
+# A non-numeric request uses that same 600. A larger request is capped, so one
+# pass cannot be configured into an unbounded wait.
+#
+# fm_lock_acquire_wait_bounded does not fit a caller that already holds another
+# lock: it acquires in a helper process and only then rewrites the owner pid, so
+# the two locks are not both owned by the waiter for the whole critical section.
+# fm_lock_acquire_wait_max fits the process, but an unpublished pid extends it
+# past the deadline and would let one pane spend more than this shared budget.
+fm_lock_wait_budget_begin() {  # <requested-tenths-or-empty>
+  local requested=${1:-} cap=600
+  case "$requested" in
+    ''|*[!0-9]*) FM_LOCK_WAIT_BUDGET_LEFT=$cap ;;
+    *) FM_LOCK_WAIT_BUDGET_LEFT=$requested ;;
+  esac
+  if [ "$FM_LOCK_WAIT_BUDGET_LEFT" -gt "$cap" ]; then
+    FM_LOCK_WAIT_BUDGET_LEFT=$cap
+  fi
+}
+
+# Try once, then once more after each tenth of a second, until the lock is held
+# by this process or the shared budget is spent. Each sleep consumes one tenth.
+# An uncontended lock returns on the first try and leaves the budget untouched.
+fm_lock_try_acquire_budget() {  # <lockdir>
+  local lockdir=$1
+  if fm_lock_try_acquire "$lockdir"; then
+    return 0
+  fi
+  while [ "${FM_LOCK_WAIT_BUDGET_LEFT:-0}" -gt 0 ]; do
+    FM_LOCK_WAIT_BUDGET_LEFT=$((FM_LOCK_WAIT_BUDGET_LEFT - 1))
+    sleep 0.1
+    if fm_lock_try_acquire "$lockdir"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Acquire in the timed helper process, then transfer the lock record to the
 # waiting caller before exiting. The lock's ordinary stale-owner recovery makes
 # every interruption safe: before transfer the helper is the owner; after
