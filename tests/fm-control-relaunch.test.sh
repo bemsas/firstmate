@@ -59,11 +59,17 @@ make_tmux_stub() {  # <dir>
   mkdir -p "$fb"
   # quota-axi answers a pinned login's read from that root's quota.json, so no
   # case reaches the installed tool or a real login; no file is no reading.
+  # Each read is recorded in the root's reads file, and a then.json or then-pin
+  # takes effect only after a read, as a change made while the agent stops.
   cat > "$fb/quota-axi" <<'SH'
 #!/usr/bin/env bash
 case " $* " in *' --provider claude '*) root=${CLAUDE_CONFIG_DIR:-$HOME/.claude} ;; *) exit 1 ;; esac
-[ -f "$root/quota.json" ] || exit 1
-cat "$root/quota.json"
+echo read >> "$root/reads"
+rc=0
+cat "$root/quota.json" 2>/dev/null || rc=1
+[ ! -f "$root/then.json" ] || mv "$root/then.json" "$root/quota.json"
+[ ! -f "$root/then-pin" ] || mv "$root/then-pin" "$(cat "$root/pin-path")"
+exit "$rc"
 SH
   chmod +x "$fb/quota-axi"
   cat > "$fb/tmux" <<'SH'
@@ -1357,6 +1363,48 @@ test_exhausted_pinned_login_refuses_relaunch_before_stop() {
   out=$(run_control "$dir" "$id" relaunch --note "reading unavailable"); rc=$?
   expect_code 0 "$rc" "a relaunch whose login cannot be read is stale input and still relaunches"$'\n'"$out"
   pass "fm-control relaunch: an exhausted pinned login refuses before the old agent stops"
+}
+
+# claude_reading <root> <remaining> <runway>
+claude_reading() {
+  jq -n --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson remaining "$2" --arg runway "$3" '{schemaVersion: 5,
+    providers: [{provider: "claude", state: {status: "fresh", stale: false, refreshedAt: $now},
+      quotaSemantics: {status: "known", effectiveAvailability: [{scope: "all_models", status: "known",
+        effectivePercentRemaining: $remaining, runway: {status: $runway}}]}}]}' > "$1"
+}
+
+test_relaunch_decides_quota_once_before_the_stop() {
+  local dir out rc first id n=0
+  for first in unreadable narrow rebound; do
+    n=$((n + 1))
+    id="rl-once-$n"
+    dir=$(new_case "once-$first" "$id")
+    add_ship_task "$dir" "$id" claude
+    make_claude_auth_stub "$dir"
+    mkdir -p "$dir/home/config" "$dir/work" "$dir/other"
+    : > "$dir/work/.credentials.json"
+    : > "$dir/other/.credentials.json"
+    printf '%s\n' "$dir/work" > "$dir/home/config/claude-account"
+    [ "$first" = unreadable ] || claude_reading "$dir/work/quota.json" 1 through_reset
+    claude_reading "$dir/work/then.json" 0 exhausted_now
+    if [ "$first" = rebound ]; then
+      claude_reading "$dir/other/quota.json" 0 exhausted_now
+      printf '%s\n' "$dir/other" > "$dir/work/then-pin"
+      printf '%s' "$dir/home/config/claude-account" > "$dir/work/pin-path"
+    fi
+    out=$(run_control "$dir" "$id" relaunch --note "$first"); rc=$?
+    expect_code 0 "$rc" "a $first decision taken before the stop must not be refused after it"$'\n'"$out"
+    [ "$(wc -l < "$dir/work/reads")" -eq 1 ] || fail "$first: a relaunch should read its login exactly once"
+    [ ! -e "$dir/other/reads" ] || fail "$first: a login changed after the stop must not be read"
+    if [ "$first" = rebound ]; then
+      assert_contains "$out" "quota=stale reason=binding-changed" "an unread selection is disclosed as stale"
+    else
+      assert_not_contains "$out" "binding-changed" "$first: the launch half selected the decided login"
+    fi
+    [ "$(wc -l < "$dir/home/state/quota-launch.log")" -eq "$([ "$first" = rebound ] && echo 2 || echo 1)" ] ||
+      fail "$first: one decision should be logged once"
+  done
+  pass "fm-control relaunch: one pre-stop quota decision covers the replacement it stopped for"
 }
 
 # add_listed_task <case-dir> <id> <recorded-account>: a live Claude ship
@@ -3595,6 +3643,7 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
 test_exhausted_pinned_login_refuses_relaunch_before_stop
+test_relaunch_decides_quota_once_before_the_stop
 test_account_list_relaunch_reuses_the_recorded_account
 test_account_list_relaunch_moves_only_on_explicit_account
 test_account_list_relaunch_refusals_happen_before_stop

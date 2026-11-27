@@ -75,12 +75,12 @@
 #   this home would spend (bin/fm-quota-launch-lib.sh, fm_quota_launch_snapshot).
 #   A Claude pin that cannot be read, or a declared Claude account list, leaves
 #   Claude unmeasured rather than judged on the ambient login, and an
-#   unresolvable Pi pin leaves every Pi lane unmeasured. A missing, slow,
+#   unresolvable Pi pin leaves every openai-codex* Pi lane unmeasured. A missing, slow,
 #   failed, or invalid read, or any candidate left unranked, adds a
 #   "quota: stale" line. A provider row labelled fresh is still unmeasured when
 #   its own refresh time is missing, unbound, or outside the weekly window, and
-#   a scope whose bounding window has reset is unknown while the row's other
-#   scopes still rank; the snapshot's generation time is not that refresh time,
+#   a scope whose bounding windows cannot be shown current is unknown while the
+#   row's other scopes still rank; the snapshot's generation time is not that refresh time,
 #   and such a row or scope never excludes a profile. One stale line is logged
 #   for each unranked candidate; another provider's state is never reported.
 #
@@ -692,7 +692,7 @@ else
         .quotaSemantics = {status: "unknown", effectiveAvailability: []} | .fmStale = "reading-not-fresh"
       else . as $row |
         .quotaSemantics.effectiveAvailability |= map(
-          if quota_scope_stale($row; .) then {scope, status: "unknown", fmStale: "reset-passed"} else . end)
+          if quota_scope_stale($row; .) then {scope, status: "unknown", fmStale: "window-not-current"} else . end)
       end)' "$QUOTA") ||
     emit_stale_quota "quota-axi --json returned an invalid snapshot" read-failed
   printf '%s\n' "$CURRENT" > "$QUOTA"
@@ -877,12 +877,16 @@ if [ "$SQ" = false ]; then
     [.candidates[]? | select(.unranked) | . as $c |
       (($c.provider // "-") | word) as $p |
       (($c.profile.harness // "-") | word) as $h |
-      quota_row($q; $c.provider; quota_lane($c.profile.harness; $c.profile.model)) as $row |
+      quota_lane($c.profile.harness; $c.profile.model) as $lane |
+      quota_row($q; $c.provider; $lane) as $row |
+      (if ($h == "pi" or $h == "pi-signed") and ($lane | test("^openai-codex(-|$)"))
+       then $note["pi-codex"] else null end) as $pi_note |
       "\($h) \($p) " + (
-        if $note[$p] then $note[$p]
+        if $pi_note then $pi_note
+        elif $note[$p] then $note[$p]
         elif $row == null then "no-matching-row"
         elif $row.fmStale then "reading-not-fresh"
-        elif any($row.quotaSemantics.effectiveAvailability[]?; .fmStale and .scope == $c.scope) then "reset-passed"
+        elif any($row.quotaSemantics.effectiveAvailability[]?; .fmStale and .scope == $c.scope) then "window-not-current"
         else "unmeasured" end)] | unique[]' <<<"$RESULT" 2>/dev/null)
 fi
 

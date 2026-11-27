@@ -24,6 +24,15 @@
 #   any quota-axi output. Nothing recorded is ever read back, so a later launch
 #   or login change is judged only on its own fresh reading.
 #
+# fm_quota_launch_binding <harness> <model> <account-declared> <account-root> <raw 0|1> <backend>
+#   Prints the exact selection one gate decision covers.
+# fm_quota_launch_carry <decided-binding> <the gate's own seven arguments>
+#   A relaunch asks the gate once, before it stops the running agent, and its
+#   launch half calls this instead of reading again, so no later reading can
+#   refuse after the stop. When the launch half selected exactly the decided
+#   binding it is silent; any other selection is changed input that was not
+#   read, reported as `stale reason=binding-changed`. Always returns 0.
+#
 # Only a login Firstmate itself selects for the worker can be matched. An
 # unpinned worker takes its login from the destination terminal's environment,
 # which this process cannot see, so no other login's usage may refuse it.
@@ -44,11 +53,12 @@
 #   pin with no HOME, and a Pi codex-native lane, whose Codex home the
 #   terminal selects.
 #
-# A row is comparable only when it is labelled fresh, is not flagged stale,
-# and has its own timezone-bound state.refreshedAt inside the trailing weekly
-# window. The snapshot's generatedAt is not that refresh time. Each scope that
-# bounds the launch model is then judged on its own bounding windows: one
-# whose reset has passed is stale, and leaves the other scopes comparable.
+# A row is comparable only when it is labelled fresh, is flagged neither stale
+# nor reused, and has its own timezone-bound state.refreshedAt inside the
+# trailing weekly window. The snapshot's generatedAt is not that refresh time.
+# Each scope that bounds the launch model is then judged on its own bounding
+# windows (quota_scope_stale in bin/fm-quota-axi-lib.sh): one that cannot be
+# shown current is stale, and leaves the other scopes comparable.
 # Named provider and model choices stay preferences; this gate never selects
 # a different login, family, or host.
 
@@ -89,6 +99,20 @@ fm_quota_launch_read() {
   printf '%s\n' "$out" | jq -c 'if (.providers? | type) == "array"
     then .providers |= map(if type == "object" then del(.account, .attempts) else . end) else . end' 2>/dev/null ||
     printf '%s\n' "$out"
+}
+
+fm_quota_launch_binding() {
+  local model=$2
+  [ "$model" != default ] || model=
+  printf '%s\037' "$1" "$model" "$3" "$4" "$5" "$6"
+}
+
+fm_quota_launch_carry() {
+  local decided=$1
+  shift
+  [ "$(fm_quota_launch_binding "${@:2}")" = "$decided" ] ||
+    fm_quota_launch_report "$1" "${2:--}" '' stale "reason=binding-changed"
+  return 0
 }
 
 fm_quota_launch_gate() {
@@ -156,7 +180,7 @@ fm_quota_launch_gate() {
           (.status == "known" and .effectivePercentRemaining <= 0))] | first) as $out |
       if $out != null then "exhausted scope=\($out.scope)"
       elif ($rows | length) == 0 then "stale reason=quota-unknown"
-      elif ($current | length) < ($rows | length) then "stale reason=reset-passed"
+      elif ($current | length) < ($rows | length) then "stale reason=window-not-current"
       elif any($rows[]; .status != "known") then "stale reason=quota-unknown"
       else "ok reason=headroom"
       end
@@ -172,12 +196,16 @@ fm_quota_launch_gate() {
 # home's launches spend: a config/pi-account root answers the Pi rows, and a
 # config/claude-account pin replaces the claude rows with that root's own. A
 # config/pi-account that does not resolve drops every openai-codex* key from
-# the rows, so no Pi lane binds to an ambient login. A Claude pin that cannot
+# the rows, so no such Pi lane binds to an ambient login: a codex row left with
+# no key is dropped, and a codex row published without accountKeys keeps only
+# its native binding (its "default" or absent accountKey reads as codex-home).
+# A Claude pin that cannot
 # be read, or a config/claude-accounts list (the account is chosen later),
 # leaves no claude row at all, so Claude reads as unmeasured instead of
 # borrowing the ambient login's figures. Each such reason is left in
-# FM_QUOTA_LAUNCH_SNAPSHOT_NOTES as "<provider>=<reason>" words for the caller
-# to report against the candidates it concerns, so call it without a command
+# FM_QUOTA_LAUNCH_SNAPSHOT_NOTES as "<scope>=<reason>" words, where the scope
+# is claude, or pi-codex for the openai-codex* Pi lanes only, for the caller to
+# report against the candidates it concerns, so call it without a command
 # substitution. Returns 1 only when the read times out; a nonzero quota-axi
 # status still prints its snapshot, and output validity is the caller's to
 # check.
@@ -192,7 +220,7 @@ fm_quota_launch_snapshot() {
       read_env=("PI_CODING_AGENT_DIR=${root%%$'\t'*}")
     else
       pi_unusable=1
-      FM_QUOTA_LAUNCH_SNAPSHOT_NOTES="codex=pi-pin-unusable"
+      FM_QUOTA_LAUNCH_SNAPSHOT_NOTES="pi-codex=pi-pin-unusable"
     fi
   fi
   snapshot=$(fm_quota_launch_read ${read_env[@]+"${read_env[@]}"} --) || return 1
@@ -202,8 +230,13 @@ fm_quota_launch_snapshot() {
   fi
   if [ "$pi_unusable" = 1 ]; then
     snapshot=$(printf '%s\n' "$snapshot" | jq -c '
-      .providers |= map(if (.accountKeys? | type) == "array" and any(.accountKeys[]; startswith("openai-codex"))
-        then .accountKeys |= map(select(startswith("openai-codex") | not)) |
+      def pi_key: type == "string" and test("^openai-codex(-|$)");
+      .providers |= map(
+        if (.accountKeys? | type) != "array" and .provider == "codex" then
+          .accountKeys = [if .accountKey == null or .accountKey == "default" then "codex-home" else .accountKey end]
+        else . end |
+        if (.accountKeys? | type) == "array" and any(.accountKeys[]; pi_key)
+        then .accountKeys |= map(select(pi_key | not)) |
           if (.accountKeys | length) == 0 then empty else . end
         else . end)') || return 1
   fi
@@ -225,7 +258,9 @@ fm_quota_launch_snapshot() {
     [ -n "$pinned" ] ||
       FM_QUOTA_LAUNCH_SNAPSHOT_NOTES="${FM_QUOTA_LAUNCH_SNAPSHOT_NOTES:+$FM_QUOTA_LAUNCH_SNAPSHOT_NOTES }claude=pinned-read-failed"
   else
-    FM_QUOTA_LAUNCH_SNAPSHOT_NOTES="${FM_QUOTA_LAUNCH_SNAPSHOT_NOTES:+$FM_QUOTA_LAUNCH_SNAPSHOT_NOTES }claude=unmatched-login"
+    local why=unmatched-login
+    [ -n "$listed" ] || why=claude-pin-unusable
+    FM_QUOTA_LAUNCH_SNAPSHOT_NOTES="${FM_QUOTA_LAUNCH_SNAPSHOT_NOTES:+$FM_QUOTA_LAUNCH_SNAPSHOT_NOTES }claude=$why"
   fi
   printf '%s\n' "$snapshot" | jq -c --argjson pinned "${pinned:-null}" '
     . as $all |

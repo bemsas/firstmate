@@ -216,7 +216,7 @@ test_a_passed_reset_is_stale_evidence() {
     sed -i.bak "s|\"provider\": \"claude\",|\"provider\": \"claude\", $when,|" "$root/quota.json"
     out=$(spawn_ship "quota-reset-$n"); rc=$?
     expect_launch "quota-reset-$n" "$rc" "$out"
-    assert_contains "$out" "quota=stale reason=reset-passed" "reset evidence #$n should be stale"
+    assert_contains "$out" "quota=stale reason=window-not-current" "reset evidence #$n should be stale"
   done
   claude_login "$root" 0 exhausted_now
   sed -i.bak 's|"provider": "claude",|"provider": "claude", "windows": [{"id": "w", "resetsAt": "2999-01-01T00:00:00.5Z"}],|' \
@@ -475,11 +475,11 @@ test_a_reset_is_judged_on_the_scope_it_bounds() {
   scoped_login "$root" five_hour "$future" ""
   out=$(spawn_ship quota-scope-reset --model sonnet); rc=$?
   expect_launch quota-scope-reset "$rc" "$out"
-  assert_contains "$out" "quota=stale reason=reset-passed" "a scope bounded by a passed reset is stale"
+  assert_contains "$out" "quota=stale reason=window-not-current" "a scope bounded by a passed reset is stale"
   scoped_login "$root" seven_day "$future" "$(date -u -d '1 minute' +%Y-%m-%dT%H:%M:%SZ)"
   out=$(spawn_ship quota-scope-cycle --model sonnet); rc=$?
   expect_launch quota-scope-cycle "$rc" "$out"
-  assert_contains "$out" "quota=stale reason=reset-passed" \
+  assert_contains "$out" "quota=stale reason=window-not-current" \
     "a window that started after the reading is a newer cycle than the reading"
   pass "a reset or a newer cycle is judged only on the scope whose window it bounds"
 }
@@ -496,6 +496,59 @@ test_ordinary_pin_without_home_is_unmatched() {
   assert_contains "$out" "quota=stale reason=unmatched-login" "no HOME means no known default login"
   [ ! -s "$CASE/quota-calls" ] || fail "an ordinary pin with no HOME must not read /.claude"
   pass "an ordinary pin without HOME stays unmatched instead of reading /.claude"
+}
+
+# ago <date -d offset>
+ago() { date -u -d "$1" +%Y-%m-%dT%H:%M:%SZ; }
+
+# window_case <name> <refreshedAt> <windows-json> <boundedBy-json> <want>
+# An exhausted pinned reading judged by the gate itself. <want> is "refused" or
+# the stale reason it must launch with.
+window_case() {
+  local name=$1 refreshed=$2 windows=$3 bounded=$4 want=$5 out rc extra='{}'
+  [ "$name" != reused ] || extra='{"reused": true}'
+  claude_login "$CASE/pinned" 0 exhausted_now
+  jq --arg at "$refreshed" --argjson windows "$windows" --argjson bounded "$bounded" --argjson extra "$extra" '
+    .providers[0].state += ({refreshedAt: $at} + $extra) | .providers[0].windows = $windows |
+    .providers[0].quotaSemantics.effectiveAvailability[0].boundedBy = $bounded' \
+    "$CASE/pinned/quota.json" > "$CASE/pinned/quota.next" || fail "could not shape the $name reading"
+  mv "$CASE/pinned/quota.next" "$CASE/pinned/quota.json"
+  # shellcheck disable=SC2016 # the program text expands in the child shell
+  out=$(env PATH="$FAKEBIN:$PATH" STATE="$HOME_DIR/state" bash -c '
+    . "$1/bin/fm-quota-launch-lib.sh"
+    fm_quota_launch_gate "$2" claude sonnet "$3" "$3" 0 herdr' _ "$ROOT" "quota-window-$name" "$CASE/pinned" 2>&1); rc=$?
+  if [ "$want" = refused ]; then
+    expect_code 1 "$rc" "$name should still refuse: $out"
+    assert_contains "$out" "quota=exhausted scope=all_models" "$name is current evidence"
+  else
+    expect_code 0 "$rc" "$name must not stop a launch: $out"
+    assert_contains "$out" "quota=stale reason=$want" "$name should be flagged stale"
+  fi
+  assert_private "$out"
+}
+
+test_windows_that_cannot_be_shown_current_never_stop() {
+  local now later none='[]' stale='window-not-current'
+  new_case windows claude
+  now=$(ago now)
+  later=$(ago '3 days')
+  window_case session-elapsed "$(ago '2 days ago')" '[{"id":"s","kind":"session"}]' '["s"]' $stale
+  window_case daily-elapsed "$(ago '2 days ago')" '[{"id":"d","windowSeconds":86400}]' '["d"]' $stale
+  window_case started-long-ago "$now" "[{\"id\":\"s\",\"windowSeconds\":18000,\"startsAt\":\"$(ago '49 hours ago')\"}]" '["s"]' $stale
+  window_case monthly-elapsed "$now" "[{\"id\":\"m\",\"kind\":\"monthly\",\"startsAt\":\"$(ago '29 days ago')\"}]" '["m"]' $stale
+  window_case no-length-old "$(ago '1 hour ago')" '[{"id":"c","kind":"credits"}]' '["c"]' $stale
+  window_case no-windows-old "$(ago '6 days ago')" "$none" "$none" $stale
+  window_case named-missing-old "$(ago '6 days ago')" "$none" '["five_hour"]' $stale
+  window_case named-missing-now "$now" "[{\"id\":\"w\",\"resetsAt\":\"$later\"}]" '["w","five_hour"]' $stale
+  window_case start-unbound "$now" "[{\"id\":\"w\",\"resetsAt\":\"$later\",\"startsAt\":\"2026-11-27T12:00:00\"}]" '["w"]' $stale
+  window_case start-unreadable "$now" "[{\"id\":\"w\",\"resetsAt\":\"$later\",\"startsAt\":\"soon\"}]" '["w"]' $stale
+  window_case reused "$(ago '6 days ago')" "[{\"id\":\"w\",\"resetsAt\":\"$later\"}]" '["w"]' reading-not-fresh
+  window_case session-current "$now" '[{"id":"s","kind":"session"}]' '["s"]' refused
+  window_case weekly-current "$(ago '2 days ago')" '[{"id":"w","kind":"weekly"}]' '["w"]' refused
+  window_case no-length-now "$now" '[{"id":"c","kind":"credits"}]' '["c"]' refused
+  window_case no-windows-now "$now" "$none" "$none" refused
+  [ "$(wc -l < "$CASE/quota-calls")" -eq 15 ] || fail "each window case should read the pinned login once"
+  pass "an elapsed, missing, unreadable, or reused window is stale input, and a current one still refuses"
 }
 
 resolve() {  # [brief]
@@ -520,13 +573,16 @@ SH
 }
 
 test_stale_intake_rows_exclude_no_profile() {
-  local out state
+  local out state want
   new_case staleintake claude
   make_intake
   login "$HOME_DIR/user-home" 5 "$(reading claude fresh all_models 0 exhausted_now)"
   out=$(resolve)
   assert_contains "$out" "not eligible: runway exhausted_now" "a current row still excludes: $out"
   for state in stale reset; do
+    rm -f "$HOME_DIR/state/quota-launch.log"
+    want="reading-not-fresh"
+    [ "$state" = stale ] || want="window-not-current"
     if [ "$state" = stale ]; then
       login "$HOME_DIR/user-home" 5 "$(reading claude stale all_models 0 exhausted_now)"
     else
@@ -538,8 +594,8 @@ test_stale_intake_rows_exclude_no_profile() {
     assert_not_contains "$out" "not eligible" "a $state row must not exclude the profile: $out"
     assert_contains "$out" "eligible, unranked" "a $state row leaves the profile eligible"
     assert_contains "$out" "quota: stale" "a $state row is flagged"
-    assert_grep "quota=stale reason=reading-not-fresh" "$HOME_DIR/state/quota-launch.log" \
-      "a $state row is logged"
+    assert_grep "quota=stale reason=$want" "$HOME_DIR/state/quota-launch.log" \
+      "a $state row is logged with its own reason"
     assert_not_contains "$out" "$SECRET" "intake must not repeat an account identity"
   done
   mkdir -p "$CASE/listed"
@@ -549,7 +605,7 @@ test_stale_intake_rows_exclude_no_profile() {
   printf '%s\n' "$CASE/listed" > "$HOME_DIR/config/claude-accounts"
   out=$(FM_HOME="$HOME_DIR" HOME="$HOME_DIR/user-home" PATH="$FAKEBIN:$PATH" \
     "$ROOT/bin/fm-claude-account-quota.sh" 2>&1)
-  assert_contains "$out" "uncertainty: quota reading is stale or past its reset" "listed accounts: $out"
+  assert_contains "$out" "uncertainty: quota reading is stale or not current" "listed accounts: $out"
   assert_not_contains "$out" "remaining=" "a reset account reading prints no figures"
   pass "stale or reset intake rows exclude no profile"
 }
@@ -722,6 +778,31 @@ test_unusable_pi_pin_binds_no_pi_lane_at_intake() {
   assert_contains "$out" "harness=pi provider=codex quota=stale reason=pi-pin-unusable" \
     "the unusable pin is reported against the Pi candidate: $out"
   assert_not_contains "$out" "remaining=90%" "the ambient Pi figure must not appear: $out"
+  login "$HOME_DIR/user-home" 6 \
+    "$(reading codex stale all_models 90 through_reset openai-codex-work)" \
+    "$(reading codex stale all_models 50 through_reset default)"
+  rm -f "$HOME_DIR/state/quota-launch.log"
+  out=$(resolve)
+  assert_contains "$out" "harness=pi provider=codex quota=stale reason=pi-pin-unusable" \
+    "the Pi candidate keeps the pin reason: $out"
+  assert_contains "$out" "harness=codex provider=codex quota=stale reason=reading-not-fresh" \
+    "native Codex is reported for its own reading: $out"
+  assert_not_contains "$out" "harness=codex provider=codex quota=stale reason=pi-pin-unusable" \
+    "a Pi pin never explains native Codex: $out"
+  login "$HOME_DIR/user-home" 6 \
+    "$(reading codex fresh all_models 90 through_reset openai-codex-work)" \
+    "$(reading codex fresh all_models 50 through_reset default)"
+  out=$(resolve)
+  assert_contains "$out" "candidate: codex:gpt-6  provider=codex  scope=all_models  remaining=50%" \
+    "a legacy default row stays native Codex's: $out"
+  assert_contains "$out" "candidate: pi:openai-codex-work/gpt-6  provider=codex  -> eligible, unranked" \
+    "a legacy row without accountKeys must not leak an ambient Pi login: $out"
+  assert_not_contains "$out" "remaining=90%" "the ambient legacy Pi figure must not appear: $out"
+  make_intake
+  printf 'not-a-path\n' > "$HOME_DIR/config/claude-account"
+  out=$(resolve)
+  assert_contains "$out" "harness=claude provider=claude quota=stale reason=claude-pin-unusable" \
+    "an unusable Claude pin is named as such: $out"
   pass "an unusable Pi pin leaves Pi lanes unmeasured at intake instead of reading the ambient login"
 }
 
@@ -743,5 +824,6 @@ test_a_reset_is_judged_on_the_scope_it_bounds
 test_ordinary_pin_without_home_is_unmatched
 test_intake_reports_only_candidates_and_keeps_independent_rows
 test_unusable_pi_pin_binds_no_pi_lane_at_intake
+test_windows_that_cannot_be_shown_current_never_stop
 
 echo "# all fm-quota-launch-gate tests passed"

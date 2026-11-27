@@ -27,7 +27,7 @@ The declared value must be a boolean; anything else is an actionable configurati
 ## Launch login and the spawn gate
 
 The [launch quota gate](../../../docs/configuration.md#launch-quota-gate) owns fresh login selection and launch refusal behavior.
-A stale reading, including one whose provider refresh time is missing, unbound, or outside the weekly window, or a scope whose bounding window is past its reset, is disclosed uncertainty and never excludes a candidate.
+A stale reading, including one flagged reused or whose provider refresh time is missing, unbound, or outside the weekly window, or a scope whose bounding windows cannot be shown current (`quota_scope_stale` in `bin/fm-quota-axi-lib.sh`), is disclosed uncertainty and never excludes a candidate.
 Only `quota-axi --full --json` keeps a live reading's provider refresh time; a lean `--json` row omits it and reads as stale.
 The snapshot generation time is not that provider refresh time.
 When resuming after a pause, never carry an earlier quota result across a login change; let the spawn gate read again.

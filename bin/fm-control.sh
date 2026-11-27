@@ -134,9 +134,11 @@
 #              A replacement omp secondmate likewise passes its per-secondmate
 #              omp profile pin (bin/fm-omp-profile-lib.sh) before the old agent
 #              stops.
-#              A replacement on a selected Claude or Pi login also passes
-#              the launch quota gate (bin/fm-quota-launch-lib.sh) here, so a
-#              fresh exhausted reading refuses before the old agent stops.
+#              The replacement also passes the launch quota gate
+#              (bin/fm-quota-launch-lib.sh) here, so a fresh exhausted reading
+#              of its selected login refuses before the old agent stops. That
+#              one decision is handed to the launch owner, which does not read
+#              again after the stop.
 #              The same pre-stop refusal applies to this home's worker tool
 #              exclusions (bin/fm-exclude-tools-lib.sh): a malformed list, or a
 #              replacement runtime that cannot hide the listed tools.
@@ -1235,6 +1237,7 @@ NOTE_FILE="$JOURNAL.note"
 RELAUNCH_META_PUBLISHED=0
 RELAUNCH_AGENT_CONFIRMED=0
 RELAUNCH_TX=
+RELAUNCH_QUOTA=
 RELAUNCH_BRIEF=
 PRIOR_HARNESS=$HARNESS
 PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
@@ -1461,19 +1464,20 @@ resolve_relaunch_profile() {
   local account_selection account_declared account_root
   account_selection=$(fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
     "$account_model" "$TARGET_HARNESS" "" "$account_mate" "$TARGET_ACCOUNT") || return 1
-  # The launch owner's quota gate (bin/fm-quota-launch-lib.sh) also runs only
-  # after the stop, so a selected login whose fresh reading is exhausted
-  # refuses here first. An unselected login is always unmatched there and is
-  # left to the launch owner to report.
+  # This is the transaction's one quota decision (bin/fm-quota-launch-lib.sh),
+  # taken while nothing has changed yet. The launch owner receives the exact
+  # selection it covers and does not read again after the stop.
+  account_declared=${account_selection%%$'\t'*}
+  account_root=
   if [ -n "$account_selection" ]; then
-    account_declared=${account_selection%%$'\t'*}
     account_root=${account_selection#*$'\t'}
     account_root=${account_root%%$'\t'*}
-    fm_quota_launch_gate "$ID" "$TARGET_HARNESS" "$account_model" "$account_declared" "$account_root" 0 "$BACKEND" || {
-      echo "error: $ID was not relaunched and its agent and record are unchanged: a fresh quota reading of the login the replacement would use shows no allowance left; choose another profile or login, or relaunch after the limit resets" >&2
-      return 1
-    }
   fi
+  fm_quota_launch_gate "$ID" "$TARGET_HARNESS" "$account_model" "$account_declared" "$account_root" 0 "$BACKEND" || {
+    echo "error: $ID was not relaunched and its agent and record are unchanged: a fresh quota reading of the login the replacement would use shows no allowance left; choose another profile or login, or relaunch after the limit resets" >&2
+    return 1
+  }
+  RELAUNCH_QUOTA=$(fm_quota_launch_binding "$TARGET_HARNESS" "$account_model" "$account_declared" "$account_root" 0 "$BACKEND")
   fm_omp_profile_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
     "$account_mate" >/dev/null || return 1
   # Likewise polytoken's launch profile and wiring refusals
@@ -1688,6 +1692,7 @@ do_relaunch() {
   [ -z "$TARGET_ACCOUNT" ] || spawn_args+=(--account "$TARGET_ACCOUNT")
   spawn_rc=0
   FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+  FM_CONTROL_RELAUNCH_QUOTA="$RELAUNCH_TX"$'\037'"$RELAUNCH_QUOTA" \
     "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null || spawn_rc=$?
   if [ "$spawn_rc" -eq 0 ]; then
     RELAUNCH_META_PUBLISHED=1

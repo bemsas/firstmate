@@ -28,7 +28,7 @@ FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 #                                  is identified by the contract.
 #   quota_row_stale($row)          true when the row's own reading is not
 #                                  comparable: no state object, a non-fresh
-#                                  status, the stale flag, or an unusable
+#                                  status, the stale or reused flag, or an unusable
 #                                  state.refreshedAt (missing, unbound,
 #                                  unreadable, in the future, or older than the
 #                                  trailing weekly window). Snapshot generatedAt
@@ -36,12 +36,21 @@ FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 #                                  Only `--full --json` (or a reused reading)
 #                                  carries state.refreshedAt; a lean live
 #                                  `--json` row omits it and reads as stale.
-#   quota_scope_stale($row; $ea)   true when a window bounding that one
+#   quota_scope_stale($row; $ea)   true when the windows bounding that one
 #                                  effectiveAvailability entry (its boundedBy
 #                                  and limitingWindowIds, else every window
-#                                  the row reports) has a reset that is past
-#                                  or unreadable, or started after the row's
-#                                  refresh time. Other scopes stay comparable.
+#                                  the row reports) cannot be shown current:
+#                                  a named window the row does not report; a
+#                                  reset that is past or unreadable; a start
+#                                  that is unreadable or after the row's
+#                                  refresh time; a resetless window whose own
+#                                  length (windowSeconds, else its session,
+#                                  weekly, or monthly kind) has elapsed since
+#                                  its start, else since the refresh; or a
+#                                  resetless window of unknown length, or no
+#                                  window at all, on a reading older than the
+#                                  live age bound (fifteen minutes). Other
+#                                  scopes stay comparable.
 #   quota_row($snapshot; $provider; $lane)
 #                                  the one provider row the candidate binds to,
 #                                  or null. With a lane and rows that publish
@@ -64,6 +73,7 @@ FM_QUOTA_ROW_JQ='
        end);
   def quota_refresh_horizon: 604800;
   def quota_refresh_skew: 120;
+  def quota_live_age: 900;
   def quota_refresh_epoch($row):
     ($row.state.refreshedAt? | if type == "string" and . != "" then . else null end) as $t |
     if $t == null then null
@@ -76,16 +86,33 @@ FM_QUOTA_ROW_JQ='
     (($row.state? | type) != "object") or
     ($row.state.status? != "fresh") or
     ($row.state.stale? == true) or
+    ($row.state.reused? == true) or
     quota_refresh_unusable($row);
+  def quota_time: (try quota_epoch catch null) // null;
+  def quota_window_seconds:
+    if (.windowSeconds? | type) == "number" and .windowSeconds > 0 then .windowSeconds
+    elif .kind? == "session" then 18000
+    elif .kind? == "weekly" then 604800
+    elif .kind? == "monthly" then 2419200
+    else null
+    end;
+  def quota_past_live_age($refreshed): $refreshed < (now - quota_live_age);
+  def quota_window_stale($refreshed):
+    (if .startsAt? == null then $refreshed else (.startsAt | quota_time) end) as $start |
+    if $start == null or $start > $refreshed then true
+    elif .resetsAt? != null then ((.resetsAt | quota_time) // 0) <= now
+    else quota_window_seconds as $length |
+      if $length == null then quota_past_live_age($refreshed) else ($start + $length) <= now end
+    end;
   def quota_scope_stale($row; $ea):
     ([($ea.boundedBy? // [])[]?, ($ea.limitingWindowIds? // [])[]?] | map(select(type == "string"))) as $ids |
     (quota_refresh_epoch($row) // 0) as $refreshed |
-    [$row.windows[]? | select(type == "object") |
-      select(($ids | length) == 0 or (.id as $id | any($ids[]; . == $id)))] |
-    any(.[];
-      (.resetsAt? != null and (((try (.resetsAt | quota_epoch) catch 0) // 0) <= now)) or
-      (.startsAt? != null and (((try (.startsAt | quota_epoch) catch null) // null) as $s |
-        $s != null and $s > $refreshed)));
+    [$row.windows[]? | select(type == "object")] as $windows |
+    [$windows[] | select(($ids | length) == 0 or (.id as $id | any($ids[]; . == $id)))] as $bounding |
+    any($ids[]; . as $id | any($windows[]; .id == $id) | not) or
+    (if ($bounding | length) == 0 then quota_past_live_age($refreshed)
+     else any($bounding[]; quota_window_stale($refreshed))
+     end);
   def quota_lane($harness; $model):
     if $harness == "codex" then "codex-home"
     elif ($harness == "pi" or $harness == "pi-signed") and (($model // "") | contains("/"))

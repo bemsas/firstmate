@@ -39,8 +39,8 @@
 #   Uncertainty names a failed or invalid read, quota-axi's own unknown or
 #   rate-limited state and reason, a missing claude row, or no applicable scope.
 #   A reading that is not fresh or without a usable provider refresh time
-#   prints no figures, and neither does a scope whose own bounding window is
-#   past its reset; the account's other scopes still print.
+#   prints no figures, and neither does a scope whose own bounding windows
+#   cannot be shown current; the account's other scopes still print.
 #   A missing quota-axi prints `error: quota-axi not installed` in the block.
 #   Readings exit 0. Exit 2 for a usage error, an absent list, or a list that
 #   bin/fm-worker-account-lib.sh refuses, which is actionable, never selected
@@ -147,12 +147,12 @@ jq -rs --arg model "$MODEL" "$FM_QUOTA_ROW_JQ"'
         (if $row.state.status then " (\($row.state.status | flat): \(show($row.state.error)))" else "" end) as $why |
         (if (["known", "partial"] | index($row.quotaSemantics.status)) == null then
           "\($head)  uncertainty: quota \(show($row.quotaSemantics.status))\($why)"
-         elif $stale then "\($head)  uncertainty: quota reading is stale or past its reset\($why)"
+         elif $stale then "\($head)  uncertainty: quota reading is stale or not current\($why)"
          else empty end),
         (if ($found | length) == 0 then "\($head)  uncertainty: no applicable quota scope" else empty end),
         (if $stale then empty else
           ($found[] | select(quota_scope_stale($row; .)) |
-            "\($head)  scope=\(.scope | flat)  uncertainty: quota reading is stale or past its reset") end),
+            "\($head)  scope=\(.scope | flat)  uncertainty: quota reading is stale or not current") end),
         ($rows[] | "\($head)  scope=\(.scope | flat)  status=\(show(.status))  remaining=\(show(.effectivePercentRemaining))%  spendPriority=\(show(.selection.spendPriority))  runway=\(show(.runway.status))"
           + (if .runway.usableRunwaySeconds != null or .runway.status == "projected_exhaustion"
              then "  usableRunwaySeconds=\(show(.runway.usableRunwaySeconds))" else "" end)

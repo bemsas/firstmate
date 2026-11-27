@@ -552,7 +552,9 @@
 #   Every launch reads the selected login's quota fresh on this host, including
 #   the launch half of a relaunch that goes through spawn, and refuses only on
 #   current exhaustion of a comparable reading. Any other result launches.
-#   bin/fm-control.sh relaunch asks the same gate before it stops the agent.
+#   bin/fm-control.sh relaunch asks the same gate before it stops the agent,
+#   and the launch half it owns carries that one decision instead of reading
+#   again. A direct --relaunch reads and gates for itself.
 #   bin/fm-quota-launch-lib.sh and docs/configuration.md "Launch quota gate"
 #   own the contract.
 # Claude account list (config/claude-accounts, --account <entry>):
@@ -2383,6 +2385,16 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   fi
 fi
+# The quota decision fm-control took before it stopped the agent is honoured
+# only from the process holding this task's control lock, for that transaction.
+# It is dropped from the environment so no later process inherits it.
+SPAWN_RELAUNCH_QUOTA=
+if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
+  case "${FM_CONTROL_RELAUNCH_QUOTA-}" in
+    "$FM_CONTROL_RELAUNCH_TX"$'\037'*) SPAWN_RELAUNCH_QUOTA=${FM_CONTROL_RELAUNCH_QUOTA#*$'\037'} ;;
+  esac
+fi
+unset FM_CONTROL_RELAUNCH_QUOTA
 ORCA_LAUNCH_ENV_ENABLED=0
 ORCA_LAUNCH_ENV_ARGS=
 if [ "$RELAUNCH" -eq 0 ]; then
@@ -3683,7 +3695,11 @@ if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
 fi
 # Launch quota gate (bin/fm-quota-launch-lib.sh owns it): one fresh read of the
 # login selected above, still before any endpoint, worktree, or record exists.
-if ! fm_quota_launch_gate "$ID" "$HARNESS" "$MODEL" "$WORKER_ACCOUNT_DECLARED" "$WORKER_ACCOUNT_ROOT" "$RAW_LAUNCH" "$BACKEND"; then
+# A controlled relaunch already stopped its agent on one earlier decision.
+SPAWN_QUOTA_ARGS=("$ID" "$HARNESS" "$MODEL" "$WORKER_ACCOUNT_DECLARED" "$WORKER_ACCOUNT_ROOT" "$RAW_LAUNCH" "$BACKEND")
+if [ -n "$SPAWN_RELAUNCH_QUOTA" ]; then
+  fm_quota_launch_carry "$SPAWN_RELAUNCH_QUOTA" "${SPAWN_QUOTA_ARGS[@]}"
+elif ! fm_quota_launch_gate "${SPAWN_QUOTA_ARGS[@]}"; then
   echo "error: $ID was not launched: a fresh quota reading of the login this launch would use shows no allowance left; choose another profile or login, or launch again after the limit resets" >&2
   exit 1
 fi
