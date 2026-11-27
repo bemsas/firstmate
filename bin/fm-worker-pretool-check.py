@@ -6,9 +6,10 @@ Exit 2 blocks vendor/basisone writes and git worktree add/remove/prune/move.
 The vendor rule applies to every project: no trusted project classification
 reaches this hook, and a checkout's own mutable configuration cannot exempt it.
 Read tools remain available. Shell commands touching protected paths are allowed
-only for known read operations. A quoted here-document that cat writes to one
-literal report file outside the subtree is data. This is a tool-call seatbelt,
-not an OS sandbox.
+only for known read operations. A quoted here-document is data only when a plain
+top-level call with an absolute payload cwd has cat write it to one plainly named
+ordinary file proven outside the subtree. This is a tool-call seatbelt, not an
+OS sandbox.
 --kimi scopes the global hook to an authenticated Firstmate worker pointer.
 --polytoken emits that harness's native allow outcome.
 """
@@ -188,17 +189,23 @@ def strip_heredocs(command):
 
 
 def report_target(word, cwd):
-    """A literal ordinary-file destination provably outside the subtree."""
-    if (any(char in word for char in "$`*?[]{}()<>;&|\n")
-            or (word.startswith("~") and not word.startswith("~/"))
+    """A plainly named ordinary file, or new file, proven outside the subtree."""
+    # Only characters the shell never expands, so the checked name is the written one.
+    if (not re.fullmatch(r"[A-Za-z0-9._/-]+", word) or word.endswith("/")
             or protected(word, cwd, parents=True)):
         return False
-    path = Path(cwd) / os.path.expanduser(word)
+    path = Path(cwd) / word
     resolved = path.resolve()
-    # /dev and /proc names can hand the text back to stdout or another stream.
-    if any(Path(name).parts[1:2] in (("dev",), ("proc",)) for name in (os.path.abspath(path), resolved)):
+    for name in (os.path.abspath(path), str(resolved)):
+        parts = Path(name.lower()).parts
+        # /dev and /proc names can hand the text back to a stream, and a
+        # case-insensitive filesystem folds other spellings into the subtree.
+        if (parts[1:2] in (("dev",), ("proc",)) or parts[-1:] == ("vendor",)
+                or ("vendor", "basisone") in zip(parts, parts[1:])):
+            return False
+    if path.is_symlink() or not resolved.parent.is_dir():
         return False
-    return resolved.is_file() or not resolved.exists()
+    return not resolved.exists() or (resolved.is_file() and resolved.stat().st_nlink == 1)
 
 
 def data_authoring(stripped, words, bodies, cwd):
@@ -253,7 +260,8 @@ def conservative_reason(command, vendor):
     return None
 
 
-def shell_reason(command, cwd, vendor=True, depth=0):
+def shell_reason(command, cwd, vendor=True, depth=0, report=False):
+    """report allows the data exception: only a top-level command with a known cwd."""
     if depth > 8:
         return "shell nesting exceeds the worker guardrail limit"
     stripped, bodies = strip_heredocs(command)
@@ -285,7 +293,9 @@ def shell_reason(command, cwd, vendor=True, depth=0):
         # body is inspected like a quoted shell script. Proven data keeps every
         # rule except the vendor one, since only its report targets are written.
         # A carriage return splits words here but not in the shell.
-        body_vendor = vendor and ("\r" in command or not data_authoring(stripped, words, bodies, cwd))
+        body_vendor = vendor and not (
+            report and "\r" not in command and data_authoring(stripped, words, bodies, cwd)
+        )
         for body in bodies:
             denied = shell_reason(body[0], cwd, body_vendor, depth + 1)
             if denied:
@@ -318,6 +328,18 @@ def shell_reason(command, cwd, vendor=True, depth=0):
     return None
 
 
+# Shell tool arguments that cannot move a command's working directory.
+PLAIN_SHELL_ARGS = {"command", "cmd", "description", "timeout", "run_in_background"}
+
+
+def proven_cwd(payload, args):
+    """True for one string command run from the hook's own absolute directory."""
+    cwd = payload.get("cwd")
+    commands = [args[key] for key in ("command", "cmd") if key in args]
+    return (set(args) <= PLAIN_SHELL_ARGS and len(commands) == 1 and isinstance(commands[0], str)
+            and isinstance(cwd, str) and os.path.isabs(cwd))
+
+
 def reason(payload, root):
     name = str(payload.get("tool_name", payload.get("toolName", ""))).lower()
     args = payload.get("tool_input", payload.get("toolInput", payload.get("input", {})))
@@ -329,7 +351,7 @@ def reason(payload, root):
         if isinstance(command, list):
             command = shlex.join(command)
         if isinstance(command, str):
-            denied = shell_reason(command, cwd)
+            denied = shell_reason(command, cwd, report=proven_cwd(payload, args))
             if denied:
                 return denied
         if name not in READ_TOOLS and any(protected(p, cwd, parents=True) for p in paths(args)):

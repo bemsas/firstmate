@@ -75,7 +75,28 @@ prose = "see vendor/basisone helpers\nR\n"
 tabbed = "\tsee vendor/basisone helpers\n\tR\n"
 for command in (f"cat > notes.md <<'R'\n{prose}", f"cat > notes.md <<-'R'\n{tabbed}",
                 f"cat > notes.md <<- 'R'\n{tabbed}", f"cat <<- \"R\" >> notes.md\n{tabbed}"):
-    run({"tool_name": "Bash", "tool_input": {"command": command}}, 0)
+    run({"tool_name": "Bash", "cwd": str(wt), "tool_input": {"command": command}}, 0)
+# A destination is proven only for a plain call from a known absolute directory
+# to a plainly named single-link ordinary file, or a new one in a real directory.
+report = f"cat > notes.md <<'R'\n{prose}"
+(wt / "plain.md").write_text("x\n")
+(wt / "plain-link.md").symlink_to(wt / "plain.md")
+(wt / "twin.md").write_text("x\n")
+os.link(wt / "twin.md", wt / "twin-copy.md")
+for target in ("notes.md", "plain.md", str(tmp / "absolute-report.md")):
+    run({"tool_name": "Bash", "cwd": str(wt),
+         "tool_input": {"command": f"cat > {target} <<'R'\n{prose}", "description": "write report"}}, 0)
+for target in ("~/notes.md", "'~/notes.md'", "'my notes.md'", "a=b.md", "notes.md/", "plain-link.md",
+               "twin.md", "missing/notes.md", "Vendor/BasisOne/x", "VENDOR"):
+    run({"tool_name": "Bash", "cwd": str(wt), "tool_input": {"command": f"cat > {target} <<'R'\n{prose}"}}, 2)
+for extra in ({"workdir": "src"}, {"directory": "src"}, {"working_directory": str(wt)},
+              {"cmd": report}, {"unknown": True}):
+    run({"tool_name": "Bash", "cwd": str(wt), "tool_input": {"command": report, **extra}}, 2)
+for cwd in (None, "", "src"):
+    run({"tool_name": "Bash", "cwd": cwd, "tool_input": {"command": report}}, 2)
+run({"tool_name": "Bash", "tool_input": {"command": report}}, 2)
+# A report fed to another shell runs from a directory the guard cannot prove.
+run({"tool_name": "Bash", "cwd": str(wt), "tool_input": {"command": f"bash <<'S'\n{report}S\n"}}, 2)
 for command in (f"cat <<'R'\n{prose}", f"cat <<- 'R'\n{tabbed}",
                 f"cat > notes.md <<'A'\nx\nA\ncat <<'R'\n{prose}",
                 f"cat '>' notes.md <<'R'\n{prose}", f"cat \\> notes.md <<'R'\n{prose}",
@@ -86,7 +107,7 @@ for command in (f"cat <<'R'\n{prose}", f"cat <<- 'R'\n{tabbed}",
                 "cat > notes.md <<- 'R'\n\tsee vendor/basisone helpers\n  R\n",
                 f"cat > vendor/basisone/x <<- 'R'\n{tabbed}", f"cat > alias/x <<- 'R'\n{tabbed}",
                 "cat > notes.md <<- 'R'\n\tgit worktree add /tmp/nope\n\tR\n"):
-    run({"tool_name": "Bash", "tool_input": {"command": command}}, 2)
+    run({"tool_name": "Bash", "cwd": str(wt), "tool_input": {"command": command}}, 2)
 for operation in ("Update File", "Delete File", "Add File"):
     run({"tool_name": "apply_patch", "tool_input": {"patch": f"*** Begin Patch\n*** {operation}: vendor/basisone/a\n*** End Patch"}}, 2)
 run({"tool_name": "apply_patch", "tool_input": "*** Begin Patch\n*** Move to: vendor/basisone/a\n*** End Patch"}, 2)
