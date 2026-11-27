@@ -75,16 +75,71 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {
   : > "$FIX/closed-$2"
 }
 # shellcheck disable=SC2329
-fm_backend_herdr_presentation_session_lock_path() { printf '%s/presentation.lock' "$TMP_ROOT"; }
+fm_backend_herdr_presentation_session_lock_path() {
+  if [ -e "$FIX/lock-path-missing" ]; then
+    return 1
+  fi
+  if [ -f "$FIX/next-lock-path" ]; then
+    cat "$FIX/next-lock-path"
+    return 0
+  fi
+  printf '%s/presentation.lock' "$TMP_ROOT"
+}
 # shellcheck disable=SC2329
 fm_lock_try_acquire() {
   # A hook may flip a fixture the moment a named lock is taken, to prove the
-  # verdict is recomputed after both locks are held.
-  if [ -f "$FIX/on-lock-$(basename "$1")" ]; then bash "$FIX/on-lock-$(basename "$1")"; fi
+  # verdict is recomputed after both locks are held. A hold-count file fails
+  # that many attempts first, so a release during the wait is observable.
+  local base hold n lockdir
+  base=$(basename "$1")
+  [ ! -f "$FIX/lock-cost-ms" ] || fake_clock_advance "$(cat "$FIX/lock-cost-ms")"
+  hold="$FIX/hold-count-$base"
+  if [ -f "$hold" ]; then
+    n=$(cat "$hold")
+    case "$n" in
+      ''|*[!0-9]*|0) ;;
+      *)
+        for lockdir in "$FM_STATE_OVERRIDE"/.spawn-*.lock; do
+          if [ -d "$lockdir" ]; then
+            printf 'held\n' >> "$FIX/task-lock-during-wait"
+          else
+            printf 'missing\n' >> "$FIX/task-lock-during-wait"
+          fi
+          break
+        done
+        printf '%s\n' "$((n - 1))" > "$hold"
+        if [ "$((n - 1))" -eq 0 ] && [ -f "$FIX/on-wait-release-$base" ]; then
+          bash "$FIX/on-wait-release-$base"
+        fi
+        return 1
+        ;;
+    esac
+  fi
+  if [ -f "$FIX/on-lock-$base" ]; then bash "$FIX/on-lock-$base"; fi
   mkdir "$1" 2>/dev/null
 }
 # shellcheck disable=SC2329
 fm_lock_release() { rm -rf -- "$1"; }
+# The lock-wait budget reads fm_timing_now_ms. with_fake_wait runs a command on
+# a deterministic clock that only sleeps and lock-cost-ms fake lock calls move,
+# logging each sleep, so a wait's length is exact without any real waiting.
+fake_clock_advance() {  # <ms>
+  local now
+  now=$(cat "$FIX/clock-ms" 2>/dev/null) || return 0
+  printf '%s\n' "$((now + $1))" > "$FIX/clock-ms"
+}
+with_fake_wait() {  # <command> [arg...]
+  (
+    printf '0\n' > "$FIX/clock-ms"
+    : > "$FIX/sleeps"
+    # shellcheck disable=SC2329 # invoked by the lock-wait budget under test.
+    fm_timing_now_ms() { cat "$FIX/clock-ms"; }
+    # shellcheck disable=SC2329 # invoked by the lock-wait budget under test.
+    sleep() { printf '%s\n' "$1" >> "$FIX/sleeps"; fake_clock_advance 100; }
+    "$@"
+  )
+}
+sleep_count() { wc -l < "$FIX/sleeps" | tr -d ' '; }
 # The Treehouse slot hook is a flag: absent = not a pool slot.
 # shellcheck disable=SC2329
 fm_treehouse_pool_slot() { [ -e "$FIX/pool-slot" ]; }
@@ -293,17 +348,191 @@ pass "guard: non-done status, unread steering, scouts, other backends, and proje
 reset_fixture
 mk_task l1
 mkdir "$TMP_ROOT/presentation.lock"
-out=$(run_main --apply l1)
+out=$(FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET=2 with_fake_wait run_main --apply l1)
 assert_contains "$out" "refused l1 session presentation lock is busy" "a busy session lock did not refuse"
 [ ! -s "$CLOSE_LOG" ] || fail "closed while the session lock was busy"
 [ ! -e "$STATE_DIR/.spawn-l1.lock" ] || fail "the task lock leaked after a busy session lock"
+assert_equals 2 "$(sleep_count)" "a busy session lock did not spend its wait budget"
 rm -rf "$TMP_ROOT/presentation.lock"
 mkdir "$STATE_DIR/.spawn-l1.lock"
-out=$(run_main --apply l1)
+out=$(with_fake_wait run_main --apply l1)
 assert_contains "$out" "refused l1 task lock is busy" "a busy task lock did not refuse"
 [ ! -s "$CLOSE_LOG" ] || fail "closed while the task lock was busy"
+assert_equals 0 "$(sleep_count)" "a busy task lock was waited on"
 rm -rf "$STATE_DIR/.spawn-l1.lock"
 pass "a busy task lock or session lock refuses the close and leaks no lock"
+
+assert_busy_refusal() {  # <id> <case> <expected-sleeps>
+  assert_contains "$out" "refused $1 session presentation lock is busy" "$2: a busy session lock did not refuse"
+  [ ! -s "$CLOSE_LOG" ] || fail "$2: closed while the session lock was busy"
+  assert_equals "$3" "$(sleep_count)" "$2: the wait did not match its elapsed budget"
+  [ ! -e "$STATE_DIR/.spawn-$1.lock" ] || fail "$2: the task lock leaked"
+}
+
+reset_fixture
+mk_task s1
+mkdir "$TMP_ROOT/presentation.lock"
+printf '250\n' > "$FIX/lock-cost-ms"
+out=$(FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET=5 with_fake_wait run_main --apply s1)
+assert_busy_refusal s1 "slow lock call" 1
+pass "time spent inside slow lock calls is charged to the wait budget"
+
+# <value>:<expected sleeps>:<ms each fake lock call costs>. With 10s lock calls a
+# 60s budget ends after five sleeps, so an uncapped huge value would keep waiting.
+for budget_case in 0:0:0 00:0:0 08:8:0 010:10:0 9999999999999999999999:5:10000 600:5:10000; do
+  budget=${budget_case%%:*}
+  expected=${budget_case#*:}
+  reset_fixture
+  mk_task z1
+  mkdir "$TMP_ROOT/presentation.lock"
+  printf '%s\n' "${expected#*:}" > "$FIX/lock-cost-ms"
+  status=0
+  out=$(FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET=$budget with_fake_wait run_main --apply z1) || status=$?
+  assert_equals 0 "$status" "budget $budget did not exit cleanly"
+  assert_not_contains "$out" "line " "budget $budget raised a shell error"
+  assert_busy_refusal z1 "budget $budget" "${expected%%:*}"
+done
+pass "zero, leading-zero, and huge budgets are read in base 10 and capped at sixty seconds"
+
+for malformed in abc 1.5 -3 ' 4'; do
+  reset_fixture
+  mk_task m1
+  mkdir "$TMP_ROOT/presentation.lock"
+  out=$(FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET=$malformed with_fake_wait run_main --apply m1)
+  assert_contains "$out" "FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET is not a whole number of tenths; refusing it and not waiting" "malformed budget '$malformed' was not refused"
+  assert_busy_refusal m1 "malformed budget '$malformed'" 0
+done
+pass "a malformed budget override is refused and waits for nothing"
+
+reset_fixture
+mk_task b1
+mk_task b2
+mkdir "$TMP_ROOT/presentation.lock"
+out=$(FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET=3 with_fake_wait run_main --apply b1 b2)
+assert_contains "$out" "refused b1 session presentation lock is busy" "the first pane did not refuse a spent presentation budget"
+assert_contains "$out" "refused b2 session presentation lock is busy" "the second pane did not refuse after the shared budget was spent"
+[ ! -s "$CLOSE_LOG" ] || fail "closed while the shared presentation budget was exhausted"
+assert_equals 3 "$(sleep_count)" "two busy panes waited separately instead of sharing one budget"
+[ ! -e "$STATE_DIR/.spawn-b1.lock" ] && [ ! -e "$STATE_DIR/.spawn-b2.lock" ] || fail "a task lock leaked after the shared budget was spent"
+pass "one pass shares the presentation-lock wait instead of waiting again for every pane"
+
+reset_fixture
+mk_task w8
+printf '2\n' > "$FIX/hold-count-presentation.lock"
+: > "$FIX/task-lock-during-wait"
+out=$(FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET=5 with_fake_wait run_main --apply w8)
+assert_contains "$out" "closed w8" "a presentation lock released during the wait did not close"
+assert_equals 2 "$(sleep_count)" "a release during the wait did not retry"
+assert_not_contains "$(cat "$FIX/task-lock-during-wait")" "missing" "the task lock was dropped while waiting for the presentation lock"
+assert_contains "$(cat "$FIX/task-lock-during-wait")" "held" "the task lock was not held during the presentation wait"
+[ ! -e "$STATE_DIR/.spawn-w8.lock" ] && [ ! -e "$TMP_ROOT/presentation.lock" ] || fail "locks leaked after a release during the wait"
+pass "a presentation lock released during the wait closes under both locks"
+
+reset_fixture
+mk_task w9
+printf '1\n' > "$FIX/hold-count-presentation.lock"
+printf '#!/usr/bin/env bash\nprintf dirt > %s/untracked.txt\n' "$TMP_ROOT/wt-w9" > "$FIX/on-wait-release-presentation.lock"
+out=$(FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET=5 with_fake_wait run_main --apply w9)
+assert_contains "$out" "refused w9 verdict changed under the locks: keep" "a candidate that changed during the wait was still closed"
+[ ! -s "$CLOSE_LOG" ] || fail "closed a candidate that changed before the presentation lock was acquired"
+[ -s "$FIX/sleeps" ] || fail "a changed candidate did not wait for the presentation lock"
+[ ! -e "$STATE_DIR/.spawn-w9.lock" ] && [ ! -e "$TMP_ROOT/presentation.lock" ] || fail "locks leaked after a candidate changed during the wait"
+pass "a candidate that changes during the presentation wait is refused once the lock is acquired"
+
+# The task's pane moves while this pass waits: the new pane is still a valid
+# retire candidate, but the close must not act on the identity read before the wait.
+reset_fixture
+mk_task mv
+printf '1\n' > "$FIX/hold-count-presentation.lock"
+cat > "$FIX/on-wait-release-presentation.lock" <<SH
+#!/usr/bin/env bash
+sed 's/w1:pmv/w1:pmoved/g' "$STATE_DIR/mv.meta" > "$FIX/mv.meta.tmp" && mv "$FIX/mv.meta.tmp" "$STATE_DIR/mv.meta"
+printf '{"result":{"pane":{"pane_id":"w1:pmoved","tab_id":"w1:tmv","workspace_id":"w1"}}}\n' > "$FIX/paneget-w1:pmoved"
+SH
+out=$(FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET=5 with_fake_wait run_main --apply mv)
+assert_contains "$out" "refused mv verdict changed under the locks: retire" "a pane that moved during the wait was closed by its old identity"
+[ ! -s "$CLOSE_LOG" ] || fail "closed a pane after its task moved to another pane"
+[ ! -e "$STATE_DIR/.spawn-mv.lock" ] && [ ! -e "$TMP_ROOT/presentation.lock" ] || fail "locks leaked after the pane moved during the wait"
+pass "a pane identity that moves during the presentation wait refuses the close"
+
+assert_identity_refusal() {  # <id> <case>
+  assert_contains "$out" "refused $1 session presentation lock vanished or changed" "$2 was accepted"
+  [ ! -s "$CLOSE_LOG" ] || fail "$2 closed the pane"
+  [ ! -e "$STATE_DIR/.spawn-$1.lock" ] && [ ! -e "$TMP_ROOT/presentation.lock" ] \
+    && [ ! -e "$TMP_ROOT/other-presentation.lock" ] || fail "locks leaked after $2"
+}
+
+reset_fixture
+mk_task w10
+printf '#!/usr/bin/env bash\nprintf %%s\\n %s/other-presentation.lock > %s/next-lock-path\n' "$TMP_ROOT" "$FIX" > "$FIX/on-lock-presentation.lock"
+out=$(with_fake_wait run_main --apply w10)
+assert_identity_refusal w10 "a lock path that changed on acquisition"
+reset_fixture
+mk_task w11
+printf '#!/usr/bin/env bash\n: > %s/lock-path-missing\n' "$FIX" > "$FIX/on-lock-presentation.lock"
+out=$(with_fake_wait run_main --apply w11)
+assert_identity_refusal w11 "a lock path that vanished on acquisition"
+pass "a presentation lock path that vanishes or changes on acquisition refuses the close"
+
+# The old lock stays held while the session restarts or stops, so only the
+# periodic identity recheck can end the wait before the 60s budget.
+reset_fixture
+mk_task w13
+mkdir "$TMP_ROOT/presentation.lock"
+printf '2\n' > "$FIX/hold-count-presentation.lock"
+printf '#!/usr/bin/env bash\nprintf %%s\\n %s/other-presentation.lock > %s/next-lock-path\n' "$TMP_ROOT" "$FIX" > "$FIX/on-wait-release-presentation.lock"
+out=$(with_fake_wait run_main --apply w13)
+rm -rf "$TMP_ROOT/presentation.lock"
+assert_identity_refusal w13 "a lock path that changed while waiting"
+assert_equals 9 "$(sleep_count)" "a lock path that changed while waiting was polled past its recheck"
+reset_fixture
+mk_task w14
+mkdir "$TMP_ROOT/presentation.lock"
+printf '2\n' > "$FIX/hold-count-presentation.lock"
+printf '#!/usr/bin/env bash\n: > %s/lock-path-missing\n' "$FIX" > "$FIX/on-wait-release-presentation.lock"
+out=$(with_fake_wait run_main --apply w14)
+rm -rf "$TMP_ROOT/presentation.lock"
+assert_identity_refusal w14 "a lock path that vanished while waiting"
+assert_equals 9 "$(sleep_count)" "a lock path that vanished while waiting was polled past its recheck"
+pass "a presentation lock path that vanishes or changes while waiting ends the wait"
+
+reset_fixture
+mk_task w15
+printf '%s/missing-parent/presentation.lock\n' "$TMP_ROOT" > "$FIX/next-lock-path"
+out=$(with_fake_wait run_main --apply w15)
+assert_identity_refusal w15 "a lock whose parent directory is gone"
+assert_equals 1 "$(sleep_count)" "a lock whose parent is gone was waited on"
+pass "a presentation lock whose parent directory is gone ends the wait at once"
+
+reset_fixture
+mk_task w16
+: > "$FIX/next-lock-path"
+out=$(with_fake_wait run_main --apply w16)
+assert_contains "$out" "refused w16 session presentation lock is unavailable" "an empty presentation lock path was not refused"
+assert_equals 0 "$(sleep_count)" "an empty presentation lock path was waited on"
+[ ! -s "$CLOSE_LOG" ] && [ ! -e "$STATE_DIR/.spawn-w16.lock" ] || fail "an empty presentation lock path closed or leaked its task lock"
+pass "an empty presentation lock path is unavailable without waiting"
+
+reset_fixture
+mk_task w12
+out=$(with_fake_wait run_main --apply w12)
+assert_contains "$out" "closed w12" "an uncontended presentation lock did not close"
+[ ! -s "$FIX/sleeps" ] || fail "an uncontended presentation lock waited"
+pass "an uncontended presentation lock closes without waiting"
+
+# shellcheck source=bin/fm-timing-lib.sh
+. "$ROOT/bin/fm-timing-lib.sh"
+reset_fixture
+mk_task rc
+mkdir "$TMP_ROOT/presentation.lock"
+started=$(fm_timing_now_ms)
+out=$(FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET=3 run_main --apply rc)
+elapsed=$(( $(fm_timing_now_ms) - started ))
+assert_contains "$out" "refused rc session presentation lock is busy" "the real-clock wait did not refuse a busy lock"
+[ "$elapsed" -ge 300 ] && [ "$elapsed" -lt 2000 ] || fail "a 300ms real-clock budget took ${elapsed}ms"
+[ ! -e "$STATE_DIR/.spawn-rc.lock" ] || fail "the task lock leaked after the real-clock wait"
+rm -rf "$TMP_ROOT/presentation.lock"
+pass "the native clock ends a busy wait at its budget"
 
 reset_fixture
 mk_task r1

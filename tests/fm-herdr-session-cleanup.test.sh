@@ -68,12 +68,68 @@ mkdir -p "$FIXTURE_DIR"
 
 fm_backend_name() { printf herdr; }
 fm_backend_herdr_session() { printf test; }
-fm_backend_herdr_presentation_session_lock_path() { printf '%s/presentation.lock' "$TMP_ROOT"; }
+fm_backend_herdr_presentation_session_lock_path() {
+  if [ -e "$FIXTURE_DIR/lock-path-missing" ]; then
+    return 1
+  fi
+  if [ -f "$FIXTURE_DIR/next-lock-path" ]; then
+    cat "$FIXTURE_DIR/next-lock-path"
+    return 0
+  fi
+  printf '%s/presentation.lock' "$TMP_ROOT"
+}
 fm_lock_try_acquire() {
+  local base hold n lockdir
+  base=$(basename "$1")
   printf '%s\n' "$1" >> "$LOCK_LOG"
+  [ ! -f "$FIXTURE_DIR/lock-cost-ms" ] || fake_clock_advance "$(cat "$FIXTURE_DIR/lock-cost-ms")"
+  hold="$FIXTURE_DIR/hold-count-$base"
+  if [ -f "$hold" ]; then
+    n=$(cat "$hold")
+    case "$n" in
+      ''|*[!0-9]*|0) ;;
+      *)
+        for lockdir in "$FM_STATE_OVERRIDE"/.spawn-*.lock; do
+          if [ -d "$lockdir" ]; then
+            printf 'held\n' >> "$FIXTURE_DIR/task-lock-during-wait"
+          else
+            printf 'missing\n' >> "$FIXTURE_DIR/task-lock-during-wait"
+          fi
+          break
+        done
+        printf '%s\n' "$((n - 1))" > "$hold"
+        if [ "$((n - 1))" -eq 0 ] && [ -f "$FIXTURE_DIR/on-wait-release-$base" ]; then
+          bash "$FIXTURE_DIR/on-wait-release-$base"
+        fi
+        return 1
+        ;;
+    esac
+  fi
+  if [ -f "$FIXTURE_DIR/on-lock-$base" ]; then bash "$FIXTURE_DIR/on-lock-$base"; fi
   mkdir "$1" 2>/dev/null
 }
 fm_lock_release() { rm -rf -- "$1"; }
+
+# The lock-wait budget reads fm_timing_now_ms. with_fake_wait runs a command on
+# a deterministic clock that only sleeps and lock-cost-ms fake lock calls move,
+# logging each sleep, so a wait's length is exact without any real waiting.
+fake_clock_advance() { # <ms>
+  local now
+  now=$(cat "$FIXTURE_DIR/clock-ms" 2>/dev/null) || return 0
+  printf '%s\n' "$((now + $1))" > "$FIXTURE_DIR/clock-ms"
+}
+with_fake_wait() { # <command> [arg...]
+  (
+    printf '0\n' > "$FIXTURE_DIR/clock-ms"
+    : > "$FIXTURE_DIR/sleeps"
+    # shellcheck disable=SC2329 # invoked by the lock-wait budget under test.
+    fm_timing_now_ms() { cat "$FIXTURE_DIR/clock-ms"; }
+    # shellcheck disable=SC2329 # invoked by the lock-wait budget under test.
+    sleep() { printf '%s\n' "$1" >> "$FIXTURE_DIR/sleeps"; fake_clock_advance 100; }
+    "$@"
+  )
+}
+sleep_count() { wc -l < "$FIXTURE_DIR/sleeps" | tr -d ' '; }
 fm_backend_herdr_pane_idle_shell_pid() { [ ! -e "$FIXTURE_DIR/process-unsafe" ] && printf '67\n'; }
 fm_backend_herdr_projection_focus_snapshot() {
   [ ! -e "$FIXTURE_DIR/focus-unreadable" ] || return 1
@@ -97,6 +153,10 @@ fixture_workspaces() {
   fixture_workspace_json "$title" "$tabs" "$panes"
   if [ -e "$FIXTURE_DIR/duplicate-token" ]; then
     printf ',{"workspace_id":"w3","label":"└ copy · p:%s","focused":false,"active_tab_id":"w3:t1","tab_count":1,"pane_count":1}' "$TOKEN"
+  fi
+  if [ -f "$FIXTURE_DIR/extra-title" ]; then
+    printf ',{"workspace_id":"w4","label":"%s","focused":false,"active_tab_id":"w4:t1","tab_count":1,"pane_count":1}' \
+      "$(cat "$FIXTURE_DIR/extra-title")"
   fi
   printf ']'
 }
@@ -281,6 +341,164 @@ reset_fixture; : > "$FIXTURE_DIR/error-workspace-get"; assert_preserved "unreada
 reset_fixture; : > "$FIXTURE_DIR/race"; assert_preserved "revalidation race"
 reset_fixture; printf '%s\n' "$TAB" > "$FIXTURE_DIR/active-tab"; assert_preserved "active target"
 reset_fixture; : > "$FIXTURE_DIR/focus-refuse"; assert_preserved "focus refusal"
+
+TOKEN2=ZyXwVuTsRqPoNmLkJiHgFe
+TITLE2="└ other · p:$TOKEN2"
+assert_busy_skip() { # <case> <expected-sleeps>
+  assert_contains "$out" "task skipped because the shared presentation lock is busy" "$1: a busy presentation lock did not skip cleanup"
+  [ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "$1: a busy presentation lock retired the journal"
+  [ ! -s "$CLOSE_LOG" ] || fail "$1: a busy presentation lock closed the pane"
+  assert_equals "$2" "$(sleep_count)" "$1: the wait did not match its elapsed budget"
+  [ ! -e "$FM_STATE_OVERRIDE/.spawn-$ID.lock" ] || fail "$1: the task lock leaked after a busy presentation lock"
+}
+
+reset_fixture
+mkdir "$TMP_ROOT/presentation.lock"
+out=$(FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET=2 with_fake_wait fm_herdr_session_cleanup 2>&1)
+assert_busy_skip "busy lock" 2
+pass "a presentation lock that stays busy skips the candidate after the wait budget"
+
+reset_fixture
+mkdir "$TMP_ROOT/presentation.lock"
+printf '250\n' > "$FIXTURE_DIR/lock-cost-ms"
+out=$(FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET=5 with_fake_wait fm_herdr_session_cleanup 2>&1)
+assert_busy_skip "slow lock call" 1
+pass "time spent inside slow lock calls is charged to the wait budget"
+
+# <value>:<expected sleeps>:<ms each fake lock call costs>. With 10s lock calls a
+# 60s budget ends after five sleeps, so an uncapped huge value would keep waiting.
+for budget_case in 0:0:0 00:0:0 08:8:0 010:10:0 9999999999999999999999:5:10000 600:5:10000; do
+  budget=${budget_case%%:*}
+  expected=${budget_case#*:}
+  reset_fixture
+  mkdir "$TMP_ROOT/presentation.lock"
+  printf '%s\n' "${expected#*:}" > "$FIXTURE_DIR/lock-cost-ms"
+  status=0
+  out=$(FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET=$budget with_fake_wait fm_herdr_session_cleanup 2>&1) || status=$?
+  assert_equals 0 "$status" "budget $budget did not exit cleanly"
+  assert_not_contains "$out" "line " "budget $budget raised a shell error"
+  assert_busy_skip "budget $budget" "${expected%%:*}"
+done
+pass "zero, leading-zero, and huge budgets are read in base 10 and capped at sixty seconds"
+
+for malformed in abc 1.5 -3 ' 4'; do
+  reset_fixture
+  mkdir "$TMP_ROOT/presentation.lock"
+  out=$(FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET=$malformed with_fake_wait fm_herdr_session_cleanup 2>&1)
+  assert_contains "$out" "FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET is not a whole number of tenths; refusing it and not waiting" "malformed budget '$malformed' was not refused"
+  assert_busy_skip "malformed budget '$malformed'" 0
+done
+pass "a malformed budget override is refused and waits for nothing"
+
+reset_fixture
+write_v1 other "$TOKEN2"
+printf '%s\n' "$TITLE2" > "$FIXTURE_DIR/extra-title"
+mkdir "$TMP_ROOT/presentation.lock"
+out=$(FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET=3 with_fake_wait fm_herdr_session_cleanup 2>&1)
+assert_contains "$out" "task skipped because the shared presentation lock is busy" "the first candidate did not skip a spent presentation budget"
+assert_contains "$out" "other skipped because the shared presentation lock is busy" "the second candidate did not skip after the shared budget was spent"
+assert_equals 3 "$(sleep_count)" "two busy candidates waited separately instead of sharing one budget"
+[ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "the shared budget retired the first journal"
+[ -f "$FM_STATE_OVERRIDE/other.herdr-presentation" ] || fail "the shared budget retired the second journal"
+[ ! -s "$CLOSE_LOG" ] || fail "the shared budget closed a pane"
+pass "one cleanup pass shares the presentation-lock wait across candidates"
+
+reset_fixture
+printf '2\n' > "$FIXTURE_DIR/hold-count-presentation.lock"
+: > "$FIXTURE_DIR/task-lock-during-wait"
+out=$(FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET=5 with_fake_wait fm_herdr_session_cleanup 2>&1)
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "a presentation lock released during the wait kept the journal"
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "a presentation lock released during the wait did not close once"
+assert_equals 2 "$(sleep_count)" "a release during the wait did not retry"
+assert_not_contains "$(cat "$FIXTURE_DIR/task-lock-during-wait")" "missing" "the task lock was dropped while waiting for the presentation lock"
+assert_contains "$(cat "$FIXTURE_DIR/task-lock-during-wait")" "held" "the task lock was not held during the presentation wait"
+[ ! -e "$FM_STATE_OVERRIDE/.spawn-$ID.lock" ] && [ ! -e "$TMP_ROOT/presentation.lock" ] || fail "locks leaked after a release during the wait"
+pass "a presentation lock released during the wait closes under both locks"
+
+reset_fixture
+printf '1\n' > "$FIXTURE_DIR/hold-count-presentation.lock"
+printf '#!/usr/bin/env bash\n: > %s/race\n' "$FIXTURE_DIR" > "$FIXTURE_DIR/on-wait-release-presentation.lock"
+out=$(FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET=5 with_fake_wait fm_herdr_session_cleanup 2>&1)
+assert_contains "$out" "preserved because immediate revalidation changed or was unreadable" "a candidate that moved during the wait was not preserved"
+[ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "a moved candidate retired the journal"
+[ ! -s "$CLOSE_LOG" ] || fail "a moved candidate closed the pane"
+[ -s "$FIXTURE_DIR/sleeps" ] || fail "a moved candidate did not wait for the presentation lock"
+[ ! -e "$FM_STATE_OVERRIDE/.spawn-$ID.lock" ] && [ ! -e "$TMP_ROOT/presentation.lock" ] || fail "locks leaked after a candidate moved during the wait"
+pass "a candidate that moves during the presentation wait is preserved once the lock is acquired"
+
+assert_identity_skip() { # <case>
+  assert_contains "$out" "task skipped because the shared presentation lock vanished or changed" "$1 was accepted"
+  [ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "$1 retired the journal"
+  [ ! -s "$CLOSE_LOG" ] || fail "$1 closed the pane"
+  [ ! -e "$FM_STATE_OVERRIDE/.spawn-$ID.lock" ] && [ ! -e "$TMP_ROOT/presentation.lock" ] \
+    && [ ! -e "$TMP_ROOT/other-presentation.lock" ] || fail "locks leaked after $1"
+}
+
+reset_fixture
+printf '#!/usr/bin/env bash\nprintf %%s\\n %s/other-presentation.lock > %s/next-lock-path\n' "$TMP_ROOT" "$FIXTURE_DIR" > "$FIXTURE_DIR/on-lock-presentation.lock"
+out=$(FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET=5 with_fake_wait fm_herdr_session_cleanup 2>&1)
+assert_identity_skip "a lock path that changed on acquisition"
+reset_fixture
+printf '#!/usr/bin/env bash\n: > %s/lock-path-missing\n' "$FIXTURE_DIR" > "$FIXTURE_DIR/on-lock-presentation.lock"
+out=$(with_fake_wait fm_herdr_session_cleanup 2>&1)
+assert_identity_skip "a lock path that vanished on acquisition"
+pass "a presentation lock path that vanishes or changes on acquisition skips the candidate"
+
+# The old lock stays held while the session restarts or stops, so only the
+# periodic identity recheck can end the wait before the 60s budget.
+reset_fixture
+mkdir "$TMP_ROOT/presentation.lock"
+printf '2\n' > "$FIXTURE_DIR/hold-count-presentation.lock"
+printf '#!/usr/bin/env bash\nprintf %%s\\n %s/other-presentation.lock > %s/next-lock-path\n' "$TMP_ROOT" "$FIXTURE_DIR" > "$FIXTURE_DIR/on-wait-release-presentation.lock"
+out=$(with_fake_wait fm_herdr_session_cleanup 2>&1)
+rm -rf "$TMP_ROOT/presentation.lock"
+assert_identity_skip "a lock path that changed while waiting"
+assert_equals 9 "$(sleep_count)" "a lock path that changed while waiting was polled past its recheck"
+reset_fixture
+mkdir "$TMP_ROOT/presentation.lock"
+printf '2\n' > "$FIXTURE_DIR/hold-count-presentation.lock"
+printf '#!/usr/bin/env bash\n: > %s/lock-path-missing\n' "$FIXTURE_DIR" > "$FIXTURE_DIR/on-wait-release-presentation.lock"
+out=$(with_fake_wait fm_herdr_session_cleanup 2>&1)
+rm -rf "$TMP_ROOT/presentation.lock"
+assert_identity_skip "a lock path that vanished while waiting"
+assert_equals 9 "$(sleep_count)" "a lock path that vanished while waiting was polled past its recheck"
+pass "a presentation lock path that vanishes or changes while waiting ends the wait"
+
+reset_fixture
+printf '%s/missing-parent/presentation.lock\n' "$TMP_ROOT" > "$FIXTURE_DIR/next-lock-path"
+out=$(with_fake_wait fm_herdr_session_cleanup 2>&1)
+assert_identity_skip "a lock whose parent directory is gone"
+assert_equals 1 "$(sleep_count)" "a lock whose parent is gone was waited on"
+pass "a presentation lock whose parent directory is gone ends the wait at once"
+
+reset_fixture
+: > "$FIXTURE_DIR/next-lock-path"
+out=$(with_fake_wait fm_herdr_session_cleanup 2>&1)
+assert_contains "$out" "task skipped because the shared presentation lock is unavailable" "an empty presentation lock path was not refused"
+assert_equals 0 "$(sleep_count)" "an empty presentation lock path was waited on"
+[ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] && [ ! -s "$CLOSE_LOG" ] || fail "an empty presentation lock path cleaned up"
+[ ! -e "$FM_STATE_OVERRIDE/.spawn-$ID.lock" ] || fail "the task lock leaked after an empty presentation lock path"
+pass "an empty presentation lock path is unavailable without waiting"
+
+reset_fixture
+out=$(with_fake_wait fm_herdr_session_cleanup 2>&1)
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "an uncontended presentation lock kept the journal"
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "an uncontended presentation lock did not close once"
+[ ! -s "$FIXTURE_DIR/sleeps" ] || fail "an uncontended presentation lock waited"
+pass "an uncontended presentation lock closes without waiting"
+
+# shellcheck source=bin/fm-timing-lib.sh
+. "$ROOT/bin/fm-timing-lib.sh"
+reset_fixture
+mkdir "$TMP_ROOT/presentation.lock"
+started=$(fm_timing_now_ms)
+out=$(FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET=3 fm_herdr_session_cleanup 2>&1)
+elapsed=$(( $(fm_timing_now_ms) - started ))
+assert_contains "$out" "task skipped because the shared presentation lock is busy" "the real-clock wait did not skip a busy lock"
+[ "$elapsed" -ge 300 ] && [ "$elapsed" -lt 2000 ] || fail "a 300ms real-clock budget took ${elapsed}ms"
+[ ! -e "$FM_STATE_OVERRIDE/.spawn-$ID.lock" ] || fail "the task lock leaked after the real-clock wait"
+rm -rf "$TMP_ROOT/presentation.lock"
+pass "the native clock ends a busy wait at its budget"
 
 INTEGRATION_ROOT="$TMP_ROOT/bootstrap-integration"
 mkdir -p "$INTEGRATION_ROOT/home/state" "$INTEGRATION_ROOT/home/data" "$INTEGRATION_ROOT/home/config"

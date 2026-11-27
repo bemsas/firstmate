@@ -894,6 +894,15 @@ fm_backend_herdr_presentation_session_lock_path() {  # <session>
   printf '%s/order-%s.lock' "$dir" "$key"
 }
 
+# Succeeds only while <lock-path> is still the named session's presentation
+# lock, so a waiter can drop a lock whose session stopped or restarted.
+fm_backend_herdr_presentation_session_lock_is() {  # <session> <lock-path>
+  local current
+  [ -n "$2" ] || return 1
+  current=$(fm_backend_herdr_presentation_session_lock_path "$1" 2>/dev/null) || return 1
+  [ "$current" = "$2" ]
+}
+
 # fm_backend_herdr_projection_focus_snapshot: print the exact active
 # workspace and tab ids as one tab-separated record.
 # Presentation mutations use this read-only snapshot as their sole focus

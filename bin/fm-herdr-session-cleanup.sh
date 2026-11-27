@@ -7,7 +7,15 @@
 # home-local and considers only the current named Herdr session and ordinary
 # state/*.herdr-presentation journals in the effective FM_HOME. Each candidate
 # is additionally serialized by the existing state/.spawn-<task>.lock and the
-# shared named-session Herdr presentation lock, in that order.
+# shared named-session Herdr presentation lock, in that order. The task lock is
+# taken at once and held while this pass waits for the presentation lock. Every
+# candidate in the pass shares one elapsed-time wait budget,
+# FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET tenths of a second (default and
+# maximum 600, sixty seconds; fm_lock_wait_budget_begin in bin/fm-wake-lib.sh
+# owns how a value is read, and a malformed one is refused with no wait). A
+# busy task lock, a presentation lock that stays busy past that budget, or a
+# presentation lock path that vanishes or changes while waiting or once
+# acquired skips that candidate.
 #
 # A visible title is discovery only. Cleanup requires the exact current
 # "└ <concise-task> · p:<22-char-token>" grammar, one token occurrence across
@@ -202,7 +210,7 @@ fm_herdr_cleanup_revalidate() { # <session> <workspace> <tab> <pane> <title> <to
 fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   local session=$1 workspace=$2 title=$3 home_real=$4 token journal id task_lock
   local version bound_workspace bound_tab bound_pane presentation_lock snapshot
-  local tab pane state close_status=0
+  local tab pane state close_status=0 lock_status=0
   token=$(fm_herdr_cleanup_title_token "$title") || return 0
   if ! fm_herdr_cleanup_unique_match "$title" "$session" "$home_real"; then
     return 0
@@ -219,14 +227,22 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
     fm_herdr_cleanup_warn "$id skipped because its task lock is busy"
     return 0
   fi
-  presentation_lock=$(fm_backend_herdr_presentation_session_lock_path "$session" 2>/dev/null) || {
+  presentation_lock=$(fm_backend_herdr_presentation_session_lock_path "$session" 2>/dev/null) \
+    || presentation_lock=
+  if [ -z "$presentation_lock" ]; then
     fm_lock_release "$task_lock" || true
     fm_herdr_cleanup_warn "$id skipped because the shared presentation lock is unavailable"
     return 0
-  }
-  if ! fm_lock_try_acquire "$presentation_lock"; then
+  fi
+  fm_lock_try_acquire_budget "$presentation_lock" \
+    fm_backend_herdr_presentation_session_lock_is "$session" "$presentation_lock" || lock_status=$?
+  if [ "$lock_status" -ne 0 ]; then
     fm_lock_release "$task_lock" || true
-    fm_herdr_cleanup_warn "$id skipped because the shared presentation lock is busy"
+    if [ "$lock_status" -eq 1 ]; then
+      fm_herdr_cleanup_warn "$id skipped because the shared presentation lock is busy"
+    else
+      fm_herdr_cleanup_warn "$id skipped because the shared presentation lock vanished or changed"
+    fi
     return 0
   fi
 
@@ -324,6 +340,8 @@ fm_herdr_session_cleanup() {
     fm_herdr_cleanup_warn "session '$session' workspace discovery was unreadable; preserving every candidate"
     return 0
   }
+  fm_lock_wait_budget_begin "${FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET:-}" \
+    || fm_herdr_cleanup_warn 'FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET is not a whole number of tenths; refusing it and not waiting'
   while IFS=$'\t' read -r workspace title; do
     [ -n "$workspace" ] && [ -n "$title" ] || continue
     fm_herdr_cleanup_one "$session" "$workspace" "$title" "$home_real"

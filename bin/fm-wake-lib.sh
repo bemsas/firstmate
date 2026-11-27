@@ -44,6 +44,13 @@ _fm_wake_require_session_lock() {
   . "$FM_WAKE_LIB_DIR/fm-session-lock-lib.sh"
 }
 
+# Load the native millisecond clock only for the shared lock-wait budget.
+_fm_wake_require_timing() {
+  command -v fm_timing_now_ms >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-timing-lib.sh
+  . "$FM_WAKE_LIB_DIR/fm-timing-lib.sh"
+}
+
 # Pass a variable name to capture this frame's pid without forking it in $().
 # On Bash 3.2, exec a child shell so its PPID identifies this frame, unlike $$.
 fm_current_pid() {  # [output-variable]
@@ -1711,6 +1718,92 @@ fm_lock_acquire_wait_max() {  # <lockdir> <max-seconds>
     fi
     sleep 0.1
   done
+}
+
+# fm_lock_wait_budget_begin <requested-tenths-or-empty>
+#
+# Arm one shared in-process wait for fm_lock_try_acquire_budget, measured in
+# elapsed milliseconds (FM_LOCK_WAIT_BUDGET_MS). An empty request arms the
+# default and maximum of 600 tenths (60 seconds). A decimal request is read in
+# base 10, so leading zeros never turn it octal, and anything above 600 tenths,
+# however many digits, is capped at 600. Any other request arms no wait at all
+# and returns 1, so the caller can report the refused override while every lock
+# still gets its ordinary single try.
+#
+# fm_lock_acquire_wait_bounded does not fit a caller that already holds another
+# lock: it acquires in a helper process and only then rewrites the owner pid, so
+# the two locks are not both owned by the waiter for the whole critical section.
+# fm_lock_acquire_wait_max fits the process, but an unpublished pid extends it
+# past the deadline and would let one pane spend more than this shared budget.
+fm_lock_wait_budget_begin() {  # <requested-tenths-or-empty>
+  local requested=${1:-} cap=600 tenths
+  FM_LOCK_WAIT_BUDGET_MS=0
+  case "$requested" in
+    '') tenths=$cap ;;
+    *[!0-9]*) return 1 ;;
+    *)
+      tenths=${requested#"${requested%%[!0]*}"}
+      [ -n "$tenths" ] || tenths=0
+      if [ "${#tenths}" -gt "${#cap}" ] || [ "$tenths" -gt "$cap" ]; then
+        tenths=$cap
+      fi
+      ;;
+  esac
+  FM_LOCK_WAIT_BUDGET_MS=$((tenths * 100))
+}
+
+# fm_lock_try_acquire_budget <lockdir> [recheck-command [arg...]]
+#
+# Hold <lockdir> in this process, retrying every tenth of a second while the
+# shared budget lasts. The budget is charged the real time each wait spends,
+# read from the native clock (fm_timing_now_ms), so slow lock calls and late
+# wakeups count; a wait ends within one retry of the budget running out, and a
+# clock that steps backwards ends it at once. An uncontended lock returns on the
+# first try. The optional recheck runs about once a second while waiting and
+# again once the lock is held, so a lock whose identity vanished or changed is
+# neither waited on nor kept.
+#
+# Returns 0 when held, 1 when the budget is spent, 2 when the lock's parent
+# directory is gone, and 3 when the recheck refused; on 3 after acquisition the
+# lock is already released. The caller keeps any lock it held before the call.
+fm_lock_try_acquire_budget() {  # <lockdir> [recheck-command [arg...]]
+  local lockdir=$1 start now deadline tries=0 rc=1
+  shift
+  _fm_wake_require_timing
+  start=$(fm_timing_now_ms)
+  deadline=$((start + ${FM_LOCK_WAIT_BUDGET_MS:-0}))
+  while :; do
+    if fm_lock_try_acquire "$lockdir"; then
+      rc=0
+      break
+    fi
+    now=$(fm_timing_now_ms)
+    if [ "$now" -lt "$start" ] || [ "$now" -ge "$deadline" ]; then
+      rc=1
+      break
+    fi
+    if fm_lock_parent_gone "$lockdir"; then
+      rc=2
+      break
+    fi
+    tries=$((tries + 1))
+    if [ "$#" -gt 0 ] && [ $((tries % 10)) -eq 0 ] && ! "$@"; then
+      rc=3
+      break
+    fi
+    sleep 0.1
+  done
+  now=$(fm_timing_now_ms)
+  if [ "$now" -lt "$start" ] || [ "$now" -ge "$deadline" ]; then
+    FM_LOCK_WAIT_BUDGET_MS=0
+  else
+    FM_LOCK_WAIT_BUDGET_MS=$((deadline - now))
+  fi
+  if [ "$rc" -eq 0 ] && [ "$#" -gt 0 ] && ! "$@"; then
+    fm_lock_release "$lockdir" || true
+    rc=3
+  fi
+  return "$rc"
 }
 
 # Acquire in the timed helper process, then transfer the lock record to the

@@ -42,8 +42,15 @@
 # observed agent state as its required state so it re-reads that state at the
 # close boundary. It runs under the task's spawn lock and the shared named
 # session presentation lock, after the whole verdict is recomputed inside both
-# locks. A busy lock, a changed verdict, a refused focus-unsafe close, or an
-# unconfirmed close keeps the pane and reports why.
+# locks. The task lock is taken at once and held while this pass waits for the
+# presentation lock. Every pane in the pass shares one elapsed-time wait budget,
+# FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET tenths of a second (default and
+# maximum 600, sixty seconds; fm_lock_wait_budget_begin in bin/fm-wake-lib.sh
+# owns how a value is read, and a malformed one is refused with no wait). A busy
+# task lock still refuses without waiting. A presentation lock that stays busy
+# past the budget, a presentation lock path that vanishes or changes while
+# waiting or once acquired, a changed verdict or pane identity, a refused
+# focus-unsafe close, or an unconfirmed close keeps the pane and reports why.
 #
 # A worker's Treehouse slot is held only by the process lease of the
 # interactive `treehouse get` running in the pane, so closing the pane would
@@ -266,10 +273,32 @@ fm_pane_retire_hold_slot() {  # <id> <project> <worktree>
   [ "$state" = leased ]
 }
 
+# Resolve the named session's presentation lock and wait for it inside the pass
+# budget while it stays that session's lock. The acquire stays in this process:
+# a command substitution would record the subshell as owner and drop the lock
+# when that subshell exits. The task lock stays with the caller. On success
+# FM_PANE_RETIRE_PRESENTATION_LOCK is the held path. Returns 1 when the path
+# cannot be resolved, 2 when the budget runs out, and 3 when the path vanished
+# or changed, with nothing held.
+fm_pane_retire_presentation_lock() {  # <session>
+  local session=$1 lock_path rc=0
+  FM_PANE_RETIRE_PRESENTATION_LOCK=
+  lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session" 2>/dev/null) || return 1
+  [ -n "$lock_path" ] || return 1
+  fm_lock_try_acquire_budget "$lock_path" \
+    fm_backend_herdr_presentation_session_lock_is "$session" "$lock_path" || rc=$?
+  case "$rc" in
+    0) FM_PANE_RETIRE_PRESENTATION_LOCK=$lock_path ;;
+    1) return 2 ;;
+    *) return 3 ;;
+  esac
+}
+
 # Close one task's pane under the task lock and the shared session presentation
 # lock, recomputing the whole verdict inside both. Prints closed|refused.
 fm_pane_retire_close() {  # <id>
   local id=$1 task_lock="$STATE/.spawn-$1.lock" session pane state proof presentation_lock close_status=0
+  local presentation_rc
   if ! fm_lock_try_acquire "$task_lock"; then
     echo "refused $id task lock is busy"
     return 1
@@ -284,21 +313,34 @@ fm_pane_retire_close() {  # <id>
   pane=$FM_PANE_RETIRE_PANE
   state=$FM_PANE_RETIRE_AGENT_STATE
   proof=$FM_PANE_RETIRE_PROOF
-  presentation_lock=$(fm_backend_herdr_presentation_session_lock_path "$session" 2>/dev/null) || {
-    fm_lock_release "$task_lock" || true
-    echo "refused $id session presentation lock is unavailable"
-    return 1
-  }
-  if ! fm_lock_try_acquire "$presentation_lock"; then
-    fm_lock_release "$task_lock" || true
-    echo "refused $id session presentation lock is busy"
-    return 1
-  fi
+  fm_pane_retire_presentation_lock "$session"
+  presentation_rc=$?
+  presentation_lock=$FM_PANE_RETIRE_PRESENTATION_LOCK
+  case "$presentation_rc" in
+    0) ;;
+    1)
+      fm_lock_release "$task_lock" || true
+      echo "refused $id session presentation lock is unavailable"
+      return 1
+      ;;
+    2)
+      fm_lock_release "$task_lock" || true
+      echo "refused $id session presentation lock is busy"
+      return 1
+      ;;
+    *)
+      fm_lock_release "$task_lock" || true
+      echo "refused $id session presentation lock vanished or changed"
+      return 1
+      ;;
+  esac
   # The lock order is the one every other pane close uses: task, then session.
   # Recompute once more now that both are held; the helper re-reads the agent
   # state itself through its required-state argument.
   fm_pane_retire_evaluate "$id"
   if [ "$FM_PANE_RETIRE_VERDICT" != retire ] \
+     || [ "$FM_PANE_RETIRE_SESSION" != "$session" ] \
+     || [ "$FM_PANE_RETIRE_PANE" != "$pane" ] \
      || [ "$FM_PANE_RETIRE_AGENT_STATE" != "$state" ] \
      || [ "$FM_PANE_RETIRE_PROOF" != "$proof" ]; then
     echo "refused $id verdict changed under the locks: $FM_PANE_RETIRE_VERDICT $FM_PANE_RETIRE_DETAIL"
@@ -366,6 +408,8 @@ fm_pane_retire_main() {
     [ "$auto" = 1 ] || printf '%-6s %s  %s\n' "$FM_PANE_RETIRE_VERDICT" "$id" "$FM_PANE_RETIRE_DETAIL"
   done
   if [ "$apply" = 1 ]; then
+    fm_lock_wait_budget_begin "${FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET:-}" \
+      || echo "warning: FM_HERDR_PRESENTATION_LOCK_WAIT_BUDGET is not a whole number of tenths; refusing it and not waiting" >&2
     for id in ${retire_ids[@]+"${retire_ids[@]}"}; do
       if fm_pane_retire_close "$id"; then closed=$((closed + 1)); else refused=$((refused + 1)); fi
     done
