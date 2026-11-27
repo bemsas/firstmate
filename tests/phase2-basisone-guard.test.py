@@ -34,9 +34,7 @@ def main():
         harmless_report = classify(checker, commercial, "Bash", {
             "command": "cat > report/notes.md <<'REPORT'\nThe reference vendor/basisone is read-only.\nREPORT\n",
         })
-        if protected != [2, 2] or read != 0 or harmless_report not in (0, 2):
-            return 1
-        return 0 if harmless_report == 0 else 10
+        return 0 if protected == [2, 2] and read == 0 and harmless_report == 0 else 1
 
 
 if __name__ == "__main__":
