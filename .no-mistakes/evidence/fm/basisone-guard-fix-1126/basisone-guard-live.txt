@@ -1,0 +1,4 @@
+write protected vendor file: exit=2; stdout=''; stderr='blocked: worker edits to vendor/basisone are blocked. (a) ask firstmate to arrange the change (recommended); (b) continue within the assigned worktree and scope'
+read protected vendor file: exit=0; stdout='{}'; stderr=''
+quoted report prose mentioning vendor path: exit=0; stdout='{}'; stderr=''
+shell read protected file: exit=0; stdout='{}'; stderr=''
