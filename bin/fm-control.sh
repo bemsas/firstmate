@@ -134,6 +134,9 @@
 #              A replacement omp secondmate likewise passes its per-secondmate
 #              omp profile pin (bin/fm-omp-profile-lib.sh) before the old agent
 #              stops.
+#              A replacement on a selected Claude or Pi login also passes
+#              the launch quota gate (bin/fm-quota-launch-lib.sh) here, so a
+#              fresh exhausted reading refuses before the old agent stops.
 #              The same pre-stop refusal applies to this home's worker tool
 #              exclusions (bin/fm-exclude-tools-lib.sh): a malformed list, or a
 #              replacement runtime that cannot hide the listed tools.
@@ -262,6 +265,8 @@ unset FM_CONTROL_PARK_ATTEMPT
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-quota-launch-lib.sh
+. "$SCRIPT_DIR/fm-quota-launch-lib.sh"
 # shellcheck source=bin/fm-omp-profile-lib.sh
 . "$SCRIPT_DIR/fm-omp-profile-lib.sh"
 # shellcheck source=bin/fm-exclude-tools-lib.sh
@@ -1453,8 +1458,22 @@ resolve_relaunch_profile() {
   [ "$KIND" != secondmate ] || account_mate=$ID
   TARGET_ACCOUNT=$(fm_worker_account_relaunch_request "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
     "$PRIOR_HARNESS" "$(fm_meta_get "$META" account)" "$NEW_ACCOUNT" "$account_mate") || return 1
-  fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
-    "$account_model" "$TARGET_HARNESS" "" "$account_mate" "$TARGET_ACCOUNT" >/dev/null || return 1
+  local account_selection account_declared account_root
+  account_selection=$(fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
+    "$account_model" "$TARGET_HARNESS" "" "$account_mate" "$TARGET_ACCOUNT") || return 1
+  # The launch owner's quota gate (bin/fm-quota-launch-lib.sh) also runs only
+  # after the stop, so a selected login whose fresh reading is exhausted
+  # refuses here first. An unselected login is always unmatched there and is
+  # left to the launch owner to report.
+  if [ -n "$account_selection" ]; then
+    account_declared=${account_selection%%$'\t'*}
+    account_root=${account_selection#*$'\t'}
+    account_root=${account_root%%$'\t'*}
+    fm_quota_launch_gate "$ID" "$TARGET_HARNESS" "$account_model" "$account_declared" "$account_root" 0 "$BACKEND" || {
+      echo "error: $ID was not relaunched and its agent and record are unchanged: a fresh quota reading of the login the replacement would use shows no allowance left; choose another profile or login, or relaunch after the limit resets" >&2
+      return 1
+    }
+  fi
   fm_omp_profile_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
     "$account_mate" >/dev/null || return 1
   # Likewise polytoken's launch profile and wiring refusals

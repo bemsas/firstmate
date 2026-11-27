@@ -905,6 +905,7 @@ tests/fm-project-origin.test.sh 123
 tests/fm-public-followup.test.sh 381564
 tests/fm-quota-array-dispatch-live-e2e.test.sh 50
 tests/fm-quota-choose.test.sh 2860
+tests/fm-quota-launch-gate.test.sh 140000
 tests/fm-read-repetition-live.test.sh 1110
 tests/fm-read-repetition.test.sh 602
 tests/fm-record-export-remote-home.test.sh 16875
@@ -1711,6 +1712,7 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       printf '%s\n' "__script__:fm-quota-launch-gate.test.sh"
+      printf '%s\n' "__script__:fm-control-relaunch.test.sh"
       ;;
     bin/fm-procevent-quota.sh)
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"

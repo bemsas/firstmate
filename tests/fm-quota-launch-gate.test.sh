@@ -21,11 +21,15 @@ unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE
 SECRET=private-person@example.invalid
 
 # make_quota_stub <fakebin> <case-dir>
+# Answers from the selected root's quota.json in the installed renderer's two
+# tiers: only --full keeps a live state.refreshedAt, windows' startsAt, and the
+# account identity; lean --json drops them unless the reading is reused. A
+# root holding exit-1 prints its snapshot and then exits 1, as quota-axi does
+# when it cannot measure a provider; one holding lean-only ignores --full.
 make_quota_stub() {
   cat > "$1/quota-axi" <<SH
 #!/usr/bin/env bash
 case " \$* " in
-  *' --provider codex '*) root=\${CODEX_HOME:-\$HOME/.codex} ;;
   *' --provider claude '*) root=\${CLAUDE_CONFIG_DIR:-\$HOME/.claude} ;;
   *) root=\${PI_CODING_AGENT_DIR:-\$HOME} ;;
 esac
@@ -33,7 +37,20 @@ printf 'root=%s max_age=%s snapshot=%s args=%s\n' "\$root" "\${QUOTA_AXI_MAX_AGE
   "\${QUOTA_AXI_SNAPSHOT-unset}" "\$*" >> '$2/quota-calls'
 printf 'login $SECRET\n' >&2
 [ ! -e "\$root/slow" ] || exec /bin/sleep 30
-cat "\$root/quota.json" 2>/dev/null || exit 1
+[ -f "\$root/quota.json" ] || exit 1
+case " \$* " in
+  *' --full '*) [ ! -e "\$root/lean-only" ] && full=1 || full= ;;
+  *) full= ;;
+esac
+if [ -n "\$full" ]; then
+  cat "\$root/quota.json"
+else
+  jq -c '.providers |= map(del(.account, .attempts) |
+      if (.state | type) == "object" and .state.reused != true then .state |= del(.refreshedAt) else . end |
+      if (.windows | type) == "array" then .windows |= map(del(.startsAt)) else . end)' \
+    "\$root/quota.json" 2>/dev/null || cat "\$root/quota.json"
+fi
+[ ! -e "\$root/exit-1" ] || exit 1
 SH
   chmod +x "$1/quota-axi"
 }
@@ -156,8 +173,8 @@ test_pinned_login_swap_never_inherits_a_stop() {
   assert_not_contains "$out" "quota-gate:" "a fresh reading with headroom should be silent"
   assert_grep "root=$CASE/open " "$CASE/quota-calls" "the swapped login should be the one read"
   assert_no_grep "root=$CASE/spent " "$CASE/quota-calls" "the previous login must not be read again"
-  assert_grep "args=--provider claude --profile-only --json --no-credential-refresh" "$CASE/quota-calls" \
-    "a Claude reading must be isolated to the selected root"
+  assert_grep "args=--provider claude --profile-only --full --json --no-credential-refresh" "$CASE/quota-calls" \
+    "a Claude reading must be isolated to the selected root, in the tier that keeps its refresh time"
   assert_grep "task=$id harness=claude provider=claude quota=ok" "$HOME_DIR/state/quota-launch.log" \
     "the allowed launch should be logged"
   pass "a login swap is judged on the new login's own fresh reading"
@@ -274,8 +291,15 @@ test_provider_refresh_time_not_the_fresh_label() {
   pass "only a recent timezone-bound fresh reading can refuse, and headroom above the cap launches"
 }
 
-test_codex_is_unmatched_and_pi_reads_its_pinned_lane() {
-  local out rc
+# keyed <accountKey or ""> <accountKeys,comma,separated> <remaining> <runway>
+# One codex row as quota-axi publishes it: accountKeys on every row, and
+# accountKey only when the report expanded to schema 6.
+keyed() {
+  reading codex fresh all_models "$3" "$4" "$1" | jq -c --arg keys "$2" '.accountKeys = ($keys | split(","))'
+}
+
+test_codex_is_unmatched_and_pi_binds_its_lane_by_account_keys() {
+  local out rc calls
   new_case codex codex
   login "$HOME_DIR/user-home/.codex" 5 "$(reading codex fresh all_models 0 exhausted_now)"
   out=$(spawn_ship quota-codex); rc=$?
@@ -292,25 +316,45 @@ exit 0
 SH
   chmod +x "$FAKEBIN/pi"
   login "$CASE/pi-root" 6 \
-    "$(reading codex fresh all_models 0 exhausted_now lane-spent)" \
-    "$(reading codex fresh all_models 50 through_reset lane-open)" \
-    "$(reading codex fresh all_models 0 exhausted_now codex-home)"
-  login "$HOME_DIR/user-home" 6 "$(reading codex fresh all_models 0 exhausted_now lane-spent)"
-  out=$(spawn_ship quota-pi-unpinned --harness pi --model lane-spent/gpt-6); rc=$?
+    "$(keyed openai-codex-spent openai-codex-spent 0 exhausted_now)" \
+    "$(keyed openai-codex-open openai-codex-open 50 through_reset)" \
+    "$(keyed codex-home codex-home,openai-codex-folded 0 exhausted_now)"
+  login "$HOME_DIR/user-home" 6 "$(keyed openai-codex-open openai-codex-open 0 exhausted_now)"
+  out=$(spawn_ship quota-pi-unpinned --harness pi --model openai-codex-open/gpt-6); rc=$?
   expect_launch quota-pi-unpinned "$rc" "$out"
   assert_contains "$out" "quota=stale reason=unmatched-login" "an unpinned Pi launch cannot be matched"
-  printf '%s\nlane-spent lane-open lane-absent codex-native\n' "$CASE/pi-root" > "$HOME_DIR/config/pi-account"
+  printf '%s\nopenai-codex-spent openai-codex-open openai-codex-folded openai-codex-absent codex-native xai\n' \
+    "$CASE/pi-root" > "$HOME_DIR/config/pi-account"
   out=$(spawn_ship quota-pi-native --harness pi --model codex-native/gpt-6); rc=$?
   expect_launch quota-pi-native "$rc" "$out"
   assert_contains "$out" "quota=stale reason=unmatched-login" "the terminal selects the native Codex home"
-  out=$(spawn_ship quota-pi-spent --harness pi --model lane-spent/gpt-6); rc=$?
+  : > "$CASE/quota-calls"
+  out=$(spawn_ship quota-pi-spent --harness pi --model openai-codex-spent/gpt-6); rc=$?
   expect_refusal quota-pi-spent "$rc" "$out"
-  out=$(spawn_ship quota-pi-open --harness pi --model lane-open/gpt-6); rc=$?
+  assert_grep "root=$CASE/pi-root max_age=unset snapshot=unset args=--provider codex --full --json --no-credential-refresh" \
+    "$CASE/quota-calls" "a pinned Pi lane is read under its own root, scoped to codex, in the full tier"
+  out=$(spawn_ship quota-pi-open --harness pi --model openai-codex-open/gpt-6); rc=$?
   expect_launch quota-pi-open "$rc" "$out"
-  out=$(spawn_ship quota-pi-other --harness pi --model lane-absent/gpt-6); rc=$?
+  assert_not_contains "$out" "quota-gate:" "the pinned lane's own headroom launches silently"
+  out=$(spawn_ship quota-pi-folded --harness pi --model openai-codex-folded/gpt-6); rc=$?
+  expect_refusal quota-pi-folded "$rc" "$out"
+  out=$(spawn_ship quota-pi-other --harness pi --model openai-codex-absent/gpt-6); rc=$?
   expect_launch quota-pi-other "$rc" "$out"
   assert_contains "$out" "quota=stale reason=no-matching-row" "a lane with no row of its own is unmatched"
-  pass "codex stays unmatched and a pinned Pi launch is judged only on its own lane row"
+  calls=$(wc -l < "$CASE/quota-calls")
+  out=$(spawn_ship quota-pi-xai --harness pi --model xai/grok-5); rc=$?
+  expect_launch quota-pi-xai "$rc" "$out"
+  assert_contains "$out" "quota=stale reason=unmatched-login" "a Pi lane quota-axi does not key is unmatched"
+  [ "$(wc -l < "$CASE/quota-calls")" = "$calls" ] || fail "an unkeyed Pi lane must not poll quota-axi"
+  login "$CASE/pi-root" 5 "$(keyed '' openai-codex-spent 0 exhausted_now)"
+  out=$(spawn_ship quota-pi-s5 --harness pi --model openai-codex-spent/gpt-6); rc=$?
+  expect_refusal quota-pi-s5 "$rc" "$out"
+  login "$CASE/pi-root" 5 "$(keyed '' codex-home 0 exhausted_now)"
+  out=$(spawn_ship quota-pi-s5-native --harness pi --model openai-codex-spent/gpt-6); rc=$?
+  expect_launch quota-pi-s5-native "$rc" "$out"
+  assert_contains "$out" "quota=stale reason=no-matching-row" \
+    "a schema-5 native Codex row must not bind to a Pi lane"
+  pass "codex stays unmatched and a pinned Pi lane binds only the row whose accountKeys hold it"
 }
 
 test_invalid_account_config_still_refuses() {
@@ -351,6 +395,107 @@ test_secondmate_launch_reads_its_own_pin() {
     fm_test_run_spawn "$HOME_DIR" "$WT" "$FAKEBIN" "$id" "$sm" --secondmate); rc=$?
   expect_launch "$id" "$rc" "$out"
   pass "a secondmate launch is judged on the secondmate's own pinned login"
+}
+
+# Shapes printed by the installed quota-axi 0.1.56 renderer (quotaJsonReport)
+# for one synthetic in-memory Claude reading, timestamps made placeholders.
+# The full tier keeps state.refreshedAt, startsAt, and the account identity;
+# the lean live tier drops all three.
+RENDERED_FULL='{"generatedAt":"@NOW@","schemaVersion":5,"providers":[{"provider":"claude","accountKeys":["default"],"plan":"max","label":"Claude","source":"oauth","account":{"email":"@SECRET@"},"attempts":[{"source":"oauth","status":"ok"}],"windows":[{"id":"five_hour","label":"session","kind":"session","percentRemaining":100,"percentUsed":0,"startsAt":"@START5@","windowSeconds":18000,"resetsAt":"@RESET5@"},{"id":"seven_day","label":"week","kind":"weekly","percentRemaining":0,"percentUsed":100,"startsAt":"@START7@","windowSeconds":604800,"resetsAt":"@RESET7@"}],"state":{"status":"fresh","stale":false,"refreshedAt":"@NOW@","sourcesTried":["oauth"]},"quotaSemantics":{"status":"known","description":"d","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0,"boundedBy":["five_hour","seven_day"],"limitingWindowIds":["seven_day"],"runway":{"status":"exhausted_now"},"selection":{"status":"known","spendPriority":-9}}]}}]}'
+RENDERED_LEAN='{"generatedAt":"@NOW@","schemaVersion":5,"providers":[{"provider":"claude","accountKeys":["default"],"plan":"max","windows":[{"id":"five_hour","label":"session","kind":"session","percentRemaining":100,"resetsAt":"@RESET5@"},{"id":"seven_day","label":"week","kind":"weekly","percentRemaining":0,"resetsAt":"@RESET7@"}],"state":{"status":"fresh","stale":false},"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0,"boundedBy":["five_hour","seven_day"],"limitingWindowIds":["seven_day"],"runway":{"status":"exhausted_now"},"selection":{"status":"known","spendPriority":-9}}]}}]}'
+
+rendered() {  # <template> <root>
+  mkdir -p "$2"
+  printf '{}\n' > "$2/.credentials.json"
+  printf '%s\n' "$1" | sed -e "s|@NOW@|$(date -u +%Y-%m-%dT%H:%M:%S.000Z)|g" \
+    -e "s|@START5@|$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S.000Z)|" \
+    -e "s|@RESET5@|$(date -u -d '4 hours' +%Y-%m-%dT%H:%M:%S.000Z)|" \
+    -e "s|@START7@|$(date -u -d '2 days ago' +%Y-%m-%dT%H:%M:%S.000Z)|" \
+    -e "s|@RESET7@|$(date -u -d '5 days' +%Y-%m-%dT%H:%M:%S.000Z)|" \
+    -e "s|@SECRET@|$SECRET|" > "$2/quota.json"
+}
+
+test_installed_renderer_tiers_full_compares_and_lean_is_stale() {
+  local out rc root
+  new_case tiers claude
+  root="$CASE/pinned"
+  printf '%s\n' "$root" > "$HOME_DIR/config/claude-account"
+  rendered "$RENDERED_FULL" "$root"
+  out=$(spawn_ship quota-tier-full); rc=$?
+  expect_refusal quota-tier-full "$rc" "$out"
+  assert_contains "$out" "quota=exhausted scope=all_models" "the full tier is comparable evidence"
+  rendered "$RENDERED_LEAN" "$root"
+  : > "$root/lean-only"
+  out=$(spawn_ship quota-tier-lean); rc=$?
+  expect_launch quota-tier-lean "$rc" "$out"
+  assert_contains "$out" "quota=stale reason=reading-not-fresh" \
+    "a lean live row has no refresh time, so it cannot stop a launch"
+  pass "the installed renderer's full tier compares and its lean live tier is stale input"
+}
+
+# scoped_login <root> <all_models bounding window> <its reset> <its start>
+# all_models is exhausted and bounded by that one window; model:other is bounded
+# by a session window whose reset has already passed.
+scoped_login() {
+  local root=$1 window=$2 reset=$3 start=$4 now past
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  past=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)
+  mkdir -p "$root"
+  printf '{}\n' > "$root/.credentials.json"
+  jq -n --arg now "$now" --arg past "$past" --arg window "$window" --arg reset "$reset" --arg start "$start" '{
+    generatedAt: $now, schemaVersion: 5,
+    providers: [{
+      provider: "claude", accountKeys: ["default"],
+      state: {status: "fresh", stale: false, refreshedAt: $now},
+      windows: [
+        {id: "five_hour", percentRemaining: 100, startsAt: "2001-01-01T00:00:00Z", resetsAt: $past},
+        ({id: "seven_day", percentRemaining: 0, resetsAt: $reset} + (if $start == "" then {} else {startsAt: $start} end))
+      ],
+      quotaSemantics: {status: "known", effectiveAvailability: [
+        {scope: "all_models", status: "known", effectivePercentRemaining: 0, boundedBy: [$window],
+         runway: {status: "exhausted_now"}, selection: {spendPriority: -1}},
+        {scope: "model:other", status: "known", effectivePercentRemaining: 100, boundedBy: ["five_hour"],
+         runway: {status: "through_reset"}, selection: {spendPriority: 1}}
+      ]}
+    }]
+  }' > "$root/quota.json"
+}
+
+test_a_reset_is_judged_on_the_scope_it_bounds() {
+  local out rc root future
+  new_case scoped claude
+  root="$CASE/pinned"
+  future=$(date -u -d '3 days' +%Y-%m-%dT%H:%M:%SZ)
+  printf '%s\n' "$root" > "$HOME_DIR/config/claude-account"
+  scoped_login "$root" seven_day "$future" "$(date -u -d '2 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+  out=$(spawn_ship quota-scope-current --model sonnet); rc=$?
+  expect_refusal quota-scope-current "$rc" "$out"
+  assert_contains "$out" "quota=exhausted scope=all_models" \
+    "another scope's passed reset must not hide a current exhaustion"
+  scoped_login "$root" five_hour "$future" ""
+  out=$(spawn_ship quota-scope-reset --model sonnet); rc=$?
+  expect_launch quota-scope-reset "$rc" "$out"
+  assert_contains "$out" "quota=stale reason=reset-passed" "a scope bounded by a passed reset is stale"
+  scoped_login "$root" seven_day "$future" "$(date -u -d '1 minute' +%Y-%m-%dT%H:%M:%SZ)"
+  out=$(spawn_ship quota-scope-cycle --model sonnet); rc=$?
+  expect_launch quota-scope-cycle "$rc" "$out"
+  assert_contains "$out" "quota=stale reason=reset-passed" \
+    "a window that started after the reading is a newer cycle than the reading"
+  pass "a reset or a newer cycle is judged only on the scope whose window it bounds"
+}
+
+test_ordinary_pin_without_home_is_unmatched() {
+  local out rc
+  new_case nohome claude
+  claude_login "$HOME_DIR/user-home/.claude" 0 exhausted_now
+  # shellcheck disable=SC2016 # the program text expands in the child shell
+  out=$(env HOME= PATH="$FAKEBIN:$PATH" STATE="$HOME_DIR/state" bash -c '
+    . "$1/bin/fm-quota-launch-lib.sh"
+    fm_quota_launch_gate quota-nohome claude sonnet ordinary "" 0 herdr' _ "$ROOT" 2>&1); rc=$?
+  expect_code 0 "$rc" "an ordinary pin with no HOME must not refuse: $out"
+  assert_contains "$out" "quota=stale reason=unmatched-login" "no HOME means no known default login"
+  [ ! -s "$CASE/quota-calls" ] || fail "an ordinary pin with no HOME must not read /.claude"
+  pass "an ordinary pin without HOME stays unmatched instead of reading /.claude"
 }
 
 resolve() {  # [brief]
@@ -533,18 +678,70 @@ test_unusable_intake_read_falls_through_to_an_ordinary_launch() {
   pass "a missing or unusable intake read falls through to a launch flagged stale"
 }
 
+test_intake_reports_only_candidates_and_keeps_independent_rows() {
+  local out
+  new_case unrelated claude
+  make_intake
+  login "$HOME_DIR/user-home" 5 \
+    "$(reading claude fresh all_models 80 through_reset)" \
+    "$(jq -nc '{provider: "deepseek", notSetUp: true, state: {status: "unavailable", stale: false},
+      quotaSemantics: {status: "unknown", effectiveAvailability: []}}')"
+  out=$(resolve)
+  assert_contains "$out" "status: clear" "an unrelated provider's absence leaves the candidate ranked: $out"
+  assert_contains "$out" "remaining=80%" "the candidate keeps its own figure: $out"
+  assert_not_contains "$out" "quota-gate:" "an unrelated provider must not be reported: $out"
+  assert_not_contains "$out" "quota: stale" "an unrelated provider is not stale input for this intake: $out"
+  [ ! -e "$HOME_DIR/state/quota-launch.log" ] ||
+    assert_no_grep "quota=stale" "$HOME_DIR/state/quota-launch.log" "an unrelated provider must not be logged"
+  assert_grep "args=--full --json --no-credential-refresh" "$CASE/quota-calls" \
+    "the intake read keeps provider refresh times and never refreshes a credential"
+  claude_login "$HOME_DIR/user-home" 64
+  : > "$HOME_DIR/user-home/exit-1"
+  out=$(resolve)
+  assert_contains "$out" "status: clear" "a snapshot printed with exit 1 is still judged: $out"
+  assert_contains "$out" "remaining=64%" "the exit-1 snapshot's attributable row is kept: $out"
+  pass "intake reports only the candidates it ranks, and keeps every independently attributable row"
+}
+
+test_unusable_pi_pin_binds_no_pi_lane_at_intake() {
+  local out
+  new_case badpi claude
+  make_intake
+  printf '{"rules":[{"when":"A bug fix.","use":[{"harness":"pi","model":"openai-codex-work/gpt-6","provider":"codex"},{"harness":"codex","model":"gpt-6"}]}]}\n' \
+    > "$HOME_DIR/config/crew-dispatch.json"
+  printf 'not-a-path\nopenai-codex-work\n' > "$HOME_DIR/config/pi-account"
+  login "$HOME_DIR/user-home" 6 \
+    "$(keyed openai-codex-work openai-codex-work 90 through_reset)" \
+    "$(keyed codex-home codex-home 50 through_reset)"
+  out=$(resolve)
+  assert_contains "$out" "status: clear" "native Codex still ranks: $out"
+  assert_contains "$out" "candidate: codex:gpt-6  provider=codex  scope=all_models  remaining=50%" \
+    "the native row is kept: $out"
+  assert_contains "$out" "candidate: pi:openai-codex-work/gpt-6  provider=codex  -> eligible, unranked" \
+    "a Pi lane must not borrow the ambient Pi login: $out"
+  assert_contains "$out" "harness=pi provider=codex quota=stale reason=pi-pin-unusable" \
+    "the unusable pin is reported against the Pi candidate: $out"
+  assert_not_contains "$out" "remaining=90%" "the ambient Pi figure must not appear: $out"
+  pass "an unusable Pi pin leaves Pi lanes unmeasured at intake instead of reading the ambient login"
+}
+
 test_pinned_login_swap_never_inherits_a_stop
 test_a_destination_selected_login_is_never_refused_by_another
 test_a_passed_reset_is_stale_evidence
 test_only_scopes_that_bound_the_model_stop_it
 test_missing_or_non_current_readings_launch_as_stale
 test_provider_refresh_time_not_the_fresh_label
-test_codex_is_unmatched_and_pi_reads_its_pinned_lane
+test_codex_is_unmatched_and_pi_binds_its_lane_by_account_keys
 test_invalid_account_config_still_refuses
 test_secondmate_launch_reads_its_own_pin
 test_stale_intake_rows_exclude_no_profile
 test_a_labelled_fresh_row_is_judged_by_its_own_refresh_time
 test_dispatch_intake_reads_the_pinned_login
 test_unusable_intake_read_falls_through_to_an_ordinary_launch
+test_installed_renderer_tiers_full_compares_and_lean_is_stale
+test_a_reset_is_judged_on_the_scope_it_bounds
+test_ordinary_pin_without_home_is_unmatched
+test_intake_reports_only_candidates_and_keeps_independent_rows
+test_unusable_pi_pin_binds_no_pi_lane_at_intake
 
 echo "# all fm-quota-launch-gate tests passed"

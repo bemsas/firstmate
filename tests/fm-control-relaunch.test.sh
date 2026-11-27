@@ -57,6 +57,15 @@ trap relaunch_cleanup EXIT
 make_tmux_stub() {  # <dir>
   local fb="$1/fakebin"
   mkdir -p "$fb"
+  # quota-axi answers a pinned login's read from that root's quota.json, so no
+  # case reaches the installed tool or a real login; no file is no reading.
+  cat > "$fb/quota-axi" <<'SH'
+#!/usr/bin/env bash
+case " $* " in *' --provider claude '*) root=${CLAUDE_CONFIG_DIR:-$HOME/.claude} ;; *) exit 1 ;; esac
+[ -f "$root/quota.json" ] || exit 1
+cat "$root/quota.json"
+SH
+  chmod +x "$fb/quota-axi"
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -1322,6 +1331,32 @@ test_worker_account_pin_follows_the_relaunch() {
   assert_not_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR=" \
     "an unpinned replacement must launch exactly as before"
   pass "fm-control relaunch: the replacement follows the home's current worker account pin"
+}
+
+test_exhausted_pinned_login_refuses_relaunch_before_stop() {
+  local dir out rc id=rl-acct-spent
+  dir=$(new_case acct-spent "$id")
+  add_ship_task "$dir" "$id" claude
+  make_claude_auth_stub "$dir"
+  mkdir -p "$dir/home/config" "$dir/work"
+  : > "$dir/work/.credentials.json"
+  printf '%s\n' "$dir/work" > "$dir/home/config/claude-account"
+  jq -n --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{schemaVersion: 5, providers: [{provider: "claude",
+    state: {status: "fresh", stale: false, refreshedAt: $now},
+    quotaSemantics: {status: "known", effectiveAvailability: [{scope: "all_models", status: "known",
+      effectivePercentRemaining: 0, runway: {status: "exhausted_now"}}]}}]}' > "$dir/work/quota.json"
+  cp "$dir/home/state/$id.meta" "$dir/meta-before"
+  out=$(run_control "$dir" "$id" relaunch --note "login spent"); rc=$?
+  expect_code 1 "$rc" "a relaunch onto an exhausted pinned login must refuse"$'\n'"$out"
+  assert_contains "$out" "was not relaunched and its agent and record are unchanged" \
+    "the refusal should say nothing was stopped"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "an exhausted login must refuse before the running agent stops"
+  [ ! -s "$dir/fake/literal" ] || fail "an exhausted login must refuse before any lifecycle input is sent"
+  cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "a refused relaunch must leave the task record untouched"
+  rm "$dir/work/quota.json"
+  out=$(run_control "$dir" "$id" relaunch --note "reading unavailable"); rc=$?
+  expect_code 0 "$rc" "a relaunch whose login cannot be read is stale input and still relaunches"$'\n'"$out"
+  pass "fm-control relaunch: an exhausted pinned login refuses before the old agent stops"
 }
 
 # add_listed_task <case-dir> <id> <recorded-account>: a live Claude ship
@@ -3559,6 +3594,7 @@ test_same_harness_relaunch_keeps_the_profile_axes
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
+test_exhausted_pinned_login_refuses_relaunch_before_stop
 test_account_list_relaunch_reuses_the_recorded_account
 test_account_list_relaunch_moves_only_on_explicit_account
 test_account_list_relaunch_refusals_happen_before_stop

@@ -30,18 +30,25 @@
 #
 # Login selection (one read, bounded by FM_QUOTA_LAUNCH_SECONDS, default 15,
 # with QUOTA_AXI_MAX_AGE and QUOTA_AXI_SNAPSHOT removed so nothing is reused,
-# and with delegated credential refresh off):
-#   claude          --profile-only on the pinned or listed root, or ~/.claude
-#                   for `ordinary`
-#   pi, pi-signed   under the pinned PI_CODING_AGENT_DIR, the row whose
-#                   accountKey equals the --model lane
+# delegated credential refresh off, and `--full --json`, the only live tier
+# that keeps each provider's state.refreshedAt):
+#   claude          --provider claude --profile-only on the pinned or listed
+#                   root, or $HOME/.claude for `ordinary`
+#   pi, pi-signed   --provider codex under the pinned PI_CODING_AGENT_DIR, for
+#                   an openai-codex* --model lane: the one row whose
+#                   accountKeys contains that lane (accountKey on a row that
+#                   publishes no accountKeys)
 #   Unmatched, so always stale: every unpinned launch, every other harness, a
-#   raw launch command, backend=t3code (T3 owns the account), and a Pi
-#   codex-native lane, whose Codex home the terminal selects.
+#   raw launch command, backend=t3code (T3 owns the account), a Pi lane that
+#   quota-axi does not key (anything but openai-codex*), an `ordinary` Claude
+#   pin with no HOME, and a Pi codex-native lane, whose Codex home the
+#   terminal selects.
 #
-# A labelled-fresh row is comparable only when its own refresh time is present,
-# timezone-bound, and inside the trailing weekly window, and no reset it
-# reports has passed. The snapshot's generatedAt is not that refresh time.
+# A row is comparable only when it is labelled fresh, is not flagged stale,
+# and has its own timezone-bound state.refreshedAt inside the trailing weekly
+# window. The snapshot's generatedAt is not that refresh time. Each scope that
+# bounds the launch model is then judged on its own bounding windows: one
+# whose reset has passed is stale, and leaves the other scopes comparable.
 # Named provider and model choices stay preferences; this gate never selects
 # a different login, family, or host.
 
@@ -55,7 +62,7 @@ FM_QUOTA_LAUNCH_SECONDS=${FM_QUOTA_LAUNCH_SECONDS:-15}
 
 # fm_quota_launch_report <task> <harness> <provider> <verdict> <detail>
 fm_quota_launch_report() {
-  local line="quota-gate: task=$1 harness=$2 provider=${3:--} quota=$4 $5"
+  local line="quota-gate: task=$1 harness=${2:--} provider=${3:--} quota=$4 $5"
   FM_QUOTA_LAUNCH_VERDICT=$4
   [ "$4" = ok ] || printf '%s\n' "$line" >&2
   [ -z "${STATE:-}" ] || [ ! -d "$STATE" ] ||
@@ -63,10 +70,31 @@ fm_quota_launch_report() {
     true
 }
 
+# fm_quota_launch_read <env-assignment>... -- <quota-axi args>...
+# One bounded, non-reusing, non-refreshing full read. quota-axi exits nonzero
+# for a provider it cannot measure yet still prints a snapshot naming that
+# state, so the output, not the status, is judged. Returns 124 on a timeout,
+# else 0 with whatever was printed. The vendor account identity and source
+# attempts that --full adds are removed before anything else sees the output.
+fm_quota_launch_read() {
+  local -a read_env=(env -u QUOTA_AXI_MAX_AGE -u QUOTA_AXI_SNAPSHOT)
+  local out rc=0
+  while [ $# -gt 0 ] && [ "$1" != -- ]; do read_env+=("$1"); shift; done
+  [ $# -eq 0 ] || shift
+  out=$(fm_run_timed "$FM_QUOTA_LAUNCH_SECONDS" "${read_env[@]}" \
+    quota-axi "$@" --full --json --no-credential-refresh 2>/dev/null </dev/null) || rc=$?
+  if [ "$rc" -ne 0 ] && fm_timed_out "$rc"; then
+    return 124
+  fi
+  printf '%s\n' "$out" | jq -c 'if (.providers? | type) == "array"
+    then .providers |= map(if type == "object" then del(.account, .attempts) else . end) else . end' 2>/dev/null ||
+    printf '%s\n' "$out"
+}
+
 fm_quota_launch_gate() {
   local task=$1 harness=$2 model=$3 declared=$4 root=$5 raw=$6 backend=$7
-  local provider='' lane='' bare snapshot verdict
-  local -a read_env=(env -u QUOTA_AXI_MAX_AGE -u QUOTA_AXI_SNAPSHOT) read_args=()
+  local provider='' lane='' bare snapshot verdict rc=0
+  local -a read_env=() read_args=()
   [ "$model" != default ] || model=
   bare=${model##*/}
 
@@ -78,15 +106,17 @@ fm_quota_launch_gate() {
     claude) provider=claude ;;
     pi | pi-signed)
       lane=$(jq -rn --arg h "$harness" --arg m "$model" "$FM_QUOTA_ROW_JQ"'quota_lane($h; $m)' 2>/dev/null) || lane=
+      case "$lane" in openai-codex | openai-codex-*) provider=codex ;; *) lane= ;; esac
       ;;
     *) provider=$(fm_quota_single_provider_for_harness "$harness") || provider= ;;
   esac
-  if [ -n "$declared" ] && [ "$harness" = claude ]; then
-    [ -n "$root" ] || root="${HOME:-}/.claude"
-    read_env+=("CLAUDE_CONFIG_DIR=$root")
+  if [ -n "$declared" ] && [ "$harness" = claude ] && { [ -n "$root" ] || [ -n "${HOME:-}" ]; }; then
+    [ -n "$root" ] || root="$HOME/.claude"
+    read_env=("CLAUDE_CONFIG_DIR=$root")
     read_args=(--provider claude --profile-only)
-  elif [ -n "$declared" ] && [ -n "$root" ] && [ -n "$lane" ] && [ "$lane" != codex-home ]; then
-    read_env+=("PI_CODING_AGENT_DIR=$root")
+  elif [ -n "$declared" ] && [ -n "$root" ] && [ -n "$lane" ]; then
+    read_env=("PI_CODING_AGENT_DIR=$root")
+    read_args=(--provider codex)
   else
     fm_quota_launch_report "$task" "$harness" "$provider" stale "reason=unmatched-login"
     return 0
@@ -96,44 +126,38 @@ fm_quota_launch_gate() {
     fm_quota_launch_report "$task" "$harness" "$provider" stale "reason=quota-axi-missing"
     return 0
   fi
-  # quota-axi exits nonzero for a provider it cannot measure yet still prints a
-  # snapshot naming that state, so the snapshot, not the status, is judged.
-  snapshot=$(fm_run_timed "$FM_QUOTA_LAUNCH_SECONDS" "${read_env[@]}" \
-    quota-axi ${read_args[@]+"${read_args[@]}"} --json --no-credential-refresh 2>/dev/null </dev/null) || {
-    if fm_timed_out "$?"; then
-      fm_quota_launch_report "$task" "$harness" "$provider" stale "reason=read-timeout"
-      return 0
-    fi
-  }
+  snapshot=$(fm_quota_launch_read "${read_env[@]}" -- "${read_args[@]}") || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    fm_quota_launch_report "$task" "$harness" "$provider" stale "reason=read-timeout"
+    return 0
+  fi
   if ! printf '%s\n' "$snapshot" | fm_quota_json_valid; then
     fm_quota_launch_report "$task" "$harness" "$provider" stale "reason=read-failed"
     return 0
   fi
   # Prints "<verdict> <detail>"; every scope it names is one this program
-  # matched against a fixed name or the launch's own model. A fresh label is
-  # not comparable until the provider's own refresh time is.
+  # matched against a fixed name or the launch's own model.
   verdict=$(printf '%s\n' "$snapshot" | jq -r --arg provider "$provider" --arg lane "$lane" \
-    --arg harness "$harness" --arg model "$bare" "$FM_QUOTA_ROW_JQ"'
+    --arg model "$bare" "$FM_QUOTA_ROW_JQ"'
     . as $q |
-    (if $harness == "pi" or $harness == "pi-signed"
-     then [$q.providers[] | select(.accountKey == $lane)] | if length == 1 then first else null end
-     else quota_row($q; $provider; $lane) end) as $row |
+    (if $lane == "" then quota_row($q; $provider; "")
+     else [$q.providers[] | select(.provider == $provider) |
+       select(quota_binds($lane) or ((.accountKeys? | type) != "array" and .accountKey? == $lane))] |
+       if length == 1 then first else null end
+     end) as $row |
     if $row == null then "stale reason=no-matching-row"
-    elif ($row.state.status? != "fresh") or ($row.state.stale? == true) or quota_refresh_unusable($row) then "stale reason=reading-not-fresh"
-    elif quota_reset_passed($row) then "stale reason=reset-passed"
+    elif quota_row_stale($row) then "stale reason=reading-not-fresh"
     else
-      $row.provider as $p |
       [$row.quotaSemantics.effectiveAvailability[] | select(
         .scope == "all_models" or .scope == "all_products" or
-        ($model != "" and (.scope == ("model:" + $model) or .scope == ("product:" + $model))) or
-        ($p == "agy" and
-          ((.scope == "gemini" and ($model | startswith("gemini-"))) or
-           (.scope == "claude_gpt" and ($model | startswith("claude-") or startswith("gpt-")))))
-      )] as $rows |
-      ([$rows[] | select(.runway.status? == "exhausted_now" or
+        ($model != "" and (.scope == ("model:" + $model) or .scope == ("product:" + $model))))] as $rows |
+      [$rows[] | select(quota_scope_stale($row; .) | not)] as $current |
+      ([$current[] | select(.runway.status? == "exhausted_now" or
           (.status == "known" and .effectivePercentRemaining <= 0))] | first) as $out |
       if $out != null then "exhausted scope=\($out.scope)"
-      elif ($rows | length) == 0 or any($rows[]; .status != "known") then "stale reason=quota-unknown"
+      elif ($rows | length) == 0 then "stale reason=quota-unknown"
+      elif ($current | length) < ($rows | length) then "stale reason=reset-passed"
+      elif any($rows[]; .status != "known") then "stale reason=quota-unknown"
       else "ok reason=headroom"
       end
     end' 2>/dev/null) || verdict=
@@ -143,23 +167,46 @@ fm_quota_launch_gate() {
 }
 
 # fm_quota_launch_snapshot <config-dir>
-# Prints one fresh, time-bounded quota-axi --json snapshot for dispatch intake, scoped to the
-# logins this home's launches spend: a config/pi-account root answers the Pi
-# rows, and a config/claude-account pin replaces the claude rows with that
-# root's own. A pin that cannot be read, or a config/claude-accounts list (the
-# account is chosen later), leaves no claude row at all, so Claude reads as
-# unmeasured instead of borrowing the ambient login's figures. Returns 1 when
-# the home's own read fails; output validity is the caller's to check.
+# Prints one fresh, time-bounded, full quota-axi snapshot for dispatch intake,
+# with account identity and source attempts removed, scoped to the logins this
+# home's launches spend: a config/pi-account root answers the Pi rows, and a
+# config/claude-account pin replaces the claude rows with that root's own. A
+# config/pi-account that does not resolve drops every openai-codex* key from
+# the rows, so no Pi lane binds to an ambient login. A Claude pin that cannot
+# be read, or a config/claude-accounts list (the account is chosen later),
+# leaves no claude row at all, so Claude reads as unmeasured instead of
+# borrowing the ambient login's figures. Each such reason is left in
+# FM_QUOTA_LAUNCH_SNAPSHOT_NOTES as "<provider>=<reason>" words for the caller
+# to report against the candidates it concerns, so call it without a command
+# substitution. Returns 1 only when the read times out; a nonzero quota-axi
+# status still prints its snapshot, and output validity is the caller's to
+# check.
 fm_quota_launch_snapshot() {
-  local config=$1 listed selection declared root pinned='' snapshot
-  local -a read_env=(env -u QUOTA_AXI_MAX_AGE -u QUOTA_AXI_SNAPSHOT)
-  selection=$(fm_worker_account_resolve pi "$config" config/pi-account 2>/dev/null) || selection=
-  if [ -n "$selection" ]; then
-    root=${selection#*$'\t'}
-    read_env+=("PI_CODING_AGENT_DIR=${root%%$'\t'*}")
+  local config=$1 listed selection declared root pinned='' snapshot pi_unusable=0
+  local -a read_env=()
+  FM_QUOTA_LAUNCH_SNAPSHOT_NOTES=
+  if [ -e "$config/pi-account" ] || [ -L "$config/pi-account" ]; then
+    selection=$(fm_worker_account_resolve pi "$config" config/pi-account 2>/dev/null) || selection=
+    if [ -n "$selection" ]; then
+      root=${selection#*$'\t'}
+      read_env=("PI_CODING_AGENT_DIR=${root%%$'\t'*}")
+    else
+      pi_unusable=1
+      FM_QUOTA_LAUNCH_SNAPSHOT_NOTES="codex=pi-pin-unusable"
+    fi
   fi
-  snapshot=$(fm_run_timed "$FM_QUOTA_LAUNCH_SECONDS" "${read_env[@]}" quota-axi --json 2>/dev/null </dev/null) ||
-    return 1
+  snapshot=$(fm_quota_launch_read ${read_env[@]+"${read_env[@]}"} --) || return 1
+  if ! printf '%s\n' "$snapshot" | fm_quota_json_valid; then
+    printf '%s\n' "$snapshot"
+    return 0
+  fi
+  if [ "$pi_unusable" = 1 ]; then
+    snapshot=$(printf '%s\n' "$snapshot" | jq -c '
+      .providers |= map(if (.accountKeys? | type) == "array" and any(.accountKeys[]; startswith("openai-codex"))
+        then .accountKeys |= map(select(startswith("openai-codex") | not)) |
+          if (.accountKeys | length) == 0 then empty else . end
+        else . end)') || return 1
+  fi
   listed=$(fm_worker_account_list claude "$config" 2>/dev/null) || listed=unreadable
   if [ -z "$listed" ] && [ ! -e "$config/claude-account" ] && [ ! -L "$config/claude-account" ]; then
     printf '%s\n' "$snapshot"
@@ -171,18 +218,15 @@ fm_quota_launch_snapshot() {
     declared=${selection%%$'\t'*}
     root=${selection#*$'\t'}
     root=${root%%$'\t'*}
-    [ "$declared" != ordinary ] || root="${HOME:-}/.claude"
-    pinned=$(fm_run_timed "$FM_QUOTA_LAUNCH_SECONDS" env -u QUOTA_AXI_MAX_AGE -u QUOTA_AXI_SNAPSHOT \
-      "CLAUDE_CONFIG_DIR=$root" quota-axi --provider claude --profile-only --json --no-credential-refresh \
-      2>/dev/null </dev/null) || :
+    [ "$declared" != ordinary ] || root=${HOME:+$HOME/.claude}
+    [ -z "$root" ] ||
+      pinned=$(fm_quota_launch_read "CLAUDE_CONFIG_DIR=$root" -- --provider claude --profile-only) || pinned=
     printf '%s\n' "$pinned" | fm_quota_json_valid || pinned=
+    [ -n "$pinned" ] ||
+      FM_QUOTA_LAUNCH_SNAPSHOT_NOTES="${FM_QUOTA_LAUNCH_SNAPSHOT_NOTES:+$FM_QUOTA_LAUNCH_SNAPSHOT_NOTES }claude=pinned-read-failed"
+  else
+    FM_QUOTA_LAUNCH_SNAPSHOT_NOTES="${FM_QUOTA_LAUNCH_SNAPSHOT_NOTES:+$FM_QUOTA_LAUNCH_SNAPSHOT_NOTES }claude=unmatched-login"
   fi
-  if ! printf '%s\n' "$snapshot" | fm_quota_json_valid; then
-    printf '%s\n' "$snapshot"
-    return 0
-  fi
-  [ -n "$pinned" ] ||
-    echo "quota-gate: provider=claude quota=stale reason=unmatched-login" >&2
   printf '%s\n' "$snapshot" | jq -c --argjson pinned "${pinned:-null}" '
     . as $all |
     [$pinned.providers[]? | select(.provider == "claude") |

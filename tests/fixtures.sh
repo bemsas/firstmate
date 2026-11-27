@@ -405,6 +405,10 @@ fm_test_make_spawn_fakebin() {
   fakebin=$(fm_fakebin "$dir")
   fm_test_fake_tmux_spawn "$fakebin"
   fm_fake_exit0 "$fakebin" treehouse "$@"
+  # The launch quota gate reads a pinned login through quota-axi; no reading
+  # keeps every spawn suite off the installed tool and any real login.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/quota-axi"
+  chmod +x "$fakebin/quota-axi"
   printf '%s\n' "$fakebin"
 }
 

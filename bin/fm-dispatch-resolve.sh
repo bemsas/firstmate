@@ -70,15 +70,19 @@
 #   AGY Claude/GPT models bind to scope claude_gpt. With no rules, it returns
 #   a non-clear result so firstmate keeps using the existing intake.
 #
-# Account scope: the snapshot is read fresh, and its rows are those of the
-#   login a launch from this home would spend (bin/fm-quota-launch-lib.sh,
-#   fm_quota_launch_snapshot). A Claude pin that cannot be read, or a declared
-#   Claude account list, leaves Claude unmeasured rather than judged on the
-#   ambient login. A missing, slow, failed, or invalid read, or any candidate
-#   left unranked, adds a "quota: stale" line. A provider row labelled fresh
-#   is still unmeasured when its own refresh time is missing, unbound, or
-#   outside the weekly window; the snapshot's generation time is not that
-#   refresh time, and such a row never excludes a profile.
+# Account scope: the snapshot is read fresh with quota-axi --full --json
+#   --no-credential-refresh, and its rows are those of the login a launch from
+#   this home would spend (bin/fm-quota-launch-lib.sh, fm_quota_launch_snapshot).
+#   A Claude pin that cannot be read, or a declared Claude account list, leaves
+#   Claude unmeasured rather than judged on the ambient login, and an
+#   unresolvable Pi pin leaves every Pi lane unmeasured. A missing, slow,
+#   failed, or invalid read, or any candidate left unranked, adds a
+#   "quota: stale" line. A provider row labelled fresh is still unmeasured when
+#   its own refresh time is missing, unbound, or outside the weekly window, and
+#   a scope whose bounding window has reset is unknown while the row's other
+#   scopes still rank; the snapshot's generation time is not that refresh time,
+#   and such a row or scope never excludes a profile. One stale line is logged
+#   for each unranked candidate; another provider's state is never reported.
 #
 # Shared-quota opt-out: an optional top-level "shared_quota": true in the
 #   rules file declares this home draws every provider's usage from one single
@@ -672,20 +676,26 @@ if [ "$SHARED_QUOTA" = true ]; then
   SQ=true
 else
   command -v quota-axi >/dev/null 2>&1 || emit_stale_quota "quota-axi not installed" quota-axi-missing
-  fm_quota_launch_snapshot "$CONFIG" > "$QUOTA" || emit_stale_quota "quota-axi --json failed" read-failed
+  # Not a command substitution: the snapshot leaves its per-provider notes in
+  # FM_QUOTA_LAUNCH_SNAPSHOT_NOTES for the candidate report below.
+  fm_quota_launch_snapshot "$CONFIG" > "$QUOTA" || emit_stale_quota "quota-axi --json timed out" read-timeout
+  grep -q '[^[:space:]]' "$QUOTA" || emit_stale_quota "quota-axi --json failed" read-failed
   fm_quota_json_valid < "$QUOTA" ||
     emit_stale_quota "quota-axi --json returned an invalid snapshot" read-failed
-  # Stale or reset figures bound nothing: such a row is unmeasured, never a
-  # reason to exclude a profile. A fresh label with no usable provider refresh
-  # time is one of those rows.
-  if jq -e "$FM_QUOTA_ROW_JQ"'any(.providers[]; quota_row_stale(.))' "$QUOTA" >/dev/null 2>&1; then
-    STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}" \
-      fm_quota_launch_report "${TASK_ID:--}" - '' stale reason=reading-not-fresh
-    CURRENT=$(jq -c "$FM_QUOTA_ROW_JQ"'.providers |= map(if quota_row_stale(.)
-      then .quotaSemantics = {status: "unknown", effectiveAvailability: []} else . end)' "$QUOTA") ||
-      emit_stale_quota "quota-axi --json returned an invalid snapshot" read-failed
-    printf '%s\n' "$CURRENT" > "$QUOTA"
-  fi
+  # Stale or reset figures bound nothing: such a row, or such a scope, is
+  # unmeasured, never a reason to exclude a profile. A fresh label with no
+  # usable provider refresh time is one of those rows. Each row and scope is
+  # judged alone, so an unrelated provider's failure leaves the others' figures
+  # in force, and only a candidate it concerns is reported below.
+  CURRENT=$(jq -c "$FM_QUOTA_ROW_JQ"'.providers |= map(
+      if quota_row_stale(.) then
+        .quotaSemantics = {status: "unknown", effectiveAvailability: []} | .fmStale = "reading-not-fresh"
+      else . as $row |
+        .quotaSemantics.effectiveAvailability |= map(
+          if quota_scope_stale($row; .) then {scope, status: "unknown", fmStale: "reset-passed"} else . end)
+      end)' "$QUOTA") ||
+    emit_stale_quota "quota-axi --json returned an invalid snapshot" read-failed
+  printf '%s\n' "$CURRENT" > "$QUOTA"
 fi
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
@@ -852,6 +862,29 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
       end
     end
   end') || emit_error "resolution failed"
+
+# One stale line per unranked candidate, naming the reason its quota could not
+# rank it: a snapshot note for its provider, a stale row or scope, or no row.
+if [ "$SQ" = false ]; then
+  while read -r stale_harness stale_provider stale_reason; do
+    [ -n "$stale_reason" ] || continue
+    STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}" \
+      fm_quota_launch_report "${TASK_ID:--}" "$stale_harness" "$stale_provider" stale "reason=$stale_reason"
+  done < <(jq -r --slurpfile quota "$QUOTA" --arg notes "${FM_QUOTA_LAUNCH_SNAPSHOT_NOTES:-}" "$FM_QUOTA_ROW_JQ"'
+    ($quota[0]) as $q |
+    ($notes | split(" ") | map(select(contains("=")) | split("=") | {(.[0]): .[1]}) | add // {}) as $note |
+    def word: tostring | if test("^[a-z0-9-]+$") then . else "-" end;
+    [.candidates[]? | select(.unranked) | . as $c |
+      (($c.provider // "-") | word) as $p |
+      (($c.profile.harness // "-") | word) as $h |
+      quota_row($q; $c.provider; quota_lane($c.profile.harness; $c.profile.model)) as $row |
+      "\($h) \($p) " + (
+        if $note[$p] then $note[$p]
+        elif $row == null then "no-matching-row"
+        elif $row.fmStale then "reading-not-fresh"
+        elif any($row.quotaSemantics.effectiveAvailability[]?; .fmStale and .scope == $c.scope) then "reset-passed"
+        else "unmeasured" end)] | unique[]' <<<"$RESULT" 2>/dev/null)
+fi
 
 TEXT=$(jq -r '
   def flat: tostring | gsub("[\t\r\n]"; " ");

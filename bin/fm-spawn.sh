@@ -552,6 +552,7 @@
 #   Every launch reads the selected login's quota fresh on this host, including
 #   the launch half of a relaunch that goes through spawn, and refuses only on
 #   current exhaustion of a comparable reading. Any other result launches.
+#   bin/fm-control.sh relaunch asks the same gate before it stops the agent.
 #   bin/fm-quota-launch-lib.sh and docs/configuration.md "Launch quota gate"
 #   own the contract.
 # Claude account list (config/claude-accounts, --account <entry>):

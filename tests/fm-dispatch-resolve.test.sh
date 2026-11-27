@@ -181,8 +181,15 @@ if [ -n "${FAKE_CANARY_FILE:-}" ] && env | grep -qF -- "$(cat "$FAKE_CANARY_FILE
 fi
 printf '%s\n' "$*" >> "${QUOTA_AXI_CALLS:?}"
 [ "${FAKE_QUOTA_FAIL:-0}" = 1 ] && exit 1
-[ "${1:-}" = --json ] || exit 2
-cat "${QUOTA_AXI_FIXTURE:?}"
+case " $* " in *' --json '*) ;; *) exit 2 ;; esac
+# The installed renderer's tiers: only --full (or a reused reading) keeps
+# state.refreshedAt, so a lean live --json row carries no refresh time.
+case " $* " in
+  *' --full '*) cat "${QUOTA_AXI_FIXTURE:?}" ;;
+  *) jq -c '.providers |= map(if (.state | type) == "object" and (.state.reused != true)
+       then .state |= del(.refreshedAt) else . end)' "${QUOTA_AXI_FIXTURE:?}" 2>/dev/null ||
+     cat "${QUOTA_AXI_FIXTURE:?}" ;;
+esac
 SH
 chmod +x "$FAKEBIN/quota-axi"
 
@@ -1796,6 +1803,10 @@ cat > "$SCHEMA6" <<'JSON'
   ]
 }
 JSON
+# quota-axi stamps every row with its reading state; these rows are fresh now.
+jq --arg refreshed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  '.providers |= map(.state //= {status: "fresh", stale: false, refreshedAt: $refreshed})' \
+  "$SCHEMA6" > "$SCHEMA6.tmp" && mv "$SCHEMA6.tmp" "$SCHEMA6"
 cat > "$RESPONSE" <<'JSON'
 { "model": "jev-1.13.0",
   "answers": { "rule": { "type": "choice", "choice": "rule_1", "confidence": 0.9,
@@ -1811,7 +1822,7 @@ assert_contains "$out" 'candidate: pi:openai-codex-work/gpt-5.6-terra  provider=
 assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at all_models' "the sibling lane reads its own exhausted row"
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  -> eligible, unranked: provider codex has no quota row for account codex-home: disclosed uncertainty' "native Codex never infers an account from a Pi lane"
 assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex-work/gpt-5.6-terra'" "the lane with headroom is chosen"
-assert_equals '--json' "$(cat "$LOG/quota-axi.calls")" "schema 6 needs one quota-axi --json read"
+assert_equals '--full --json --no-credential-refresh' "$(cat "$LOG/quota-axi.calls")" "schema 6 needs one quota-axi --json read"
 
 SCHEMA6_NATIVE="$TMP_ROOT/schema6-native.json"
 jq '
@@ -1891,7 +1902,7 @@ reset_log
 write_response "$RESPONSE" rule_4 0.9
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 0 "$code" "quota-axi path exits 0"
-assert_equals '--json' "$(cat "$LOG/quota-axi.calls")" "quota-axi --json is called exactly once"
+assert_equals '--full --json --no-credential-refresh' "$(cat "$LOG/quota-axi.calls")" "quota-axi --json is called exactly once"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "quota-axi snapshot drives the argmax"
 reset_log
 TYPESAFE_API_KEY=$KEY FAKE_QUOTA_FAIL=1 run code out err "$BRIEF"

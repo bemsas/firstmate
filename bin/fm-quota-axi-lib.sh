@@ -26,20 +26,30 @@ FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 # Prepend them to a consumer's program:
 #   quota_lane($harness; $model)   the candidate's account key, or "" when none
 #                                  is identified by the contract.
-#   quota_reset_passed($row)       true when any reset time the row reports is
-#                                  past or unreadable.
-#   quota_refresh_unusable($row)   true when that row's own refresh time is
-#                                  missing, unbound, unreadable, or outside the
-#                                  trailing weekly window. Snapshot generatedAt
+#   quota_row_stale($row)          true when the row's own reading is not
+#                                  comparable: no state object, a non-fresh
+#                                  status, the stale flag, or an unusable
+#                                  state.refreshedAt (missing, unbound,
+#                                  unreadable, in the future, or older than the
+#                                  trailing weekly window). Snapshot generatedAt
 #                                  is a different clock and is never consulted.
-#   quota_row_stale($row)          true when a stated reading is non-fresh,
-#                                  flagged stale, or has an unusable refresh
-#                                  time, or when a reset has passed. Such
-#                                  figures bound nothing. A row with no state
-#                                  object is not judged by the refresh clock.
+#                                  Only `--full --json` (or a reused reading)
+#                                  carries state.refreshedAt; a lean live
+#                                  `--json` row omits it and reads as stale.
+#   quota_scope_stale($row; $ea)   true when a window bounding that one
+#                                  effectiveAvailability entry (its boundedBy
+#                                  and limitingWindowIds, else every window
+#                                  the row reports) has a reset that is past
+#                                  or unreadable, or started after the row's
+#                                  refresh time. Other scopes stay comparable.
 #   quota_row($snapshot; $provider; $lane)
 #                                  the one provider row the candidate binds to,
-#                                  or null; schema 5 ignores $lane.
+#                                  or null. With a lane and rows that publish
+#                                  accountKeys (every quota-axi schema 5 and 6
+#                                  row), it is the single row whose accountKeys
+#                                  contains the lane, else null. Without
+#                                  accountKeys, schema 6 matches accountKey and
+#                                  then "default", and schema 5 takes the row.
 # shellcheck disable=SC2016,SC2034  # jq program text, not shell expansion; read by the sourcing consumers
 # The refresh horizon is seven days (the weekly window) plus two minutes of
 # future clock skew. A labelled-fresh row older than that is not evidence of
@@ -55,32 +65,39 @@ FM_QUOTA_ROW_JQ='
   def quota_refresh_horizon: 604800;
   def quota_refresh_skew: 120;
   def quota_refresh_epoch($row):
-    ([$row.state.refreshedAt?, $row.refreshedAt?] | map(select(type == "string" and . != "")) | first // null) as $t |
+    ($row.state.refreshedAt? | if type == "string" and . != "" then . else null end) as $t |
     if $t == null then null
     else ((try ($t | quota_epoch) catch null) // null)
     end;
   def quota_refresh_unusable($row):
     quota_refresh_epoch($row) as $e |
     $e == null or $e > (now + quota_refresh_skew) or $e < (now - quota_refresh_horizon);
-  def quota_reset_passed($row):
-    [$row.windows[]?.resetsAt?, $row.quotaSemantics.effectiveAvailability[]?.resetsAt?] |
-    map(select(. != null)) |
-    any(.[]; ((try quota_epoch catch 0) // 0) <= now);
   def quota_row_stale($row):
-    (($row | has("state")) and (
-      ($row.state.status? != "fresh") or
-      ($row.state.stale? == true) or
-      quota_refresh_unusable($row)
-    )) or
-    quota_reset_passed($row);
+    (($row.state? | type) != "object") or
+    ($row.state.status? != "fresh") or
+    ($row.state.stale? == true) or
+    quota_refresh_unusable($row);
+  def quota_scope_stale($row; $ea):
+    ([($ea.boundedBy? // [])[]?, ($ea.limitingWindowIds? // [])[]?] | map(select(type == "string"))) as $ids |
+    (quota_refresh_epoch($row) // 0) as $refreshed |
+    [$row.windows[]? | select(type == "object") |
+      select(($ids | length) == 0 or (.id as $id | any($ids[]; . == $id)))] |
+    any(.[];
+      (.resetsAt? != null and (((try (.resetsAt | quota_epoch) catch 0) // 0) <= now)) or
+      (.startsAt? != null and (((try (.startsAt | quota_epoch) catch null) // null) as $s |
+        $s != null and $s > $refreshed)));
   def quota_lane($harness; $model):
     if $harness == "codex" then "codex-home"
     elif ($harness == "pi" or $harness == "pi-signed") and (($model // "") | contains("/"))
     then ($model | split("/") | first | if . == "codex-native" then "codex-home" else . end)
     else "" end;
+  def quota_binds($lane):
+    (.accountKeys? | type) == "array" and any(.accountKeys[]; . == $lane);
   def quota_row($snapshot; $provider; $lane):
     ([$snapshot.providers[]? | select(.provider == $provider)]) as $rows |
-    if $snapshot.schemaVersion == 6 then
+    if $lane != "" and any($rows[]; (.accountKeys? | type) == "array") then
+      ([$rows[] | select(quota_binds($lane))] | if length == 1 then first else null end)
+    elif $snapshot.schemaVersion == 6 then
       (([$rows[] | select(.accountKey == $lane)] | first) //
        ([$rows[] | select(.accountKey == "default")] | first) // null)
     else ($rows | first) // null
