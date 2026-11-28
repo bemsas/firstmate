@@ -2009,6 +2009,35 @@ The relaunch checks the selected pin before stopping the current agent.
 Per-secondmate pins stay in the primary home and are not inherited or copied into the secondmate's home.
 A matching primary-side per-secondmate pin for a remote route refuses before remote launch, because its account must be configured on that host instead.
 
+## Launch quota gate
+
+`bin/fm-spawn.sh` reads the selected login's quota on this host before it creates an endpoint, worktree, or task record, including when spawn is the launch half of a relaunch.
+`bin/fm-control.sh relaunch` runs the same gate before it stops the running agent, so an exhausted replacement login leaves the agent and its record unchanged.
+That is the relaunch transaction's only quota read: its launch half carries the decision for the exact harness, model, login, and backend it covered, so no later reading can refuse after the stop.
+A launch half that selects anything else was not read, is flagged `quota=stale reason=binding-changed`, and launches.
+A direct `bin/fm-spawn.sh --relaunch` reads and gates for itself.
+`bin/fm-quota-launch-lib.sh` owns that read and the only quota verdict that stops a launch.
+Every read is `quota-axi --full --json --no-credential-refresh` with no reuse or fixture, because only the full tier keeps each provider's `state.refreshedAt` on a live reading; the account identity and source attempts it adds are dropped before anything is judged or kept.
+A launch is refused only when that reading is comparable and a scope that bounds the launch model is `exhausted_now` or at 0% remaining.
+A row is comparable only when it is labelled fresh, is flagged neither stale nor reused, and has its own timezone-bound refresh time inside the trailing seven-day window.
+Each bounding scope is then judged on its own bounding windows: a scope whose windows cannot be shown current is stale, and the other scopes stay comparable.
+`bin/fm-quota-axi-lib.sh` (`quota_scope_stale`) owns that window rule, which covers missing, unreadable, reset, newer-cycle, and elapsed windows.
+The aggregate snapshot's generation time is not the provider's refresh time, and a fresh label alone is not comparable evidence.
+A missing, unbound, unreadable, or older refresh time is a stale input and cannot stop the launch by itself.
+Every other result launches and is flagged `quota=stale`: a missing tool, a failed, slow, invalid, or non-fresh reading, a window that cannot be shown current, or a login this process cannot match.
+Only a worker pin or a declared account list can be matched to a login.
+A pinned Pi lane is matched only for an `openai-codex*` provider, to the one Codex row whose `accountKeys` contains that lane.
+An unpinned launch, a raw command, `backend=t3code`, a harness other than Claude or pinned Pi, any other Pi lane, an `ordinary` Claude pin without `HOME`, and a Pi `codex-native` lane stay unmatched, because the destination terminal selects that login and another login's usage must not refuse them.
+Named provider and model choices stay optional preferences.
+A stale reading does not switch provider family, skip sign-in, skip review, or skip host admission, and the host spend cap still runs on its own.
+The gate prints one stderr line and appends the same line to `state/quota-launch.log`.
+Neither line carries an account name, a path, or any quota-axi output, and no recorded verdict is read back.
+Dispatch intake uses the same kind of fresh full snapshot, keeps a snapshot quota-axi printed while exiting nonzero, and judges each row and scope alone.
+A stale provider row or scope, including one labelled fresh inside a newly generated snapshot, excludes no profile and is disclosed as `quota: stale`, with one log line for each candidate it leaves unranked; an unrelated provider's failure is not reported.
+An unresolvable `config/pi-account` leaves every `openai-codex*` Pi lane unmeasured at intake instead of reading the ambient Pi login, and native Codex keeps its own row.
+An invalid worker-account pin or account list is still refused before this gate runs.
+`bin/fm-quota-choose.sh` keeps its own strict selection and is not this gate.
+
 ## Claude worker sandbox
 
 The experimental per-task Claude Bash sandbox is opt-in and leaves unselected workers unchanged.

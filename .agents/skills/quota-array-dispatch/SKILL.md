@@ -24,6 +24,14 @@ Make no `quota-axi` call, apply no quota row, quota floor, runway gate, or `spen
 Account for every candidate as always, stating in place of quota evidence that quota ranking is off by home declaration.
 The declared value must be a boolean; anything else is an actionable configuration error.
 
+## Launch login and the spawn gate
+
+The [launch quota gate](../../../docs/configuration.md#launch-quota-gate) owns fresh login selection and launch refusal behavior.
+A stale reading, including one flagged reused or whose provider refresh time is missing, unbound, or outside the weekly window, or a scope whose bounding windows cannot be shown current (`quota_scope_stale` in `bin/fm-quota-axi-lib.sh`), is disclosed uncertainty and never excludes a candidate.
+Only `quota-axi --full --json` keeps a live reading's provider refresh time; a lean `--json` row omits it and reads as stale.
+The snapshot generation time is not that provider refresh time.
+When resuming after a pause, never carry an earlier quota result across a login change; let the spawn gate read again.
+
 ## Worker-side quota helper
 
 The canonical shell helper for a worker that has already performed its model-selection reasoning and now needs to pick the first viable candidate is `bin/fm-quota-choose.sh`.
@@ -91,7 +99,7 @@ A named-model or named-product scope is an additional bound for that model alone
 For provider `agy`, match Gemini models to scope `gemini` and Claude/GPT models to scope `claude_gpt`; these independent pools do not bound each other.
 Use the `gemini` row as AGY's main figure in fleet and quota summaries, labeling any third-party `claude_gpt` figure separately.
 A scope the vendor reports outside those names, such as an Antigravity tier, bounds a candidate only when its profile declares that exact scope as `quota_scope`; never infer the tier from the model name.
-Match the candidate to its `quota[]` row by that established provider, its `accountKey` when the snapshot is schema 6 (a Pi lane's auth provider id such as `openai-codex-work`, or `codex-home` for native Codex including Pi's `codex-native/` adapter, then the `default` row, else unmeasured; never a row picked by position, never rows summed across accounts), and scope; a stale, auth-required, or unmeasurable scope is named in `attention[]` instead of a fabricated number.
+Match the candidate to its `quota[]` row by that established provider, its account lane, and scope: the lane (a Pi lane's auth provider id such as `openai-codex-work`, or `codex-home` for native Codex including Pi's `codex-native/` adapter) binds the one row whose `accountKeys` contains it, a row without `accountKeys` binds by schema 6 `accountKey` and then the `default` row, and anything else is unmeasured, never a row picked by position or rows summed across accounts; a stale, auth-required, or unmeasurable scope is named in `attention[]` instead of a fabricated number.
 
 A candidate authenticates through its own tuple's surface; another harness's CLI can never gate it, and `harness=pi` with `model=xai/grok-*` is Pi using xAI rather than the standalone Grok CLI.
 `quota-axi auth --json` lists each provider's credential sources independently, so read the one source the candidate actually uses rather than collapsing a provider to a single status.

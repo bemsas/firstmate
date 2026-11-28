@@ -24,7 +24,12 @@ new_case() {
 #!/usr/bin/env bash
 printf '%s %s %s\n' "\${CLAUDE_CONFIG_DIR-unset}" "\${QUOTA_AXI_SNAPSHOT-unset}" "\$*" >> '$CASE/reads'
 [ -f "\$CLAUDE_CONFIG_DIR/quota.json" ] || exit 1
-cat "\$CLAUDE_CONFIG_DIR/quota.json"
+# The installed renderer's tiers: only --full keeps a live state.refreshedAt.
+case " \$* " in
+  *' --full '*) cat "\$CLAUDE_CONFIG_DIR/quota.json" ;;
+  *) jq -c '.providers |= map(if (.state | type) == "object" then .state |= del(.refreshedAt) else . end)' \
+       "\$CLAUDE_CONFIG_DIR/quota.json" ;;
+esac
 [ ! -f "\$CLAUDE_CONFIG_DIR/exit-1" ] || exit 1
 SH
   chmod +x "$FAKEBIN/quota-axi"
@@ -35,10 +40,12 @@ SH
 account() {
   local dir=$1 pct=$2 sp=$3 runway=${4:-through_reset} model_sp=${5:-} seconds=${6:-}
   mkdir -p "$dir"
-  jq -n --argjson pct "$pct" --argjson sp "$sp" --arg runway "$runway" --arg model_sp "$model_sp" --arg seconds "$seconds" '{
+  jq -n --argjson pct "$pct" --argjson sp "$sp" --arg runway "$runway" --arg model_sp "$model_sp" --arg seconds "$seconds" \
+    --arg refreshed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
     schemaVersion: 5,
     providers: [{
       provider: "claude",
+      state: {status: "fresh", stale: false, refreshedAt: $refreshed},
       quotaSemantics: {
         status: "known",
         effectiveAvailability: ([
@@ -91,8 +98,8 @@ test_two_accounts_print_their_own_rows() {
   assert_contains "$out" "row: $CASE/a  root=$CASE/a  scope=all_models  status=known  remaining=70%  spendPriority=0.2  runway=through_reset" "account a's own row should be shown"
   assert_contains "$out" "row: $CASE/b  root=$CASE/b  scope=all_models  status=known  remaining=60%  spendPriority=0.5  runway=through_reset" "account b's own row should be shown"
   assert_no_choice "$out"
-  assert_grep "$CASE/a unset --provider claude --profile-only --json" "$CASE/reads" "account a should be read in isolation under its own root"
-  assert_grep "$CASE/b unset --provider claude --profile-only --json" "$CASE/reads" "account b should be read in isolation under its own root"
+  assert_grep "$CASE/a unset --provider claude --profile-only --full --json --no-credential-refresh" "$CASE/reads" "account a should be read in isolation under its own root"
+  assert_grep "$CASE/b unset --provider claude --profile-only --full --json --no-credential-refresh" "$CASE/reads" "account b should be read in isolation under its own root"
   pass "each declared account prints its own quota row, read under its own root"
 }
 

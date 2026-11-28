@@ -70,6 +70,20 @@
 #   AGY Claude/GPT models bind to scope claude_gpt. With no rules, it returns
 #   a non-clear result so firstmate keeps using the existing intake.
 #
+# Account scope: the snapshot is read fresh with quota-axi --full --json
+#   --no-credential-refresh, and its rows are those of the login a launch from
+#   this home would spend (bin/fm-quota-launch-lib.sh, fm_quota_launch_snapshot).
+#   A Claude pin that cannot be read, or a declared Claude account list, leaves
+#   Claude unmeasured rather than judged on the ambient login, and an
+#   unresolvable Pi pin leaves every openai-codex* Pi lane unmeasured. A missing, slow,
+#   failed, or invalid read, or any candidate left unranked, adds a
+#   "quota: stale" line. A provider row labelled fresh is still unmeasured when
+#   its own refresh time is missing, unbound, or outside the weekly window, and
+#   a scope whose bounding windows cannot be shown current is unknown while the
+#   row's other scopes still rank; the snapshot's generation time is not that refresh time,
+#   and such a row or scope never excludes a profile. One stale line is logged
+#   for each unranked candidate; another provider's state is never reported.
+#
 # Shared-quota opt-out: an optional top-level "shared_quota": true in the
 #   rules file declares this home draws every provider's usage from one single
 #   shared budget, so per-provider quota rows do not describe what is left.
@@ -103,6 +117,7 @@
 #     preferred_provider: <family and preference or fallback decision, when applied>
 #     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
 #        (with the shared-quota opt-out: <harness>:<model> provider=.. -> eligible (quota ranking off: home declares a single shared quota))
+#     quota: stale   (an unusable quota read, or a candidate left unranked)
 #     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
 #   Task record: for <data>/<id>/brief.md, where <data> is FM_DATA_OVERRIDE,
 #   else $FM_HOME/data, every run first removes
@@ -152,6 +167,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-quota-axi-lib.sh
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
+# shellcheck source=bin/fm-quota-launch-lib.sh
+. "$SCRIPT_DIR/fm-quota-launch-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-env-lib.sh
@@ -201,7 +218,15 @@ emit_error() {
   record_task error || true
   echo "dispatch-resolve: error ($reason)" >&2
   printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
+  [ -z "${2:-}" ] || printf '  quota: %s\n' "$2"
   exit 0
+}
+# A missing or unusable quota reading: the usual error outcome, flagged and
+# logged as stale so intake carries on instead of reading it as a stop.
+emit_stale_quota() {  # <reason> <fixed code>
+  STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}" \
+    fm_quota_launch_report "${TASK_ID:--}" - '' stale "reason=$2"
+  emit_error "$1" stale
 }
 usage() {
   awk '
@@ -650,9 +675,27 @@ if [ "$SHARED_QUOTA" = true ]; then
   printf '{"providers":[]}\n' > "$QUOTA"
   SQ=true
 else
-  command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
-  quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
-  fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
+  command -v quota-axi >/dev/null 2>&1 || emit_stale_quota "quota-axi not installed" quota-axi-missing
+  # Not a command substitution: the snapshot leaves its per-provider notes in
+  # FM_QUOTA_LAUNCH_SNAPSHOT_NOTES for the candidate report below.
+  fm_quota_launch_snapshot "$CONFIG" > "$QUOTA" || emit_stale_quota "quota-axi --json timed out" read-timeout
+  grep -q '[^[:space:]]' "$QUOTA" || emit_stale_quota "quota-axi --json failed" read-failed
+  fm_quota_json_valid < "$QUOTA" ||
+    emit_stale_quota "quota-axi --json returned an invalid snapshot" read-failed
+  # Stale or reset figures bound nothing: such a row, or such a scope, is
+  # unmeasured, never a reason to exclude a profile. A fresh label with no
+  # usable provider refresh time is one of those rows. Each row and scope is
+  # judged alone, so an unrelated provider's failure leaves the others' figures
+  # in force, and only a candidate it concerns is reported below.
+  CURRENT=$(jq -c "$FM_QUOTA_ROW_JQ"'.providers |= map(
+      if quota_row_stale(.) then
+        .quotaSemantics = {status: "unknown", effectiveAvailability: []} | .fmStale = "reading-not-fresh"
+      else . as $row |
+        .quotaSemantics.effectiveAvailability |= map(
+          if quota_scope_stale($row; .) then {scope, status: "unknown", fmStale: "window-not-current"} else . end)
+      end)' "$QUOTA") ||
+    emit_stale_quota "quota-axi --json returned an invalid snapshot" read-failed
+  printf '%s\n' "$CURRENT" > "$QUOTA"
 fi
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
@@ -820,6 +863,33 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     end
   end') || emit_error "resolution failed"
 
+# One stale line per unranked candidate, naming the reason its quota could not
+# rank it: a snapshot note for its provider, a stale row or scope, or no row.
+if [ "$SQ" = false ]; then
+  while read -r stale_harness stale_provider stale_reason; do
+    [ -n "$stale_reason" ] || continue
+    STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}" \
+      fm_quota_launch_report "${TASK_ID:--}" "$stale_harness" "$stale_provider" stale "reason=$stale_reason"
+  done < <(jq -r --slurpfile quota "$QUOTA" --arg notes "${FM_QUOTA_LAUNCH_SNAPSHOT_NOTES:-}" "$FM_QUOTA_ROW_JQ"'
+    ($quota[0]) as $q |
+    ($notes | split(" ") | map(select(contains("=")) | split("=") | {(.[0]): .[1]}) | add // {}) as $note |
+    def word: tostring | if test("^[a-z0-9-]+$") then . else "-" end;
+    [.candidates[]? | select(.unranked) | . as $c |
+      (($c.provider // "-") | word) as $p |
+      (($c.profile.harness // "-") | word) as $h |
+      quota_lane($c.profile.harness; $c.profile.model) as $lane |
+      quota_row($q; $c.provider; $lane) as $row |
+      (if ($h == "pi" or $h == "pi-signed") and ($lane | test("^openai-codex(-|$)"))
+       then $note["pi-codex"] else null end) as $pi_note |
+      "\($h) \($p) " + (
+        if $pi_note then $pi_note
+        elif $note[$p] then $note[$p]
+        elif $row == null then "no-matching-row"
+        elif $row.fmStale then "reading-not-fresh"
+        elif any($row.quotaSemantics.effectiveAvailability[]?; .fmStale and .scope == $c.scope) then "window-not-current"
+        else "unmeasured" end)] | unique[]' <<<"$RESULT" 2>/dev/null)
+fi
+
 TEXT=$(jq -r '
   def flat: tostring | gsub("[\t\r\n]"; " ");
   def show($value): ($value // "-") | flat;
@@ -834,6 +904,7 @@ TEXT=$(jq -r '
   (if .note then "  note: \(.note | flat)" else empty end),
   (if .preferred_provider then "  preferred_provider: \(.preferred_provider | flat)" else empty end),
   (if .unranked_note then "  note: \(.unranked_note | flat)" else empty end),
+  (if any(.candidates[]?; .unranked) then "  quota: stale" else empty end),
   (.candidates[]? | "  candidate: \(.profile.harness | flat):\(show(.profile.model))"
       + (if .provider then "  provider=\(.provider | flat)" else "" end)
       + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)

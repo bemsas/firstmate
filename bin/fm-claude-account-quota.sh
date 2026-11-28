@@ -6,13 +6,16 @@
 #   fm-claude-account-quota.sh [--model <model>]
 #
 # For every declared entry, in file order, runs
-#   CLAUDE_CONFIG_DIR=<root> quota-axi --provider claude --profile-only --json
+#   CLAUDE_CONFIG_DIR=<root> quota-axi --provider claude --profile-only --full --json --no-credential-refresh
 # where <root> is the entry's own directory, or ~/.claude for `ordinary`.
 # --profile-only reads only that root's credential file (no Keychain, refresh,
 # fallback, or cache), so each row is that account's own quota and never the
 # ambient account's; a root quota-axi cannot read there, such as an `ordinary`
 # login kept in the macOS Keychain, is reported unmeasured. QUOTA_AXI_SNAPSHOT
-# is removed from each read so a fixture for one account cannot answer for all.
+# and QUOTA_AXI_MAX_AGE are removed from each read so neither a fixture nor a
+# reused reading for one account can answer for all. --full is the live tier
+# that keeps the provider's state.refreshedAt; the account identity and source
+# attempts it adds are dropped before the reading is recorded.
 # quota-axi exits nonzero when it cannot measure a provider, for example when
 # the vendor rate-limits the quota endpoint, yet still prints a valid snapshot
 # naming that state; such a snapshot is kept, so the account is reported
@@ -35,6 +38,9 @@
 #   runway's projectionConfidence, the default TOON's confidence column.
 #   Uncertainty names a failed or invalid read, quota-axi's own unknown or
 #   rate-limited state and reason, a missing claude row, or no applicable scope.
+#   A reading that is not fresh or without a usable provider refresh time
+#   prints no figures, and neither does a scope whose own bounding windows
+#   cannot be shown current; the account's other scopes still print.
 #   A missing quota-axi prints `error: quota-axi not installed` in the block.
 #   Readings exit 0. Exit 2 for a usage error, an absent list, or a list that
 #   bin/fm-worker-account-lib.sh refuses, which is actionable, never selected
@@ -103,8 +109,9 @@ while IFS= read -r entry; do
   root=$entry
   [ "$entry" != ordinary ] || root="${HOME:?HOME is required to measure the ordinary account}/.claude"
   error=
-  if fm_run_timed "$FM_CLAUDE_ACCOUNT_QUOTA_SECONDS" env -u QUOTA_AXI_SNAPSHOT CLAUDE_CONFIG_DIR="$root" \
-      quota-axi --provider claude --profile-only --json > "$WORK/snapshot.json" 2>/dev/null </dev/null; then
+  if fm_run_timed "$FM_CLAUDE_ACCOUNT_QUOTA_SECONDS" env -u QUOTA_AXI_SNAPSHOT -u QUOTA_AXI_MAX_AGE \
+      CLAUDE_CONFIG_DIR="$root" quota-axi --provider claude --profile-only --full --json --no-credential-refresh \
+      > "$WORK/snapshot.json" 2>/dev/null </dev/null; then
     fm_quota_json_valid < "$WORK/snapshot.json" || error="quota-axi returned an invalid snapshot"
   elif ! fm_quota_json_valid < "$WORK/snapshot.json"; then
     error="quota-axi could not read this account"
@@ -112,11 +119,12 @@ while IFS= read -r entry; do
   if [ -n "$error" ]; then
     jq -cn --arg account "$entry" --arg root "$root" --arg error "$error" '{account: $account, root: $root, error: $error}'
   else
-    jq -c --arg account "$entry" --arg root "$root" '{account: $account, root: $root, snapshot: .}' "$WORK/snapshot.json"
+    jq -c --arg account "$entry" --arg root "$root" \
+      '{account: $account, root: $root, snapshot: (.providers |= map(del(.account, .attempts)))}' "$WORK/snapshot.json"
   fi >> "$WORK/accounts.jsonl" || die "cannot record the quota reading for $entry"
 done <<< "$LISTED"
 
-jq -rs --arg model "$MODEL" '
+jq -rs --arg model "$MODEL" "$FM_QUOTA_ROW_JQ"'
   def flat: tostring | gsub("[\t\r\n]"; " ");
   def show($value): ($value // "-") | flat;
   def bare($m): ($m | split("/") | last);
@@ -133,11 +141,18 @@ jq -rs --arg model "$MODEL" '
       ([.snapshot.providers[]? | select(.provider == "claude")] | first) as $row |
       if $row == null then "\($head)  uncertainty: no claude quota row"
       else
-        applicable($row) as $rows |
+        applicable($row) as $found |
+        quota_row_stale($row) as $stale |
+        (if $stale then [] else [$found[] | select(quota_scope_stale($row; .) | not)] end) as $rows |
+        (if $row.state.status then " (\($row.state.status | flat): \(show($row.state.error)))" else "" end) as $why |
         (if (["known", "partial"] | index($row.quotaSemantics.status)) == null then
-          "\($head)  uncertainty: quota \(show($row.quotaSemantics.status))\(if $row.state.status then " (\($row.state.status | flat): \(show($row.state.error)))" else "" end)"
+          "\($head)  uncertainty: quota \(show($row.quotaSemantics.status))\($why)"
+         elif $stale then "\($head)  uncertainty: quota reading is stale or not current\($why)"
          else empty end),
-        (if ($rows | length) == 0 then "\($head)  uncertainty: no applicable quota scope" else empty end),
+        (if ($found | length) == 0 then "\($head)  uncertainty: no applicable quota scope" else empty end),
+        (if $stale then empty else
+          ($found[] | select(quota_scope_stale($row; .)) |
+            "\($head)  scope=\(.scope | flat)  uncertainty: quota reading is stale or not current") end),
         ($rows[] | "\($head)  scope=\(.scope | flat)  status=\(show(.status))  remaining=\(show(.effectivePercentRemaining))%  spendPriority=\(show(.selection.spendPriority))  runway=\(show(.runway.status))"
           + (if .runway.usableRunwaySeconds != null or .runway.status == "projected_exhaustion"
              then "  usableRunwaySeconds=\(show(.runway.usableRunwaySeconds))" else "" end)

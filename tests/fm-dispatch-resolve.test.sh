@@ -86,22 +86,23 @@ JSON
 cp "$BASE_RULES" "$RULES"
 
 write_quota() {  # <path> <cursor spendPriority> [<claude all_models spendPriority>]
-  local path=$1 cursor=$2 claude=${3:--0.4627}
+  local path=$1 cursor=$2 claude=${3:--0.4627} refreshed
+  refreshed=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   cat > "$path" <<JSON
 {
   "generatedAt": "2030-01-01T00:00:00Z",
   "schemaVersion": 5,
   "providers": [
-    { "provider": "claude", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
+    { "provider": "claude", "state": { "status": "fresh", "refreshedAt": "$refreshed" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 79, "runway": { "status": "projected_exhaustion" }, "selection": { "spendPriority": $claude } },
       { "scope": "model:fable", "status": "known", "effectivePercentRemaining": 15, "runway": { "status": "projected_exhaustion" }, "selection": { "spendPriority": -0.79 } } ] } },
-    { "provider": "codex", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
+    { "provider": "codex", "state": { "status": "fresh", "refreshedAt": "$refreshed" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 31, "runway": { "status": "projected_exhaustion" }, "selection": { "spendPriority": -0.1649 } } ] } },
-    { "provider": "cursor", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
+    { "provider": "cursor", "state": { "status": "fresh", "refreshedAt": "$refreshed" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 91, "runway": { "status": "through_reset" }, "selection": { "spendPriority": $cursor } } ] } },
-    { "provider": "agy", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
+    { "provider": "agy", "state": { "status": "fresh", "refreshedAt": "$refreshed" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 64, "runway": { "status": "through_reset" }, "selection": { "spendPriority": 0.4 } } ] } },
-    { "provider": "google", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
+    { "provider": "google", "state": { "status": "fresh", "refreshedAt": "$refreshed" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 72, "runway": { "status": "through_reset" }, "selection": { "spendPriority": 0.3 } } ] } },
     { "provider": "kimi", "state": { "status": "unknown" }, "quotaSemantics": { "status": "unknown", "effectiveAvailability": [] } }
   ]
@@ -180,8 +181,15 @@ if [ -n "${FAKE_CANARY_FILE:-}" ] && env | grep -qF -- "$(cat "$FAKE_CANARY_FILE
 fi
 printf '%s\n' "$*" >> "${QUOTA_AXI_CALLS:?}"
 [ "${FAKE_QUOTA_FAIL:-0}" = 1 ] && exit 1
-[ "${1:-}" = --json ] || exit 2
-cat "${QUOTA_AXI_FIXTURE:?}"
+case " $* " in *' --json '*) ;; *) exit 2 ;; esac
+# The installed renderer's tiers: only --full (or a reused reading) keeps
+# state.refreshedAt, so a lean live --json row carries no refresh time.
+case " $* " in
+  *' --full '*) cat "${QUOTA_AXI_FIXTURE:?}" ;;
+  *) jq -c '.providers |= map(if (.state | type) == "object" and (.state.reused != true)
+       then .state |= del(.refreshedAt) else . end)' "${QUOTA_AXI_FIXTURE:?}" 2>/dev/null ||
+     cat "${QUOTA_AXI_FIXTURE:?}" ;;
+esac
 SH
 chmod +x "$FAKEBIN/quota-axi"
 
@@ -1328,10 +1336,10 @@ assert_contains "$out" "  profile: --harness 'agy' --model 'gemini-4-argon'" "AG
 pass "AGY quota pools bind by model family without third-party exhaustion bounding Gemini"
 
 write_agy_tiers() {  # <path> <gemini row JSON or ""> <claude_gpt row JSON or "">
-  jq -n --argjson g "${2:-null}" --argjson c "${3:-null}" '{
+  jq -n --arg refreshed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson g "${2:-null}" --argjson c "${3:-null}" '{
     generatedAt: "2030-01-01T00:00:00Z",
     schemaVersion: 5,
-    providers: [{ provider: "agy", state: { status: "fresh" }, quotaSemantics: { status: "known", effectiveAvailability: ([$g, $c] | map(select(. != null))) } }]
+    providers: [{ provider: "agy", state: { status: "fresh", refreshedAt: $refreshed }, quotaSemantics: { status: "known", effectiveAvailability: ([$g, $c] | map(select(. != null))) } }]
   }' > "$1"
 }
 AGY_GEMINI='{"scope":"gemini","status":"known","effectivePercentRemaining":80,"runway":{"status":"through_reset"},"selection":{"spendPriority":0.5}}'
@@ -1795,6 +1803,10 @@ cat > "$SCHEMA6" <<'JSON'
   ]
 }
 JSON
+# quota-axi stamps every row with its reading state; these rows are fresh now.
+jq --arg refreshed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  '.providers |= map(.state //= {status: "fresh", stale: false, refreshedAt: $refreshed})' \
+  "$SCHEMA6" > "$SCHEMA6.tmp" && mv "$SCHEMA6.tmp" "$SCHEMA6"
 cat > "$RESPONSE" <<'JSON'
 { "model": "jev-1.13.0",
   "answers": { "rule": { "type": "choice", "choice": "rule_1", "confidence": 0.9,
@@ -1810,7 +1822,7 @@ assert_contains "$out" 'candidate: pi:openai-codex-work/gpt-5.6-terra  provider=
 assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at all_models' "the sibling lane reads its own exhausted row"
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  -> eligible, unranked: provider codex has no quota row for account codex-home: disclosed uncertainty' "native Codex never infers an account from a Pi lane"
 assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex-work/gpt-5.6-terra'" "the lane with headroom is chosen"
-assert_equals '--json' "$(cat "$LOG/quota-axi.calls")" "schema 6 needs one quota-axi --json read"
+assert_equals '--full --json --no-credential-refresh' "$(cat "$LOG/quota-axi.calls")" "schema 6 needs one quota-axi --json read"
 
 SCHEMA6_NATIVE="$TMP_ROOT/schema6-native.json"
 jq '
@@ -1890,7 +1902,7 @@ reset_log
 write_response "$RESPONSE" rule_4 0.9
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 0 "$code" "quota-axi path exits 0"
-assert_equals '--json' "$(cat "$LOG/quota-axi.calls")" "quota-axi --json is called exactly once"
+assert_equals '--full --json --no-credential-refresh' "$(cat "$LOG/quota-axi.calls")" "quota-axi --json is called exactly once"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "quota-axi snapshot drives the argmax"
 reset_log
 TYPESAFE_API_KEY=$KEY FAKE_QUOTA_FAIL=1 run code out err "$BRIEF"
